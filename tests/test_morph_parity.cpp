@@ -190,11 +190,9 @@ int main() {
     assert(loaded_activity->subject_id == video->id);
 
     session.clear();
-    loaded_activity = session.query<MorphActivity>()
-        .include<^^MorphActivity::subject>()
-        .first();
-    assert(loaded_activity);
-    assert(loaded_activity->subject.loaded());
+    loaded_activity = session.find<MorphActivity>(activity_id);
+    assert(loaded_activity && !loaded_activity->subject.loaded());
+    loaded_activity->subject.load();
     auto loaded_video = loaded_activity->subject.get_as<MorphSubjectVideo>();
     assert(loaded_video && loaded_video->title == "C++26 demo");
 
