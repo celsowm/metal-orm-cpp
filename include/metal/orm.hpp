@@ -1,10 +1,14 @@
 #pragma once
 
+#include "metal/dml.hpp"
 #include "metal/execution.hpp"
+#include "metal/identity_map.hpp"
 #include "metal/query.hpp"
 #include "metal/reflection.hpp"
+#include "metal/relation_change_processor.hpp"
+#include "metal/runtime_types.hpp"
+#include "metal/unit_of_work.hpp"
 
-#include <algorithm>
 #include <functional>
 #include <memory>
 #include <stdexcept>
@@ -12,58 +16,10 @@
 #include <string_view>
 #include <typeindex>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace metal {
-
-class IdentityMap {
-public:
-    template <reflect::Entity T>
-    std::shared_ptr<T> get(const Value& pk) const {
-        auto bucket = buckets_.find(std::type_index(typeid(T)));
-        if (bucket == buckets_.end()) return {};
-        auto item = bucket->second.find(value_key(pk));
-        if (item == bucket->second.end()) return {};
-        return std::static_pointer_cast<T>(item->second.lock());
-    }
-
-    template <reflect::Entity T>
-    void put(const Value& pk, const std::shared_ptr<T>& entity) {
-        buckets_[std::type_index(typeid(T))][value_key(pk)] = entity;
-    }
-
-    template <reflect::Entity T>
-    void erase(const Value& pk) {
-        auto bucket = buckets_.find(std::type_index(typeid(T)));
-        if (bucket != buckets_.end()) bucket->second.erase(value_key(pk));
-    }
-
-    void clear() { buckets_.clear(); }
-
-private:
-    std::unordered_map<std::type_index, std::unordered_map<std::string, std::weak_ptr<void>>> buckets_;
-};
-
-enum class EntityStatus { New, Managed, Removed };
-
-struct TrackedEntity {
-    std::shared_ptr<void> object;
-    EntityStatus status{EntityStatus::Managed};
-    std::string table;
-    std::string primary_key;
-    std::unordered_map<std::string, Value> original;
-    std::function<std::unordered_map<std::string, Value>()> snapshot;
-    std::function<Value()> get_pk;
-    std::function<void(const Value&)> set_pk;
-    bool generated_pk{false};
-    std::function<void()> register_identity;
-    std::function<void(const Value&)> erase_identity;
-    std::function<void()> prepare_relations;
-    std::function<void()> flush_relations;
-    std::function<void()> accept_relations;
-};
 
 class Session;
 
@@ -111,7 +67,10 @@ public:
     explicit Session(
         std::shared_ptr<DbExecutor> executor,
         std::shared_ptr<Dialect> dialect = std::make_shared<SQLiteDialect>())
-        : executor_(std::move(executor)), dialect_(std::move(dialect)) {}
+        : executor_(std::move(executor)),
+          dialect_(std::move(dialect)),
+          unit_of_work_(*executor_, *dialect_),
+          relation_changes_(unit_of_work_) {}
 
     template <reflect::Entity T>
     EntityQuery<T> query() { return EntityQuery<T>{*this}; }
@@ -134,8 +93,8 @@ public:
     void persist(const std::shared_ptr<T>& entity) {
         static_assert(reflect::validate_mapping<T>());
         if (!entity) throw std::invalid_argument("MetalORM: cannot persist a null entity");
-        if (auto it = tracked_.find(entity.get()); it != tracked_.end()) {
-            if (it->second.status == EntityStatus::Removed) it->second.status = EntityStatus::Managed;
+        if (auto* tracked = unit_of_work_.find(entity.get())) {
+            if (tracked->status == EntityStatus::Removed) tracked->status = EntityStatus::Managed;
             return;
         }
         track<T>(entity, EntityStatus::New);
@@ -145,44 +104,23 @@ public:
     void remove(const std::shared_ptr<T>& entity) {
         static_assert(reflect::validate_mapping<T>());
         if (!entity) return;
-        if (!tracked_.contains(entity.get())) track<T>(entity, EntityStatus::Managed);
-        tracked_.at(entity.get()).status = EntityStatus::Removed;
+        if (!unit_of_work_.contains(entity.get())) track<T>(entity, EntityStatus::Managed);
+        if (auto* tracked = unit_of_work_.find(entity.get())) tracked->status = EntityStatus::Removed;
+    }
+
+    void flush() {
+        unit_of_work_.flush();
     }
 
     void commit() {
         executor_->execute("BEGIN;");
         try {
-            prepare_relation_cascades();
-
-            auto keys = tracked_keys();
-            for (void* key : keys) {
-                auto it = tracked_.find(key);
-                if (it == tracked_.end()) continue;
-                auto& tracked = it->second;
-                switch (tracked.status) {
-                    case EntityStatus::New: flush_insert(tracked); break;
-                    case EntityStatus::Managed: flush_update_if_dirty(tracked); break;
-                    case EntityStatus::Removed: flush_delete(tracked); break;
-                }
-            }
-
-            keys = tracked_keys();
-            for (void* key : keys) {
-                auto it = tracked_.find(key);
-                if (it != tracked_.end() && it->second.flush_relations) {
-                    it->second.flush_relations();
-                }
-            }
-
+            relation_changes_.prepare();
+            unit_of_work_.flush();
+            relation_changes_.process();
+            unit_of_work_.flush();
             executor_->execute("COMMIT;");
-
-            keys = tracked_keys();
-            for (void* key : keys) {
-                auto it = tracked_.find(key);
-                if (it != tracked_.end() && it->second.accept_relations) {
-                    it->second.accept_relations();
-                }
-            }
+            relation_changes_.accept();
         } catch (...) {
             try { executor_->execute("ROLLBACK;"); } catch (...) {}
             throw;
@@ -190,40 +128,20 @@ public:
     }
 
     void clear() {
-        tracked_.clear();
+        unit_of_work_.clear();
         identity_map_.clear();
+        relation_changes_.reset();
     }
 
     DbExecutor& executor() noexcept { return *executor_; }
     const Dialect& dialect() const noexcept { return *dialect_; }
+    IdentityMap& identity_map() noexcept { return identity_map_; }
+    UnitOfWork& unit_of_work() noexcept { return unit_of_work_; }
+    RelationChangeProcessor& relation_changes() noexcept { return relation_changes_; }
 
 private:
     template <reflect::Entity T>
     friend class EntityQuery;
-
-    std::vector<void*> tracked_keys() const {
-        std::vector<void*> keys;
-        keys.reserve(tracked_.size());
-        for (const auto& [key, _] : tracked_) keys.push_back(key);
-        return keys;
-    }
-
-    void prepare_relation_cascades() {
-        std::unordered_set<void*> prepared;
-        while (prepared.size() < tracked_.size()) {
-            auto keys = tracked_keys();
-            bool progressed = false;
-            for (void* key : keys) {
-                if (prepared.contains(key)) continue;
-                auto it = tracked_.find(key);
-                if (it == tracked_.end()) continue;
-                prepared.insert(key);
-                progressed = true;
-                if (it->second.prepare_relations) it->second.prepare_relations();
-            }
-            if (!progressed) break;
-        }
-    }
 
     template <reflect::Entity T>
     std::unordered_map<std::string, Value> snapshot_of(const T& entity) const {
@@ -272,7 +190,7 @@ private:
         tracked.accept_relations = [weak = std::weak_ptr<T>(entity)] {
             if (auto locked = weak.lock()) accept_collections(*locked);
         };
-        tracked_[entity.get()] = std::move(tracked);
+        unit_of_work_.track(entity.get(), std::move(tracked));
 
         const auto pk = reflect::primary_key_value(*entity);
         if (!is_empty_generated_value(pk)) identity_map_.put<T>(pk, entity);
@@ -497,15 +415,9 @@ private:
                     if constexpr (mapping::cascades_persist(Traits::cascade)) {
                         for (const auto& target : values._metal_added()) {
                             if (target && is_empty_generated_value(reflect::primary_key_value(*target)) &&
-                                !tracked_.contains(target.get())) {
+                                !unit_of_work_.contains(target.get())) {
                                 persist<Target>(target);
                             }
-                        }
-                    }
-                    if constexpr (Traits::kind == mapping::relation_kind::has_many &&
-                                  mapping::cascades_remove(Traits::cascade)) {
-                        for (const auto& target : values._metal_removed()) {
-                            if (target) remove<Target>(target);
                         }
                     }
                 }
@@ -564,27 +476,29 @@ private:
                 throw std::runtime_error("MetalORM: attached has_many target is not persisted; enable cascade persist or persist it explicitly");
             }
             (*target).[:target_fk:] = from_value<ForeignKey>(root_key);
-            const std::string sql = "UPDATE " + dialect_->quote_identifier(reflect::table_name<Target>()) +
-                " SET " + dialect_->quote_identifier(reflect::column_name<target_fk>()) + " = " + dialect_->placeholder(1) +
-                " WHERE " + dialect_->quote_identifier(reflect::column_name<target_pk>()) + " = " + dialect_->placeholder(2) + ";";
-            executor_->execute(sql, {root_key, target_key});
-            refresh_snapshot(target.get());
+            const auto compiled = UpdateQueryBuilder{reflect::table_name<Target>()}
+                .set({DmlAssignment{reflect::column_name<target_fk>(), root_key}})
+                .where_eq(reflect::column_name<target_pk>(), target_key)
+                .compile(*dialect_);
+            executor_->execute(compiled.sql, compiled.params);
+            unit_of_work_.refresh_snapshot(target.get());
         }
 
-        if constexpr (!mapping::cascades_remove(Traits::cascade)) {
-            for (const auto& target : values._metal_removed()) {
-                if constexpr (is_optional_v<ForeignKey>) {
-                    const Value target_key = to_value((*target).[:target_pk:]);
-                    (*target).[:target_fk:] = std::nullopt;
-                    const std::string sql = "UPDATE " + dialect_->quote_identifier(reflect::table_name<Target>()) +
-                        " SET " + dialect_->quote_identifier(reflect::column_name<target_fk>()) + " = NULL" +
-                        " WHERE " + dialect_->quote_identifier(reflect::column_name<target_pk>()) + " = " + dialect_->placeholder(1) + ";";
-                    executor_->execute(sql, {target_key});
-                    refresh_snapshot(target.get());
-                } else {
-                    throw std::runtime_error(
-                        "MetalORM: detaching from a non-nullable has_many requires cascade remove");
-                }
+        for (const auto& target : values._metal_removed()) {
+            if constexpr (mapping::cascades_remove(Traits::cascade)) {
+                remove<Target>(target);
+            } else if constexpr (is_optional_v<ForeignKey>) {
+                const Value target_key = to_value((*target).[:target_pk:]);
+                (*target).[:target_fk:] = std::nullopt;
+                const auto compiled = UpdateQueryBuilder{reflect::table_name<Target>()}
+                    .set({DmlAssignment{reflect::column_name<target_fk>(), Value{nullptr}}})
+                    .where_eq(reflect::column_name<target_pk>(), target_key)
+                    .compile(*dialect_);
+                executor_->execute(compiled.sql, compiled.params);
+                unit_of_work_.refresh_snapshot(target.get());
+            } else {
+                throw std::runtime_error(
+                    "MetalORM: detaching from a non-nullable has_many requires cascade remove");
             }
         }
     }
@@ -611,97 +525,37 @@ private:
             if (is_empty_generated_value(target_key)) {
                 throw std::runtime_error("MetalORM: attached many_to_many target is not persisted; enable cascade persist or persist it explicitly");
             }
-            const std::string sql = "INSERT OR IGNORE INTO " + dialect_->quote_identifier(reflect::table_name<Pivot>()) +
-                " (" + dialect_->quote_identifier(reflect::column_name<pivot_root_fk>()) + ", " +
-                dialect_->quote_identifier(reflect::column_name<pivot_target_fk>()) + ") VALUES (" +
-                dialect_->placeholder(1) + ", " + dialect_->placeholder(2) + ");";
-            executor_->execute(sql, {root_key, target_key});
+            const auto compiled = InsertQueryBuilder{reflect::table_name<Pivot>()}
+                .values({
+                    DmlAssignment{reflect::column_name<pivot_root_fk>(), root_key},
+                    DmlAssignment{reflect::column_name<pivot_target_fk>(), target_key}
+                })
+                .on_conflict_do_nothing()
+                .compile(*dialect_);
+            executor_->execute(compiled.sql, compiled.params);
         }
 
         for (const auto& target : values._metal_removed()) {
             const Value target_key = to_value((*target).[:target_key_member:]);
-            const std::string sql = "DELETE FROM " + dialect_->quote_identifier(reflect::table_name<Pivot>()) +
-                " WHERE " + dialect_->quote_identifier(reflect::column_name<pivot_root_fk>()) + " = " + dialect_->placeholder(1) +
-                " AND " + dialect_->quote_identifier(reflect::column_name<pivot_target_fk>()) + " = " + dialect_->placeholder(2) + ";";
-            executor_->execute(sql, {root_key, target_key});
-        }
-    }
+            const auto compiled = DeleteQueryBuilder{reflect::table_name<Pivot>()}
+                .where({
+                    DmlPredicate{reflect::column_name<pivot_root_fk>(), CompareOp::Eq, root_key},
+                    DmlPredicate{reflect::column_name<pivot_target_fk>(), CompareOp::Eq, target_key}
+                })
+                .compile(*dialect_);
+            executor_->execute(compiled.sql, compiled.params);
 
-    void refresh_snapshot(void* key) {
-        auto it = tracked_.find(key);
-        if (it != tracked_.end()) it->second.original = it->second.snapshot();
-    }
-
-    void flush_insert(TrackedEntity& tracked) {
-        const auto current = tracked.snapshot();
-        std::vector<std::string> names;
-        for (const auto& [name, value] : current) {
-            if (name == tracked.primary_key && tracked.generated_pk && is_empty_generated_value(value)) continue;
-            names.push_back(name);
+            if constexpr (mapping::cascades_remove(Traits::cascade)) {
+                remove<Target>(target);
+            }
         }
-        std::sort(names.begin(), names.end());
-
-        std::vector<Value> params;
-        std::string sql = "INSERT INTO " + dialect_->quote_identifier(tracked.table) + " (";
-        for (std::size_t i = 0; i < names.size(); ++i) {
-            if (i) sql += ", ";
-            sql += dialect_->quote_identifier(names[i]);
-            params.push_back(current.at(names[i]));
-        }
-        sql += ") VALUES (";
-        for (std::size_t i = 0; i < names.size(); ++i) {
-            if (i) sql += ", ";
-            sql += dialect_->placeholder(i + 1);
-        }
-        sql += ");";
-
-        const auto result = executor_->execute(sql, params);
-        if (tracked.generated_pk && is_empty_generated_value(tracked.get_pk())) {
-            tracked.set_pk(Value{result.last_insert_id});
-        }
-        tracked.original = tracked.snapshot();
-        tracked.status = EntityStatus::Managed;
-        tracked.register_identity();
-    }
-
-    void flush_update_if_dirty(TrackedEntity& tracked) {
-        const auto current = tracked.snapshot();
-        std::vector<std::string> changed;
-        for (const auto& [name, value] : current) {
-            if (name == tracked.primary_key) continue;
-            auto original = tracked.original.find(name);
-            if (original == tracked.original.end() || original->second != value) changed.push_back(name);
-        }
-        if (changed.empty()) return;
-        std::sort(changed.begin(), changed.end());
-
-        std::vector<Value> params;
-        std::string sql = "UPDATE " + dialect_->quote_identifier(tracked.table) + " SET ";
-        for (std::size_t i = 0; i < changed.size(); ++i) {
-            if (i) sql += ", ";
-            sql += dialect_->quote_identifier(changed[i]) + " = " + dialect_->placeholder(i + 1);
-            params.push_back(current.at(changed[i]));
-        }
-        sql += " WHERE " + dialect_->quote_identifier(tracked.primary_key) + " = " +
-               dialect_->placeholder(params.size() + 1) + ";";
-        params.push_back(tracked.get_pk());
-        executor_->execute(sql, params);
-        tracked.original = current;
-    }
-
-    void flush_delete(TrackedEntity& tracked) {
-        const Value pk = tracked.get_pk();
-        const std::string sql = "DELETE FROM " + dialect_->quote_identifier(tracked.table) +
-            " WHERE " + dialect_->quote_identifier(tracked.primary_key) + " = " + dialect_->placeholder(1) + ";";
-        executor_->execute(sql, {pk});
-        tracked.erase_identity(pk);
-        tracked_.erase(tracked.object.get());
     }
 
     std::shared_ptr<DbExecutor> executor_;
     std::shared_ptr<Dialect> dialect_;
     IdentityMap identity_map_;
-    std::unordered_map<void*, TrackedEntity> tracked_;
+    UnitOfWork unit_of_work_;
+    RelationChangeProcessor relation_changes_;
 };
 
 template <reflect::Entity T>
