@@ -71,10 +71,14 @@ struct DeleteNode {
 inline std::string compile_dml_operand(
     const DmlOperand& operand,
     const Dialect& dialect,
-    std::vector<Value>& params) {
+    std::vector<Value>& params,
+    bool allow_excluded = false) {
     if (const auto* value = std::get_if<Value>(&operand)) {
         params.push_back(*value);
         return dialect.placeholder(params.size());
+    }
+    if (!allow_excluded) {
+        throw std::logic_error("MetalORM: excluded() is valid only inside ON CONFLICT DO UPDATE");
     }
     const auto& value = std::get<DmlExcluded>(operand);
     return "excluded." + dialect.quote_identifier(value.column);
@@ -181,16 +185,6 @@ public:
         return ConflictBuilder{*this, std::move(columns)};
     }
 
-    // Kept as the concise compatibility spelling used internally before 0.0.9.
-    InsertQueryBuilder& on_conflict_do_nothing(bool enabled = true) {
-        if (!enabled) {
-            node_.conflict.reset();
-            return *this;
-        }
-        node_.conflict = DmlConflictClause{{}, true, {}, {}};
-        return *this;
-    }
-
     InsertQueryBuilder& returning(std::vector<std::string> columns) {
         node_.returning.clear();
         node_.returning.reserve(columns.size());
@@ -258,34 +252,30 @@ public:
         if (node_.conflict) {
             const auto& conflict = *node_.conflict;
             if (conflict.columns.empty()) {
-                if (conflict.do_nothing && conflict.assignments.empty()) {
-                    out.sql += " ON CONFLICT DO NOTHING";
-                } else {
-                    throw std::logic_error("MetalORM: SQLite ON CONFLICT requires conflict columns");
-                }
+                throw std::logic_error("MetalORM: SQLite ON CONFLICT requires conflict columns");
+            }
+
+            out.sql += " ON CONFLICT (";
+            for (std::size_t i = 0; i < conflict.columns.size(); ++i) {
+                if (i) out.sql += ", ";
+                out.sql += dialect.quote_identifier(conflict.columns[i]);
+            }
+            out.sql += ")";
+            if (conflict.do_nothing) {
+                out.sql += " DO NOTHING";
             } else {
-                out.sql += " ON CONFLICT (";
-                for (std::size_t i = 0; i < conflict.columns.size(); ++i) {
+                if (conflict.assignments.empty()) {
+                    throw std::logic_error(
+                        "MetalORM: SQLite ON CONFLICT DO UPDATE requires at least one assignment");
+                }
+                out.sql += " DO UPDATE SET ";
+                for (std::size_t i = 0; i < conflict.assignments.size(); ++i) {
                     if (i) out.sql += ", ";
-                    out.sql += dialect.quote_identifier(conflict.columns[i]);
+                    const auto& assignment = conflict.assignments[i];
+                    out.sql += dialect.quote_identifier(assignment.column) + " = " +
+                               compile_dml_operand(assignment.value, dialect, out.params, true);
                 }
-                out.sql += ")";
-                if (conflict.do_nothing) {
-                    out.sql += " DO NOTHING";
-                } else {
-                    if (conflict.assignments.empty()) {
-                        throw std::logic_error(
-                            "MetalORM: SQLite ON CONFLICT DO UPDATE requires at least one assignment");
-                    }
-                    out.sql += " DO UPDATE SET ";
-                    for (std::size_t i = 0; i < conflict.assignments.size(); ++i) {
-                        if (i) out.sql += ", ";
-                        const auto& assignment = conflict.assignments[i];
-                        out.sql += dialect.quote_identifier(assignment.column) + " = " +
-                                   compile_dml_operand(assignment.value, dialect, out.params);
-                    }
-                    append_dml_predicates(out.sql, conflict.predicates, dialect, out.params);
-                }
+                append_dml_predicates(out.sql, conflict.predicates, dialect, out.params);
             }
         }
 
