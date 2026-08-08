@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.0.5 - 2026-08-08
+
+MetalORM architectural-parity release. SQLite remains the only executor/dialect intentionally.
+
+- Extract `IdentityMap`, `UnitOfWork`, runtime tracking types, and `RelationChangeProcessor` from `Session` so the session coordinates the runtime instead of owning every responsibility directly.
+- Add shared `InsertQueryBuilder`, `UpdateQueryBuilder`, and `DeleteQueryBuilder` DML ASTs.
+- Route Unit of Work INSERT/UPDATE/DELETE through those DML builders instead of manually concatenating SQL.
+- Route has-many FK updates and many-to-many pivot INSERT/DELETE through the same DML AST layer.
+- Align commit ordering with MetalORM TS: prepare cascaded persistence, flush the UoW, process relation changes, then flush the UoW again for changes scheduled by relations.
+- Add `cascade_mode::link` to match the original MetalORM cascade vocabulary.
+- Restore MetalORM many-to-many semantics by allowing `cascade_mode::remove` and `cascade_mode::all` instead of rejecting them at compile time.
+- Implement N:N cascade remove by deleting the pivot relation first and scheduling the target for the second UoW flush.
+- Remove the obsolete compile-fail test that treated N:N cascade remove as invalid.
+- Add a dedicated runtime-parity test covering DML AST compilation, `link` metadata, and N:N cascade-remove execution on real in-memory SQLite.
+
 ## 0.0.4 - 2026-08-08
 
 Typed SQL AST release. SQLite remains the only executor/dialect intentionally.
