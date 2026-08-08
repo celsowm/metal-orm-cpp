@@ -93,30 +93,71 @@ The TypeScript query builder explicitly does not support JOIN-based `MorphTo` in
 
 Remaining relation adaptation work is limited to JS-object-model conveniences such as `toJSON()` and broader has-many edge cases; those require explicit C++ serialization/API decisions rather than literal copying.
 
-## Query builder
+## Query builder and DML
 
-| MetalORM capability | C++ status |
-| --- | --- |
-| Typed SELECT AST | ✅ |
-| WHERE/comparisons/logical expressions | ✅ partial catalog |
-| IN / NULL / LIKE | ✅ |
-| Reflected JOINs | ✅ non-polymorphic + runtime MorphOne/MorphMany include |
-| Projections/aliases | ✅ |
-| Aggregates/GROUP BY/HAVING | ✅ |
-| Scalar IN subqueries | ✅ |
-| INSERT/UPDATE/DELETE AST | ✅ foundational |
-| RETURNING | ❌ |
-| UPSERT/conflict API parity | 🟡 minimal `do nothing` primitive only |
-| CTE / recursive CTE | ❌ |
-| derived tables | ❌ |
-| UNION/UNION ALL/INTERSECT/EXCEPT | ❌ |
-| EXISTS / NOT EXISTS | ❌ |
-| BETWEEN | ❌ |
-| window functions | ❌ |
-| CASE | ❌ |
-| JSON/function catalog | ❌ |
-| relation query helpers (`whereHas`, etc.) | ❌ |
-| pagination/cursor helpers | ❌ |
+| MetalORM capability | C++ status | Notes |
+| --- | --- | --- |
+| Typed SELECT AST | ✅ | Compile-time entity scope |
+| WHERE/comparisons/logical expressions | ✅ partial catalog | More operators remain in 0.0.10 |
+| IN / NULL / LIKE | ✅ | Typed values/subqueries |
+| Reflected JOINs | ✅ | Non-polymorphic typed joins + runtime MorphOne/MorphMany include |
+| Projections/aliases | ✅ | Columns + aggregates |
+| Aggregates/GROUP BY/HAVING | ✅ | Foundational aggregate set |
+| Scalar IN subqueries | ✅ | Exactly-one projection validation |
+| INSERT/UPDATE/DELETE AST | ✅ | Shared by public builders, UoW and relation processor |
+| Multi-row INSERT | ✅ | Multiple `VALUES` rows in one statement |
+| INSERT ... SELECT | ✅ | Typed `BasicSelectQuery` source |
+| RETURNING | ✅ | INSERT/UPDATE/DELETE, including aliases |
+| SQLite UPSERT/conflict API | ✅ | target columns, DO NOTHING, DO UPDATE, update predicate, `excluded()` |
+| CTE / recursive CTE | ❌ | Planned for 0.0.10 |
+| derived tables | ❌ | Not ported yet |
+| UNION/UNION ALL/INTERSECT/EXCEPT | ❌ | Planned for 0.0.10 |
+| EXISTS / NOT EXISTS | ❌ | Planned for 0.0.10 |
+| BETWEEN | ❌ | Planned for 0.0.10 |
+| window functions | ❌ | Planned for 0.0.10 |
+| CASE | ❌ | Not ported yet |
+| JSON/function catalog | ❌ | Not ported yet |
+| relation query helpers (`whereHas`, etc.) | ❌ | Not ported yet |
+| pagination/cursor helpers | ❌ | Not ported yet |
+
+### DML parity details
+
+The TypeScript insert builder treats `VALUES` and `SELECT` as mutually exclusive insert sources. C++ 0.0.9 keeps the same state rule:
+
+```cpp
+auto insert = metal::InsertQueryBuilder{"users"}
+    .values({
+        {{"name", std::string{"A"}}, {"score", std::int64_t{10}}},
+        {{"name", std::string{"B"}}, {"score", std::int64_t{20}}}
+    })
+    .returning({"id", "name"});
+```
+
+Typed INSERT SELECT reuses the normal select AST:
+
+```cpp
+auto source = metal::select<Source>();
+source
+    .clear_projection()
+    .project(metal::field<^^Source::name>)
+    .project(metal::field<^^Source::score>);
+
+metal::insert_into<Target>()
+    .from_select(source, {"name", "score"})
+    .returning({"id"});
+```
+
+SQLite conflict handling follows the TypeScript SQLite dialect contract and requires explicit conflict columns:
+
+```cpp
+metal::InsertQueryBuilder{"users"}
+    .values({{"email", email}, {"name", name}})
+    .on_conflict({"email"})
+    .do_update({{"name", metal::excluded("name")}})
+    .returning({"id", "name"});
+```
+
+`excluded()` is a dedicated DML operand and is accepted only in the `DO UPDATE SET` branch.
 
 ## Schema/tooling/ecosystem
 
@@ -139,8 +180,8 @@ Remaining relation adaptation work is limited to JS-object-model conveniences su
 
 The next releases should close reference gaps rather than add unrelated capabilities:
 
-1. **0.0.9:** richer DML parity (`RETURNING`, multi-row insert, insert-select, SQLite conflict API).
-2. **0.0.10:** CTEs, set operations, EXISTS/BETWEEN and window functions.
+1. **0.0.10:** CTEs/recursive CTEs, set operations, EXISTS/NOT EXISTS, BETWEEN and window functions.
+2. Then: derived tables/CASE/function catalog and relation query helpers.
 3. Then: saveGraph/runtime hooks/events/transactions and the remaining ecosystem modules.
 
 This ordering may change when comparison with the TypeScript reference exposes a more fundamental dependency.
