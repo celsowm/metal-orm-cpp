@@ -18,6 +18,8 @@ struct TrackedEntity {
     std::string primary_key;
     std::unordered_map<std::string, Value> original;
     std::function<std::unordered_map<std::string, Value>()> snapshot;
+    std::function<void(const std::unordered_map<std::string, Value>&)> restore_snapshot;
+    std::function<std::function<void()>()> capture_relation_restore;
     std::function<Value()> get_pk;
     std::function<void(const Value&)> set_pk;
     bool generated_pk{false};
