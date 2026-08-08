@@ -1,5 +1,6 @@
 #pragma once
 
+#include "metal/mapping.hpp"
 #include "metal/value.hpp"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -17,6 +19,81 @@
 #include <vector>
 
 namespace metal {
+
+template <typename Pivot>
+class pivot_patch {
+public:
+    struct entry {
+        std::string column;
+        Value value;
+        std::function<void(Pivot&)> apply;
+    };
+
+    template <std::meta::info Member, typename V>
+    pivot_patch& set(V&& value) {
+        static_assert(std::meta::is_nonstatic_data_member(Member),
+                      "MetalORM: pivot_patch::set requires a non-static data member reflection");
+        using Owner = [: std::meta::parent_of(Member) :];
+        static_assert(std::same_as<Owner, Pivot>,
+                      "MetalORM: pivot_patch member must belong to the pivot type");
+        using M = [: std::meta::type_of(Member) :];
+        static_assert(PersistableValue<M>,
+                      "MetalORM: pivot_patch only supports persistent scalar members");
+
+        constexpr auto column = [] consteval -> std::string_view {
+            auto annotations = std::meta::annotations_of_with_type(Member, ^^mapping::column);
+            if (annotations.size() == 1) {
+                return std::meta::extract<mapping::column>(annotations.front()).name.view();
+            }
+            return std::meta::identifier_of(Member);
+        }();
+
+        Value converted = to_value(std::forward<V>(value));
+        entry next{
+            std::string(column),
+            converted,
+            [converted](Pivot& pivot) {
+                pivot.[:Member:] = from_value<M>(converted);
+            }
+        };
+
+        auto existing = std::find_if(entries_.begin(), entries_.end(), [&](const auto& current) {
+            return current.column == next.column;
+        });
+        if (existing == entries_.end()) entries_.push_back(std::move(next));
+        else *existing = std::move(next);
+        return *this;
+    }
+
+    [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
+    [[nodiscard]] const std::vector<entry>& entries() const noexcept { return entries_; }
+
+    void apply_to(Pivot& pivot) const {
+        for (const auto& value : entries_) value.apply(pivot);
+    }
+
+    void merge(const pivot_patch& other) {
+        for (const auto& incoming : other.entries_) {
+            auto existing = std::find_if(entries_.begin(), entries_.end(), [&](const auto& current) {
+                return current.column == incoming.column;
+            });
+            if (existing == entries_.end()) entries_.push_back(incoming);
+            else *existing = incoming;
+        }
+    }
+
+    template <typename Predicate>
+    pivot_patch filtered(Predicate&& predicate) const {
+        pivot_patch out;
+        for (const auto& value : entries_) {
+            if (std::invoke(predicate, std::string_view(value.column))) out.entries_.push_back(value);
+        }
+        return out;
+    }
+
+private:
+    std::vector<entry> entries_;
+};
 
 template <typename T>
 class has_many_collection {
@@ -110,6 +187,7 @@ class many_to_many_collection {
 public:
     using value_type = std::shared_ptr<T>;
     using pivot_type = Pivot;
+    using patch_type = pivot_patch<Pivot>;
     using const_iterator = typename std::vector<value_type>::const_iterator;
 
     [[nodiscard]] bool loaded() const noexcept { return loaded_; }
@@ -129,17 +207,17 @@ public:
         return items_;
     }
 
-    void attach(value_type value) { attach_impl(std::move(value), std::nullopt); }
-    void attach(value_type value, Pivot pivot) { attach_impl(std::move(value), std::optional<Pivot>{std::move(pivot)}); }
+    void attach(value_type value) { attach_impl(std::move(value), patch_type{}); }
+    void attach(value_type value, patch_type patch) { attach_impl(std::move(value), sanitize(std::move(patch))); }
 
     template <typename Key>
     requires (!std::same_as<std::remove_cvref_t<Key>, value_type>)
-    value_type attach(Key&& key) { return attach_id_value(to_value(std::forward<Key>(key)), std::nullopt); }
+    value_type attach(Key&& key) { return attach_id_value(to_value(std::forward<Key>(key)), patch_type{}); }
 
     template <typename Key>
     requires (!std::same_as<std::remove_cvref_t<Key>, value_type>)
-    value_type attach(Key&& key, Pivot pivot) {
-        return attach_id_value(to_value(std::forward<Key>(key)), std::optional<Pivot>{std::move(pivot)});
+    value_type attach(Key&& key, patch_type patch) {
+        return attach_id_value(to_value(std::forward<Key>(key)), sanitize(std::move(patch)));
     }
 
     bool detach(const value_type& value) {
@@ -177,7 +255,7 @@ public:
                 const auto identity = identity_key_(*item);
                 return identity && *identity == key;
             });
-            if (!exists) attach_id_value(value, std::nullopt);
+            if (!exists) attach_id_value(value, patch_type{});
         }
         items_.erase(std::remove_if(items_.begin(), items_.end(), [&](const auto& item) {
             const auto identity = identity_key_(*item);
@@ -195,7 +273,7 @@ public:
     }
 
     [[nodiscard]] bool dirty() const {
-        return !_metal_added().empty() || !_metal_removed().empty() || !pivot_updates_.empty();
+        return !_metal_added().empty() || !_metal_removed().empty() || !pivot_patches_.empty();
     }
 
     void _metal_bind_loader(std::function<void()> loader) { loader_ = std::move(loader); }
@@ -204,6 +282,9 @@ public:
         std::function<value_type(const Value&)> id_factory) {
         identity_key_ = std::move(identity_key);
         id_factory_ = std::move(id_factory);
+    }
+    void _metal_bind_pivot_filter(std::function<patch_type(const patch_type&)> filter) {
+        pivot_filter_ = std::move(filter);
     }
 
     void _metal_hydrate(std::vector<std::pair<value_type, std::optional<Pivot>>> values) {
@@ -215,7 +296,7 @@ public:
             items_.push_back(std::move(entity));
         }
         baseline_ = items_;
-        pivot_updates_.clear();
+        pivot_patches_.clear();
         loaded_ = true;
     }
 
@@ -234,45 +315,68 @@ public:
     [[nodiscard]] std::vector<value_type> _metal_pivot_updates() const {
         std::vector<value_type> out;
         for (const auto& value : items_) {
-            if (pivot_updates_.contains(value.get()) && contains_equivalent(baseline_, value)) out.push_back(value);
+            if (pivot_patches_.contains(value.get()) && contains_equivalent(baseline_, value)) out.push_back(value);
         }
         return out;
     }
 
-    const Pivot* _metal_pivot(const value_type& value) const { return pivot(value); }
-    void _metal_accept_changes() { baseline_ = items_; pivot_updates_.clear(); }
+    const patch_type* _metal_pivot_patch(const value_type& value) const {
+        if (!value) return nullptr;
+        if (const auto index = find_equivalent(value)) {
+            auto it = pivot_patches_.find(items_[*index].get());
+            return it == pivot_patches_.end() ? nullptr : &it->second;
+        }
+        return nullptr;
+    }
+
+    void _metal_accept_changes() {
+        baseline_ = items_;
+        pivot_patches_.clear();
+        for (auto it = pivots_.begin(); it != pivots_.end();) {
+            const bool present = std::any_of(items_.begin(), items_.end(), [&](const auto& item) {
+                return item.get() == it->first;
+            });
+            if (!present) it = pivots_.erase(it);
+            else ++it;
+        }
+    }
 
 private:
-    void attach_impl(value_type value, std::optional<Pivot> pivot_value) {
+    patch_type sanitize(patch_type patch) const {
+        return pivot_filter_ ? pivot_filter_(patch) : std::move(patch);
+    }
+
+    void apply_patch(const value_type& value, const patch_type& patch) {
+        if (patch.empty()) return;
+        auto [it, inserted] = pivots_.try_emplace(value.get(), Pivot{});
+        patch.apply_to(it->second);
+        pivot_patches_[value.get()].merge(patch);
+    }
+
+    void attach_impl(value_type value, patch_type patch) {
         if (!value) throw std::invalid_argument("MetalORM: cannot attach a null entity");
         if (const auto index = find_equivalent(value)) {
             auto& existing = items_[*index];
-            if (pivot_value) {
-                pivots_.insert_or_assign(existing.get(), std::move(*pivot_value));
-                if (contains_equivalent(baseline_, existing)) pivot_updates_.insert(existing.get());
-            }
+            apply_patch(existing, patch);
             return;
         }
-        if (pivot_value) pivots_.emplace(value.get(), std::move(*pivot_value));
+        apply_patch(value, patch);
         items_.push_back(std::move(value));
     }
 
-    value_type attach_id_value(const Value& key, std::optional<Pivot> pivot_value) {
+    value_type attach_id_value(const Value& key, patch_type patch) {
         ensure_identity_binding();
         const auto wanted = value_key(key);
         for (const auto& item : items_) {
             const auto identity = identity_key_(*item);
             if (identity && *identity == wanted) {
-                if (pivot_value) {
-                    pivots_.insert_or_assign(item.get(), std::move(*pivot_value));
-                    if (contains_equivalent(baseline_, item)) pivot_updates_.insert(item.get());
-                }
+                apply_patch(item, patch);
                 return item;
             }
         }
-        if (!id_factory_) throw std::logic_error("MetalORM: relation collection cannot materialize an ID stub");
+        if (!id_factory_) throw std::logic_error("MetalORM: relation collection cannot materialize an ID target");
         auto entity = id_factory_(key);
-        attach_impl(entity, std::move(pivot_value));
+        attach_impl(entity, std::move(patch));
         return entity;
     }
 
@@ -301,10 +405,11 @@ private:
     std::vector<value_type> items_;
     std::vector<value_type> baseline_;
     std::unordered_map<const T*, Pivot> pivots_;
-    std::unordered_set<const T*> pivot_updates_;
+    std::unordered_map<const T*, patch_type> pivot_patches_;
     std::function<void()> loader_;
     std::function<std::optional<std::string>(const T&)> identity_key_;
     std::function<value_type(const Value&)> id_factory_;
+    std::function<patch_type(const patch_type&)> pivot_filter_;
 };
 
 } // namespace metal
