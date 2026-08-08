@@ -1,6 +1,7 @@
 #pragma once
 
 #include "metal/execution.hpp"
+#include "metal/query/core_types.hpp"
 #include "metal/schema_introspection.hpp"
 #include "metal/schema_types.hpp"
 
