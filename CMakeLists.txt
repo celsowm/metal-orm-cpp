@@ -21,7 +21,6 @@ target_include_directories(metal-orm PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(metal-orm PUBLIC SQLite::SQLite3)
-target_compile_features(metal-orm PUBLIC cxx_std_23)
 target_compile_options(metal-orm PUBLIC -std=c++26 -freflection)
 
 option(METAL_ORM_BUILD_EXAMPLES "Build MetalORM examples" ON)
