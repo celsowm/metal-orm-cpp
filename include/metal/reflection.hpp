@@ -7,7 +7,6 @@
 
 #include <array>
 #include <meta>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -147,14 +146,22 @@ concept Entity = Mapped<T> && (primary_key_count<T>() == 1);
 template <typename T>
 struct single_relation_traits { static constexpr bool value = false; };
 
-template <typename Target>
-struct single_relation_traits<std::shared_ptr<Target>> {
-    static constexpr bool value = true;
-    using target_type = Target;
-};
+template <typename T>
+struct belongs_to_reference_traits { static constexpr bool value = false; };
+
+template <typename T>
+struct has_one_reference_traits { static constexpr bool value = false; };
 
 template <typename T>
 inline constexpr bool is_single_relation_v = single_relation_traits<std::remove_cvref_t<T>>::value;
+
+template <typename T>
+inline constexpr bool is_belongs_to_reference_v =
+    belongs_to_reference_traits<std::remove_cvref_t<T>>::value;
+
+template <typename T>
+inline constexpr bool is_has_one_reference_v =
+    has_one_reference_traits<std::remove_cvref_t<T>>::value;
 
 template <typename T>
 using single_target_t = typename single_relation_traits<std::remove_cvref_t<T>>::target_type;
@@ -267,7 +274,8 @@ consteval void validate_relation() {
     using M = member_type_t<Member>;
 
     if constexpr (Traits::kind == mapping::relation_kind::belongs_to) {
-        static_assert(is_single_relation_v<M>, "MetalORM: belongs_to member must be std::shared_ptr<T>");
+        static_assert(is_belongs_to_reference_v<M>,
+                      "MetalORM: belongs_to member must be metal::belongs_to_reference<T>");
         using Target = single_target_t<M>;
         static_assert(Entity<Target>, "MetalORM: belongs_to target must be a mapped entity with one primary key");
         constexpr auto foreign_key = Traits::foreign_key();
@@ -278,7 +286,8 @@ consteval void validate_relation() {
         static_assert(is_persistent_member<foreign_key>() && is_persistent_member<target_key>(), "MetalORM: belongs_to keys must be persistent scalar columns");
         static_assert(key_types_compatible<foreign_key, target_key>(), "MetalORM: belongs_to foreign-key and target-key types are incompatible");
     } else if constexpr (Traits::kind == mapping::relation_kind::has_one) {
-        static_assert(is_single_relation_v<M>, "MetalORM: has_one member must be std::shared_ptr<T>");
+        static_assert(is_has_one_reference_v<M>,
+                      "MetalORM: has_one member must be metal::has_one_reference<T>");
         using Target = single_target_t<M>;
         static_assert(Entity<Target>, "MetalORM: has_one target must be a mapped entity with one primary key");
         constexpr auto target_fk = Traits::target_foreign_key();
