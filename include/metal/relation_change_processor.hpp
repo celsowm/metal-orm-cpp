@@ -2,15 +2,19 @@
 
 #include "metal/dml.hpp"
 #include "metal/execution.hpp"
+#include "metal/polymorphic.hpp"
 #include "metal/runtime_types.hpp"
 #include "metal/unit_of_work.hpp"
 
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace metal {
@@ -57,13 +61,27 @@ public:
             if constexpr (reflect::has_relation_annotation<relation>()) {
                 using A = reflect::relation_annotation_t<relation>;
                 using Traits = mapping::relation_annotation_traits<A>;
-                if constexpr (Traits::kind == mapping::relation_kind::has_many ||
-                              Traits::kind == mapping::relation_kind::many_to_many) {
-                    auto& values = root.[:relation:];
-                    if constexpr (mapping::cascades_persist(Traits::cascade)) {
+                auto& values = root.[:relation:];
+
+                if constexpr (mapping::cascades_persist(Traits::cascade)) {
+                    if constexpr (Traits::kind == mapping::relation_kind::has_many ||
+                                  Traits::kind == mapping::relation_kind::many_to_many ||
+                                  Traits::kind == mapping::relation_kind::morph_many) {
                         for (const auto& target : values._metal_added()) {
                             if (target && !unit_of_work_.contains(target.get())) persist(target);
                         }
+                    } else if constexpr (Traits::kind == mapping::relation_kind::morph_one) {
+                        if (auto target = values._metal_added();
+                            target && !unit_of_work_.contains(target.get())) {
+                            persist(target);
+                        }
+                    } else if constexpr (Traits::kind == mapping::relation_kind::morph_to) {
+                        std::visit([&](const auto& target) {
+                            using V = std::remove_cvref_t<decltype(target)>;
+                            if constexpr (!std::same_as<V, std::monostate>) {
+                                if (target && !unit_of_work_.contains(target.get())) persist(target);
+                            }
+                        }, values._metal_current());
                     }
                 }
             }
@@ -80,6 +98,12 @@ public:
                     flush_has_many<Root, relation>(root, remove);
                 } else if constexpr (Traits::kind == mapping::relation_kind::many_to_many) {
                     flush_many_to_many<Root, relation>(root, remove);
+                } else if constexpr (Traits::kind == mapping::relation_kind::morph_one) {
+                    flush_morph_one<Root, relation>(root, remove);
+                } else if constexpr (Traits::kind == mapping::relation_kind::morph_many) {
+                    flush_morph_many<Root, relation>(root, remove);
+                } else if constexpr (Traits::kind == mapping::relation_kind::morph_to) {
+                    flush_morph_to<Root, relation>(root);
                 }
             }
         }
@@ -92,7 +116,10 @@ public:
                 using A = reflect::relation_annotation_t<relation>;
                 using Traits = mapping::relation_annotation_traits<A>;
                 if constexpr (Traits::kind == mapping::relation_kind::has_many ||
-                              Traits::kind == mapping::relation_kind::many_to_many) {
+                              Traits::kind == mapping::relation_kind::many_to_many ||
+                              Traits::kind == mapping::relation_kind::morph_one ||
+                              Traits::kind == mapping::relation_kind::morph_many ||
+                              Traits::kind == mapping::relation_kind::morph_to) {
                     root.[:relation:]._metal_accept_changes();
                 }
             }
@@ -124,6 +151,18 @@ private:
             assignments.push_back({value.column, value.value});
         }
         return assignments;
+    }
+
+    template <std::meta::info Member, typename Owner>
+    static void clear_nullable_member(Owner& owner, std::string_view relation_name) {
+        using M = reflect::member_type_t<Member>;
+        if constexpr (is_optional_v<M>) {
+            owner.[:Member:] = std::nullopt;
+        } else {
+            throw std::runtime_error(
+                "MetalORM: detaching " + std::string(relation_name) +
+                " requires nullable morph id/type fields or cascade remove");
+        }
     }
 
     template <reflect::Entity Root, std::meta::info Relation, typename RemoveFn>
@@ -259,6 +298,99 @@ private:
                 }
             }
         }
+    }
+
+    template <reflect::Entity Root, std::meta::info Relation, typename RemoveFn>
+    void flush_morph_one(Root& root, RemoveFn&& remove) {
+        using A = reflect::relation_annotation_t<Relation>;
+        using Traits = mapping::relation_annotation_traits<A>;
+        constexpr auto type_field = Traits::type_field();
+        constexpr auto id_field = Traits::id_field();
+        auto& reference = root.[:Relation:];
+
+        if (auto previous = reference._metal_removed()) {
+            if constexpr (mapping::cascades_remove(Traits::cascade)) {
+                remove(previous);
+            } else {
+                clear_nullable_member<id_field>(*previous, "morph_one");
+                clear_nullable_member<type_field>(*previous, "morph_one");
+            }
+        }
+    }
+
+    template <reflect::Entity Root, std::meta::info Relation, typename RemoveFn>
+    void flush_morph_many(Root& root, RemoveFn&& remove) {
+        using A = reflect::relation_annotation_t<Relation>;
+        using Traits = mapping::relation_annotation_traits<A>;
+        constexpr auto type_field = Traits::type_field();
+        constexpr auto id_field = Traits::id_field();
+        auto& values = root.[:Relation:];
+
+        for (const auto& target : values._metal_removed()) {
+            if constexpr (mapping::cascades_remove(Traits::cascade)) {
+                remove(target);
+            } else {
+                clear_nullable_member<id_field>(*target, "morph_many");
+                clear_nullable_member<type_field>(*target, "morph_many");
+            }
+        }
+    }
+
+    template <typename Case, typename Target, reflect::Entity Root, typename Traits>
+    static void apply_morph_to_case(Root& root, const std::shared_ptr<Target>& target, bool& matched) {
+        using CaseTraits = mapping::morph_target_traits<Case>;
+        constexpr auto target_reflection = CaseTraits::target();
+        using CaseTarget = [: target_reflection :];
+        if constexpr (std::same_as<CaseTarget, Target>) {
+            constexpr auto target_key = reflect::key_or_primary<Target>(CaseTraits::target_key());
+            constexpr auto type_field = Traits::type_field();
+            constexpr auto id_field = Traits::id_field();
+            using TypeField = reflect::member_type_t<type_field>;
+            using IdField = reflect::member_type_t<id_field>;
+
+            const Value key = to_value((*target).[:target_key:]);
+            if (missing_relation_key<Target, target_key>(key)) {
+                throw std::runtime_error("MetalORM: morph_to target does not have a persisted relation key");
+            }
+            root.[:type_field:] = from_value<TypeField>(Value{std::string(CaseTraits::type_value.view())});
+            root.[:id_field:] = from_value<IdField>(key);
+            matched = true;
+        }
+    }
+
+    template <typename Target, reflect::Entity Root, typename Traits, typename... Cases>
+    static void apply_morph_to_cases(
+        Root& root,
+        const std::shared_ptr<Target>& target,
+        bool& matched,
+        mapping::type_list<Cases...>) {
+        (apply_morph_to_case<Cases, Target, Root, Traits>(root, target, matched), ...);
+    }
+
+    template <reflect::Entity Root, std::meta::info Relation>
+    void flush_morph_to(Root& root) {
+        using A = reflect::relation_annotation_t<Relation>;
+        using Traits = mapping::relation_annotation_traits<A>;
+        constexpr auto type_field = Traits::type_field();
+        constexpr auto id_field = Traits::id_field();
+        auto& reference = root.[:Relation:];
+        if (!reference.dirty()) return;
+
+        std::visit([&](const auto& target) {
+            using V = std::remove_cvref_t<decltype(target)>;
+            if constexpr (std::same_as<V, std::monostate>) {
+                clear_nullable_member<type_field>(root, "morph_to");
+                clear_nullable_member<id_field>(root, "morph_to");
+            } else {
+                using Target = typename V::element_type;
+                bool matched = false;
+                apply_morph_to_cases<Target, Root, Traits>(
+                    root, target, matched, typename Traits::targets{});
+                if (!matched) {
+                    throw std::runtime_error("MetalORM: morph_to target type is not declared by the relation");
+                }
+            }
+        }, reference._metal_current());
     }
 
     UnitOfWork& unit_of_work_;
