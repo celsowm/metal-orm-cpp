@@ -32,28 +32,6 @@ ExpectedTable expected_table(const Dialect& dialect) {
         }
     });
 
-    template for (constexpr auto relation : reflect::data_members<T>()) {
-        if constexpr (reflect::has_relation_annotation<relation>()) {
-            using A = reflect::relation_annotation_t<relation>;
-            using Traits = mapping::relation_annotation_traits<A>;
-            if constexpr (Traits::kind == mapping::relation_kind::belongs_to) {
-                using Target = reflect::single_target_t<reflect::member_type_t<relation>>;
-                constexpr auto fk = Traits::foreign_key();
-                constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
-                const auto fk_name = reflect::column_name<fk>();
-                auto found = std::find_if(
-                    expected.table.columns.begin(), expected.table.columns.end(),
-                    [&](const DatabaseColumn& column) { return column.name == fk_name; });
-                if (found != expected.table.columns.end()) {
-                    found->references = ForeignKeyReference{
-                        .table = reflect::table_name<Target>(),
-                        .column = reflect::column_name<target_key>()
-                    };
-                }
-            }
-        }
-    }
-
     return expected;
 }
 
