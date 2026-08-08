@@ -267,8 +267,6 @@ consteval void validate_relation() {
     } else if constexpr (Traits::kind == mapping::relation_kind::many_to_many) {
         static_assert(is_many_collection_v<M>,
                       "MetalORM: many_to_many member must be metal::collection<T>");
-        static_assert(!mapping::cascades_remove(Traits::cascade),
-                      "MetalORM: many_to_many does not allow cascade remove of shared targets");
         using Target = many_target_t<M>;
         static_assert(Entity<Target>,
                       "MetalORM: many_to_many target must be a mapped entity with one primary key");
