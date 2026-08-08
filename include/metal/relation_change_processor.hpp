@@ -106,10 +106,7 @@ private:
         std::vector<DmlAssignment> assignments;
         reflect::for_each_column<Pivot>([&]<std::meta::info Member>() {
             if constexpr (Member != RootFk && Member != TargetFk) {
-                assignments.push_back({
-                    reflect::column_name<Member>(),
-                    to_value(pivot.[:Member:])
-                });
+                assignments.push_back({reflect::column_name<Member>(), to_value(pivot.[:Member:])});
             }
         });
         return assignments;
@@ -203,7 +200,6 @@ private:
 
             const auto compiled = InsertQueryBuilder{reflect::table_name<Pivot>()}
                 .values(std::move(assignments))
-                .on_conflict_do_nothing()
                 .compile(dialect_);
             executor_.execute(compiled.sql, compiled.params);
         }
@@ -234,7 +230,6 @@ private:
                 })
                 .compile(dialect_);
             executor_.execute(compiled.sql, compiled.params);
-
             if constexpr (mapping::cascades_remove(Traits::cascade)) remove(target);
         }
     }
