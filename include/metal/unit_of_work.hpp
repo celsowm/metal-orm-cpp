@@ -221,6 +221,7 @@ private:
         if (tracked.before_delete) tracked.before_delete();
 
         const Value pk = tracked.get_pk();
+        const auto keep_alive = tracked.object;
         const auto after_delete = tracked.after_delete;
         const auto compiled = DeleteQueryBuilder{tracked.table}
             .where_eq(tracked.primary_key, pk)
@@ -231,6 +232,7 @@ private:
         tracked_.erase(key);
 
         if (after_delete) after_delete();
+        (void)keep_alive;
     }
 
     DbExecutor& executor_;
