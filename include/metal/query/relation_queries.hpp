@@ -91,7 +91,7 @@ CompiledQuery compile_relation_correlation(
         constexpr auto pivot_target_fk = Traits::pivot_target_foreign_key();
         constexpr auto local_key = reflect::key_or_primary<Owner>(Traits::local_key());
         constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
-        const std::string pivot_alias = "__metal_pivot";
+        const std::string pivot_alias = std::string(child_alias) + "_pivot";
         out.sql =
             "EXISTS (SELECT 1 FROM " + dialect.quote_identifier(reflect::table_name<Pivot>()) + " AS " +
             dialect.quote_identifier(pivot_alias) + " WHERE " +
@@ -117,8 +117,10 @@ template <typename Query>
 concept CorrelatableSelectQuery = requires(
     const Query& query,
     const Dialect& dialect,
-    ExtraWhereCompiler extra_where) {
-    { query.compile_subquery_with_extra_where(dialect, std::move(extra_where)) } ->
+    ExtraWhereCompiler extra_where,
+    std::string alias) {
+    { query.compile_subquery_with_extra_where(
+          dialect, std::move(extra_where), std::move(alias)) } ->
         std::same_as<CompiledQuery>;
 };
 
@@ -127,14 +129,16 @@ RelationFilterSpec make_relation_filter(ChildQuery child, bool negated) {
     return RelationFilterSpec{
         negated,
         [child = std::move(child)](const Dialect& dialect, std::string_view outer_alias) mutable {
+            const std::string child_alias = std::string(outer_alias) + "_rel";
             return child.compile_subquery_with_extra_where(
                 dialect,
                 [outer = std::string(outer_alias)](
                     const Dialect& nested_dialect,
-                    std::string_view child_alias) {
+                    std::string_view nested_child_alias) {
                     return compile_relation_correlation<Relation>(
-                        nested_dialect, child_alias, outer);
-                });
+                        nested_dialect, nested_child_alias, outer);
+                },
+                child_alias);
         }};
 }
 
@@ -212,7 +216,8 @@ public:
 
     [[nodiscard]] CompiledQuery compile_subquery_with_extra_where(
         const Dialect& dialect,
-        ExtraWhereCompiler extra_where) const {
+        ExtraWhereCompiler extra_where,
+        std::string root_alias_override = {}) const {
         return base_.compile_subquery_with_extra_where(
             dialect,
             [this, extra_where = std::move(extra_where)](
@@ -220,11 +225,12 @@ public:
                 std::string_view root_alias) {
                 return detail::compile_relation_filter_list(
                     filters_, nested_dialect, root_alias, extra_where);
-            });
+            },
+            std::move(root_alias_override));
     }
 
     [[nodiscard]] CompiledQuery compile_subquery(const Dialect& dialect) const {
-        return compile_subquery_with_extra_where(dialect, {});
+        return compile_subquery_with_extra_where(dialect, {}, {});
     }
 
     [[nodiscard]] CompiledQuery compile(const Dialect& dialect) const {
