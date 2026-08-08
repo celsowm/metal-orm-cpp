@@ -3,12 +3,14 @@
 #include "metal/value.hpp"
 
 #include <algorithm>
+#include <concepts>
 #include <cstddef>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -76,9 +78,7 @@ public:
         return !_metal_added().empty() || !_metal_removed().empty();
     }
 
-    void _metal_bind_loader(std::function<void()> loader) {
-        loader_ = std::move(loader);
-    }
+    void _metal_bind_loader(std::function<void()> loader) { loader_ = std::move(loader); }
 
     void _metal_hydrate(std::vector<value_type> values) {
         items_ = deduplicate(std::move(values));
@@ -88,17 +88,13 @@ public:
 
     [[nodiscard]] std::vector<value_type> _metal_added() const {
         std::vector<value_type> out;
-        for (const auto& value : items_) {
-            if (!contains(baseline_, value)) out.push_back(value);
-        }
+        for (const auto& value : items_) if (!contains(baseline_, value)) out.push_back(value);
         return out;
     }
 
     [[nodiscard]] std::vector<value_type> _metal_removed() const {
         std::vector<value_type> out;
-        for (const auto& value : baseline_) {
-            if (!contains(items_, value)) out.push_back(value);
-        }
+        for (const auto& value : baseline_) if (!contains(items_, value)) out.push_back(value);
         return out;
     }
 
@@ -112,9 +108,7 @@ private:
     static std::vector<value_type> deduplicate(std::vector<value_type> values) {
         std::vector<value_type> out;
         out.reserve(values.size());
-        for (auto& value : values) {
-            if (value && !contains(out, value)) out.push_back(std::move(value));
-        }
+        for (auto& value : values) if (value && !contains(out, value)) out.push_back(std::move(value));
         return out;
     }
 
@@ -154,11 +148,8 @@ public:
         return items_;
     }
 
-    void attach(value_type value) { attach(std::move(value), std::nullopt); }
-
-    void attach(value_type value, Pivot pivot) {
-        attach(std::move(value), std::optional<Pivot>{std::move(pivot)});
-    }
+    void attach(value_type value) { attach_impl(std::move(value), std::nullopt); }
+    void attach(value_type value, Pivot pivot) { attach_impl(std::move(value), std::optional<Pivot>{std::move(pivot)}); }
 
     template <typename Key>
     requires (!std::same_as<std::remove_cvref_t<Key>, value_type>)
@@ -169,9 +160,7 @@ public:
     template <typename Key>
     requires (!std::same_as<std::remove_cvref_t<Key>, value_type>)
     value_type attach(Key&& key, Pivot pivot) {
-        return attach_id_value(
-            to_value(std::forward<Key>(key)),
-            std::optional<Pivot>{std::move(pivot)});
+        return attach_id_value(to_value(std::forward<Key>(key)), std::optional<Pivot>{std::move(pivot)});
     }
 
     bool detach(const value_type& value) {
@@ -200,7 +189,6 @@ public:
     void sync_by_ids(const Range& ids) {
         load();
         ensure_identity_binding();
-
         std::unordered_set<std::string> desired;
         for (const auto& id : ids) {
             const Value value = to_value(id);
@@ -212,7 +200,6 @@ public:
             });
             if (!exists) attach_id_value(value, std::nullopt);
         }
-
         items_.erase(
             std::remove_if(items_.begin(), items_.end(), [&](const auto& item) {
                 const auto identity = identity_key_(*item);
@@ -234,9 +221,7 @@ public:
         return !_metal_added().empty() || !_metal_removed().empty() || !pivot_updates_.empty();
     }
 
-    void _metal_bind_loader(std::function<void()> loader) {
-        loader_ = std::move(loader);
-    }
+    void _metal_bind_loader(std::function<void()> loader) { loader_ = std::move(loader); }
 
     void _metal_bind_identity(
         std::function<std::optional<std::string>(const T&)> identity_key,
@@ -249,8 +234,7 @@ public:
         items_.clear();
         pivots_.clear();
         for (auto& [entity, pivot_value] : values) {
-            if (!entity) continue;
-            if (find_equivalent(entity)) continue;
+            if (!entity || find_equivalent(entity)) continue;
             if (pivot_value) pivots_.emplace(entity.get(), std::move(*pivot_value));
             items_.push_back(std::move(entity));
         }
@@ -261,33 +245,25 @@ public:
 
     [[nodiscard]] std::vector<value_type> _metal_added() const {
         std::vector<value_type> out;
-        for (const auto& value : items_) {
-            if (!contains_equivalent(baseline_, value)) out.push_back(value);
-        }
+        for (const auto& value : items_) if (!contains_equivalent(baseline_, value)) out.push_back(value);
         return out;
     }
 
     [[nodiscard]] std::vector<value_type> _metal_removed() const {
         std::vector<value_type> out;
-        for (const auto& value : baseline_) {
-            if (!contains_equivalent(items_, value)) out.push_back(value);
-        }
+        for (const auto& value : baseline_) if (!contains_equivalent(items_, value)) out.push_back(value);
         return out;
     }
 
     [[nodiscard]] std::vector<value_type> _metal_pivot_updates() const {
         std::vector<value_type> out;
         for (const auto& value : items_) {
-            if (pivot_updates_.contains(value.get()) && contains_equivalent(baseline_, value)) {
-                out.push_back(value);
-            }
+            if (pivot_updates_.contains(value.get()) && contains_equivalent(baseline_, value)) out.push_back(value);
         }
         return out;
     }
 
-    const Pivot* _metal_pivot(const value_type& value) const {
-        return pivot(value);
-    }
+    const Pivot* _metal_pivot(const value_type& value) const { return pivot(value); }
 
     void _metal_accept_changes() {
         baseline_ = items_;
@@ -295,7 +271,7 @@ public:
     }
 
 private:
-    void attach(value_type value, std::optional<Pivot> pivot_value) {
+    void attach_impl(value_type value, std::optional<Pivot> pivot_value) {
         if (!value) throw std::invalid_argument("MetalORM: cannot attach a null entity");
         if (const auto index = find_equivalent(value)) {
             auto& existing = items_[*index];
@@ -324,27 +300,21 @@ private:
         }
         if (!id_factory_) throw std::logic_error("MetalORM: relation collection cannot materialize an ID stub");
         auto entity = id_factory_(key);
-        attach(entity, std::move(pivot_value));
+        attach_impl(entity, std::move(pivot_value));
         return entity;
     }
 
     void ensure_identity_binding() const {
-        if (!identity_key_) {
-            throw std::logic_error("MetalORM: ID-based collection operation requires a Session-bound relation");
-        }
+        if (!identity_key_) throw std::logic_error("MetalORM: ID-based collection operation requires a Session-bound relation");
     }
 
     std::optional<std::size_t> find_equivalent(const value_type& value) const {
-        for (std::size_t i = 0; i < items_.size(); ++i) {
-            if (same_entity(items_[i], value)) return i;
-        }
+        for (std::size_t i = 0; i < items_.size(); ++i) if (same_entity(items_[i], value)) return i;
         return std::nullopt;
     }
 
     bool contains_equivalent(const std::vector<value_type>& values, const value_type& value) const {
-        return std::any_of(values.begin(), values.end(), [&](const auto& candidate) {
-            return same_entity(candidate, value);
-        });
+        return std::any_of(values.begin(), values.end(), [&](const auto& candidate) { return same_entity(candidate, value); });
     }
 
     bool same_entity(const value_type& left, const value_type& right) const {
@@ -366,3 +336,30 @@ private:
 };
 
 } // namespace metal
+
+namespace metal::reflect {
+
+template <typename T>
+struct many_collection_traits {
+    static constexpr bool value = false;
+};
+
+template <typename Target>
+struct many_collection_traits<metal::has_many_collection<Target>> {
+    static constexpr bool value = true;
+    using target_type = Target;
+};
+
+template <typename Target, typename Pivot>
+struct many_collection_traits<metal::many_to_many_collection<Target, Pivot>> {
+    static constexpr bool value = true;
+    using target_type = Target;
+};
+
+template <typename T>
+inline constexpr bool is_many_collection_v = many_collection_traits<std::remove_cvref_t<T>>::value;
+
+template <typename T>
+using many_target_t = typename many_collection_traits<std::remove_cvref_t<T>>::target_type;
+
+} // namespace metal::reflect
