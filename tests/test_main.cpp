@@ -46,7 +46,7 @@ struct [[=metal::mapping::table{"users"}]] User {
     metal::has_many_collection<Post> posts;
 
     [[=metal::mapping::has_one<^^Profile::user_id>{}]]
-    std::shared_ptr<Profile> profile;
+    metal::has_one_reference<Profile> profile;
 
     [[=metal::mapping::many_to_many<
         ^^UserRole,
@@ -63,7 +63,7 @@ struct [[=metal::mapping::table{"comments"}]] Comment {
     std::string body;
 
     [[=metal::mapping::belongs_to<^^Comment::user_id>{}]]
-    std::shared_ptr<User> author;
+    metal::belongs_to_reference<User> author;
 };
 
 static_assert(metal::reflect::Mapped<UserRole>);
@@ -76,6 +76,12 @@ static_assert(metal::reflect::primary_key_count<UserRole>() == 2);
 static_assert(std::same_as<
     metal::reflect::member_type_t<^^User::roles>,
     metal::many_to_many_collection<Role, UserRole>>);
+static_assert(std::same_as<
+    metal::reflect::member_type_t<^^User::profile>,
+    metal::has_one_reference<Profile>>);
+static_assert(std::same_as<
+    metal::reflect::member_type_t<^^Comment::author>,
+    metal::belongs_to_reference<User>>);
 
 int main() {
     metal::SQLiteDialect dialect;
@@ -164,6 +170,7 @@ int main() {
 
     assert(users.size() == 2);
     assert(users[0]->posts.loaded() && users[0]->roles.loaded());
+    assert(users[0]->profile.loaded());
     assert(users[0]->posts.size() == 2);
     assert(users[1]->posts.size() == 1);
     assert(users[0]->profile && users[0]->profile->bio == "C++26");
@@ -171,6 +178,7 @@ int main() {
     assert(users[0]->roles.size() == 2);
     assert(users[1]->roles.size() == 1);
     assert(!users[0]->posts.dirty() && !users[0]->roles.dirty());
+    assert(!users[0]->profile.dirty());
 
     std::shared_ptr<Role> shared_developer;
     std::shared_ptr<Role> loaded_admin;
@@ -185,7 +193,9 @@ int main() {
         .include<^^Comment::author>()
         .all();
     assert(comments.size() == 1);
+    assert(comments[0]->author.loaded());
     assert(comments[0]->author == users[0]);
+    assert(!comments[0]->author.dirty());
 
     auto auditor = std::make_shared<Role>();
     auditor->name = "auditor";
@@ -216,9 +226,13 @@ int main() {
 
     assert(reloaded);
     assert(!reloaded->posts.loaded() && !reloaded->roles.loaded());
+    assert(!reloaded->profile.loaded());
     reloaded->posts.load();
     reloaded->roles.load();
+    const auto& lazy_profile = reloaded->profile.load();
     assert(reloaded->posts.loaded() && reloaded->roles.loaded());
+    assert(reloaded->profile.loaded());
+    assert(lazy_profile && lazy_profile->bio == "C++26");
     assert(reloaded->posts.size() == 2);
     assert(reloaded->roles.size() == 2);
 
