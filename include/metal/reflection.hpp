@@ -1,5 +1,6 @@
 #pragma once
 
+#include "metal/collection.hpp"
 #include "metal/mapping.hpp"
 #include "metal/value.hpp"
 
@@ -9,7 +10,6 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
-#include <vector>
 
 #ifndef __cpp_impl_reflection
 #error "MetalORM requires C++26 static reflection (GCC 16+ with -std=c++26 -freflection)"
@@ -166,8 +166,8 @@ struct many_collection_traits {
     static constexpr bool value = false;
 };
 
-template <typename Target, typename Alloc>
-struct many_collection_traits<std::vector<std::shared_ptr<Target>, Alloc>> {
+template <typename Target>
+struct many_collection_traits<metal::collection<Target>> {
     static constexpr bool value = true;
     using target_type = Target;
 };
@@ -249,7 +249,7 @@ consteval void validate_relation() {
                       "MetalORM: has_one key types are incompatible");
     } else if constexpr (Traits::kind == mapping::relation_kind::has_many) {
         static_assert(is_many_collection_v<M>,
-                      "MetalORM: has_many member must be std::vector<std::shared_ptr<T>>");
+                      "MetalORM: has_many member must be metal::collection<T>");
         using Target = many_target_t<M>;
         static_assert(Entity<Target>,
                       "MetalORM: has_many target must be a mapped entity with one primary key");
@@ -266,7 +266,9 @@ consteval void validate_relation() {
                       "MetalORM: has_many key types are incompatible");
     } else if constexpr (Traits::kind == mapping::relation_kind::many_to_many) {
         static_assert(is_many_collection_v<M>,
-                      "MetalORM: many_to_many member must be std::vector<std::shared_ptr<T>>");
+                      "MetalORM: many_to_many member must be metal::collection<T>");
+        static_assert(!mapping::cascades_remove(Traits::cascade),
+                      "MetalORM: many_to_many does not allow cascade remove of shared targets");
         using Target = many_target_t<M>;
         static_assert(Entity<Target>,
                       "MetalORM: many_to_many target must be a mapped entity with one primary key");
