@@ -1,6 +1,5 @@
 #pragma once
 
-#include "metal/dml.hpp"
 #include "metal/execution.hpp"
 #include "metal/identity_map.hpp"
 #include "metal/query.hpp"
@@ -70,7 +69,7 @@ public:
         : executor_(std::move(executor)),
           dialect_(std::move(dialect)),
           unit_of_work_(*executor_, *dialect_),
-          relation_changes_(unit_of_work_) {}
+          relation_changes_(unit_of_work_, *executor_, *dialect_) {}
 
     template <reflect::Entity T>
     EntityQuery<T> query() { return EntityQuery<T>{*this}; }
@@ -187,13 +186,23 @@ private:
         };
         tracked.erase_identity = [this](const Value& pk) { identity_map_.erase<T>(pk); };
         tracked.prepare_relations = [this, weak = std::weak_ptr<T>(entity)] {
-            if (auto locked = weak.lock()) prepare_collections(*locked);
+            if (auto locked = weak.lock()) {
+                relation_changes_.prepare_entity(*locked, [this](const auto& target) {
+                    this->persist(target);
+                });
+            }
         };
         tracked.flush_relations = [this, weak = std::weak_ptr<T>(entity)] {
-            if (auto locked = weak.lock()) flush_collections(*locked);
+            if (auto locked = weak.lock()) {
+                relation_changes_.process_entity(*locked, [this](const auto& target) {
+                    this->remove(target);
+                });
+            }
         };
         tracked.accept_relations = [weak = std::weak_ptr<T>(entity)] {
-            if (auto locked = weak.lock()) accept_collections(*locked);
+            if (auto locked = weak.lock()) {
+                RelationChangeProcessor::accept_entity(*locked);
+            }
         };
         unit_of_work_.track(entity.get(), std::move(tracked));
 
@@ -404,154 +413,6 @@ private:
 
         for (auto& root : roots) {
             (*root).[:Relation:]._metal_hydrate(std::move(loaded[root.get()]));
-        }
-    }
-
-    template <reflect::Entity Root>
-    void prepare_collections(Root& root) {
-        template for (constexpr auto relation : reflect::data_members<Root>()) {
-            if constexpr (reflect::has_relation_annotation<relation>()) {
-                using A = reflect::relation_annotation_t<relation>;
-                using Traits = mapping::relation_annotation_traits<A>;
-                if constexpr (Traits::kind == mapping::relation_kind::has_many ||
-                              Traits::kind == mapping::relation_kind::many_to_many) {
-                    using Target = reflect::many_target_t<reflect::member_type_t<relation>>;
-                    auto& values = root.[:relation:];
-                    if constexpr (mapping::cascades_persist(Traits::cascade)) {
-                        for (const auto& target : values._metal_added()) {
-                            if (target && !unit_of_work_.contains(target.get())) {
-                                persist<Target>(target);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    template <reflect::Entity Root>
-    void flush_collections(Root& root) {
-        template for (constexpr auto relation : reflect::data_members<Root>()) {
-            if constexpr (reflect::has_relation_annotation<relation>()) {
-                using A = reflect::relation_annotation_t<relation>;
-                using Traits = mapping::relation_annotation_traits<A>;
-                if constexpr (Traits::kind == mapping::relation_kind::has_many) {
-                    flush_has_many_collection<Root, relation>(root);
-                } else if constexpr (Traits::kind == mapping::relation_kind::many_to_many) {
-                    flush_many_to_many_collection<Root, relation>(root);
-                }
-            }
-        }
-    }
-
-    template <reflect::Entity Root>
-    static void accept_collections(Root& root) {
-        template for (constexpr auto relation : reflect::data_members<Root>()) {
-            if constexpr (reflect::has_relation_annotation<relation>()) {
-                using A = reflect::relation_annotation_t<relation>;
-                using Traits = mapping::relation_annotation_traits<A>;
-                if constexpr (Traits::kind == mapping::relation_kind::has_many ||
-                              Traits::kind == mapping::relation_kind::many_to_many) {
-                    root.[:relation:]._metal_accept_changes();
-                }
-            }
-        }
-    }
-
-    template <reflect::Entity Root, std::meta::info Relation>
-    void flush_has_many_collection(Root& root) {
-        using A = reflect::relation_annotation_t<Relation>;
-        using Traits = mapping::relation_annotation_traits<A>;
-        using Target = reflect::many_target_t<reflect::member_type_t<Relation>>;
-        constexpr auto target_fk = Traits::target_foreign_key();
-        constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
-        constexpr auto target_pk = reflect::primary_key_member<Target>();
-        using ForeignKey = reflect::member_type_t<target_fk>;
-
-        auto& values = root.[:Relation:];
-        const Value root_key = to_value(root.[:local_key:]);
-        if (is_empty_generated_value(root_key) && (!values._metal_added().empty() || !values._metal_removed().empty())) {
-            throw std::runtime_error("MetalORM: cannot flush has_many for a root without a persisted key");
-        }
-
-        for (const auto& target : values._metal_added()) {
-            const Value target_key = to_value((*target).[:target_pk:]);
-            if (is_empty_generated_value(target_key)) {
-                throw std::runtime_error("MetalORM: attached has_many target is not persisted; enable cascade persist or persist it explicitly");
-            }
-            (*target).[:target_fk:] = from_value<ForeignKey>(root_key);
-            const auto compiled = UpdateQueryBuilder{reflect::table_name<Target>()}
-                .set({DmlAssignment{reflect::column_name<target_fk>(), root_key}})
-                .where_eq(reflect::column_name<target_pk>(), target_key)
-                .compile(*dialect_);
-            executor_->execute(compiled.sql, compiled.params);
-            unit_of_work_.refresh_snapshot(target.get());
-        }
-
-        for (const auto& target : values._metal_removed()) {
-            if constexpr (mapping::cascades_remove(Traits::cascade)) {
-                remove<Target>(target);
-            } else if constexpr (is_optional_v<ForeignKey>) {
-                const Value target_key = to_value((*target).[:target_pk:]);
-                (*target).[:target_fk:] = std::nullopt;
-                const auto compiled = UpdateQueryBuilder{reflect::table_name<Target>()}
-                    .set({DmlAssignment{reflect::column_name<target_fk>(), Value{nullptr}}})
-                    .where_eq(reflect::column_name<target_pk>(), target_key)
-                    .compile(*dialect_);
-                executor_->execute(compiled.sql, compiled.params);
-                unit_of_work_.refresh_snapshot(target.get());
-            } else {
-                throw std::runtime_error(
-                    "MetalORM: detaching from a non-nullable has_many requires cascade remove");
-            }
-        }
-    }
-
-    template <reflect::Entity Root, std::meta::info Relation>
-    void flush_many_to_many_collection(Root& root) {
-        using A = reflect::relation_annotation_t<Relation>;
-        using Traits = mapping::relation_annotation_traits<A>;
-        using Target = reflect::many_target_t<reflect::member_type_t<Relation>>;
-        using Pivot = [: Traits::pivot() :];
-        constexpr auto pivot_root_fk = Traits::pivot_root_foreign_key();
-        constexpr auto pivot_target_fk = Traits::pivot_target_foreign_key();
-        constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
-        constexpr auto target_key_member = reflect::key_or_primary<Target>(Traits::target_key());
-
-        auto& values = root.[:Relation:];
-        const Value root_key = to_value(root.[:local_key:]);
-        if (is_empty_generated_value(root_key) && (!values._metal_added().empty() || !values._metal_removed().empty())) {
-            throw std::runtime_error("MetalORM: cannot flush many_to_many for a root without a persisted key");
-        }
-
-        for (const auto& target : values._metal_added()) {
-            const Value target_key = to_value((*target).[:target_key_member:]);
-            if (is_empty_generated_value(target_key)) {
-                throw std::runtime_error("MetalORM: attached many_to_many target is not persisted; enable cascade persist or persist it explicitly");
-            }
-            const auto compiled = InsertQueryBuilder{reflect::table_name<Pivot>()}
-                .values({
-                    DmlAssignment{reflect::column_name<pivot_root_fk>(), root_key},
-                    DmlAssignment{reflect::column_name<pivot_target_fk>(), target_key}
-                })
-                .on_conflict_do_nothing()
-                .compile(*dialect_);
-            executor_->execute(compiled.sql, compiled.params);
-        }
-
-        for (const auto& target : values._metal_removed()) {
-            const Value target_key = to_value((*target).[:target_key_member:]);
-            const auto compiled = DeleteQueryBuilder{reflect::table_name<Pivot>()}
-                .where({
-                    DmlPredicate{reflect::column_name<pivot_root_fk>(), CompareOp::Eq, root_key},
-                    DmlPredicate{reflect::column_name<pivot_target_fk>(), CompareOp::Eq, target_key}
-                })
-                .compile(*dialect_);
-            executor_->execute(compiled.sql, compiled.params);
-
-            if constexpr (mapping::cascades_remove(Traits::cascade)) {
-                remove<Target>(target);
-            }
         }
     }
 
