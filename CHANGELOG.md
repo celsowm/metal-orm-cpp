@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.0.11 - 2026-08-08
+
+Computed-expression and derived-table parity release. SQLite remains the only executor/dialect intentionally.
+
+- Split the former monolithic query header into focused core types, SQLite compilation, typed expressions, function catalog, and SELECT builder modules while keeping `metal/query.hpp` as the public facade.
+- Replace projection-only special cases with a recursive typed scalar AST shared by columns, literals, aggregates, SQL functions, CASE expressions, and window functions.
+- Preserve compile-time query-scope ownership through nested computed expressions, so a function over a foreign entity field cannot be projected before that owner is introduced into the query scope.
+- Add `from_subquery(query, alias)` derived-table sources backed by the normal typed `BasicSelectQuery` AST rather than raw SQL.
+- Preserve lexical placeholder ordering across computed SELECT projections, derived-table subqueries, outer predicates, CTEs, and nested subqueries.
+- Explicitly reject derived-table column alias lists on the SQLite-only backend because SQLite does not support `AS alias(col1, col2)` for derived tables; callers should alias the source projections instead.
+- Add typed searched CASE expressions with `case_when(condition, value).when(...).otherwise(...)`, including reuse as both a SELECT projection and a WHERE operand.
+- Add a generic validated `sql_function<Result>(name, args...)` scalar AST node and typed helpers for broad SQLite-supported text, numeric, control-flow, date/time, and JSON function families.
+- Add nested computed expressions such as `lower(trim(field))`, `coalesce(nullif(...), ...)`, date-part extraction, and JSON-path extraction without leaking column-name strings.
+- Add aggregate helpers for `STDDEV` and `VARIANCE` to mirror the reference AST surface; execution remains dependent on SQLite function availability.
+- Keep custom function names restricted to simple SQL identifiers while all literal arguments remain bound parameters.
+- Fix parameter-order handling for computed operands used with subqueries and avoid reusing a single placeholder token when a renderer needs the same logical value more than once.
+- Add an end-to-end SQLite suite covering derived tables, CASE projection/filtering, nested text/control/date/JSON functions, parameter ordering, and compile-time foreign-owner rejection.
+- Validate the representative generated SQL independently against SQLite during development.
+
 ## 0.0.10 - 2026-08-08
 
 Advanced SELECT parity release. SQLite remains the only executor/dialect intentionally.
@@ -63,7 +82,7 @@ Typed pivot-patch and alternate-target-key parity release. SQLite remains the on
 - Validate pivot-patch value compatibility at compile time instead of deferring obvious type mismatches to runtime conversion.
 - Merge repeated pivot patches by column and update the hydrated pivot object in memory without resetting untouched fields.
 - Compile pivot INSERT/UPDATE DML from only the fields explicitly present in the patch, preserving existing database values for omitted members.
-- Filter pivot root/target FK columns from generated pivot DML, matching the original `filterPivotPayload` behavior.
+- Filter pivot root/target FK columns from generated pivot DML payloads, matching the original `filterPivotPayload` behavior.
 - Make N:N attach/detach/sync consistently use the relation's reflected `targetKey`, including when it is not the target primary key.
 - Preserve normal Session Identity Map semantics by primary key after alternate-key relation hydration.
 - Make cascade remove work for alternate-key attach stubs by deleting the target through the declared relation target key when no tracked entity exists.
