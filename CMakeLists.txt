@@ -32,6 +32,39 @@ if(METAL_ORM_BUILD_EXAMPLES)
 endif()
 
 if(METAL_ORM_BUILD_TESTS)
+    function(metal_expect_compile_failure name source expected_message)
+        try_compile(
+            did_compile
+            "${CMAKE_BINARY_DIR}/compile-fail-${name}"
+            SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
+            CMAKE_FLAGS
+                "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+                "-DCMAKE_CXX_FLAGS=-std=c++26 -freflection -I${CMAKE_CURRENT_SOURCE_DIR}/include"
+            OUTPUT_VARIABLE compiler_output
+        )
+
+        if(did_compile)
+            message(FATAL_ERROR "Expected compile failure '${name}' unexpectedly compiled")
+        endif()
+
+        string(FIND "${compiler_output}" "${expected_message}" diagnostic_position)
+        if(diagnostic_position EQUAL -1)
+            message(FATAL_ERROR
+                "Compile failure '${name}' did not contain expected MetalORM diagnostic '${expected_message}'.\n${compiler_output}")
+        endif()
+    endfunction()
+
+    metal_expect_compile_failure(
+        incompatible-relation-keys
+        tests/compile_fail/incompatible_relation_keys.cpp
+        "has_many key types are incompatible"
+    )
+    metal_expect_compile_failure(
+        wrong-relation-shape
+        tests/compile_fail/wrong_relation_shape.cpp
+        "has_many member must be std::vector<std::shared_ptr<T>>"
+    )
+
     enable_testing()
     add_executable(metal-orm-tests tests/test_main.cpp)
     target_link_libraries(metal-orm-tests PRIVATE metal::orm)
