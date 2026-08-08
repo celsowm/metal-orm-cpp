@@ -39,8 +39,10 @@ public:
         using M = [: std::meta::type_of(Member) :];
         static_assert(PersistableValue<M>,
                       "MetalORM: pivot_patch only supports persistent scalar members");
+        static_assert(compatible_value<M, V>(),
+                      "MetalORM: pivot_patch value is incompatible with pivot member type");
 
-        constexpr auto column = [] consteval -> std::string_view {
+        constexpr auto column = []() consteval -> std::string_view {
             auto annotations = std::meta::annotations_of_with_type(Member, ^^mapping::column);
             if (annotations.size() == 1) {
                 return std::meta::extract<mapping::column>(annotations.front()).name.view();
@@ -92,6 +94,35 @@ public:
     }
 
 private:
+    template <typename Member, typename Input>
+    static consteval bool compatible_value() {
+        using M = std::remove_cvref_t<Member>;
+        using V = std::remove_cvref_t<Input>;
+
+        if constexpr (is_optional_v<M>) {
+            using Inner = typename M::value_type;
+            if constexpr (std::same_as<V, std::nullptr_t>) return true;
+            if constexpr (is_optional_v<V>) {
+                return compatible_value<Inner, typename V::value_type>();
+            }
+            return compatible_value<Inner, Input>();
+        } else if constexpr (is_optional_v<V> || std::same_as<V, std::nullptr_t>) {
+            return false;
+        } else if constexpr (std::same_as<M, std::string>) {
+            return std::same_as<V, std::string> ||
+                   std::same_as<V, std::string_view> ||
+                   std::is_convertible_v<Input, std::string_view>;
+        } else if constexpr (std::same_as<M, bool>) {
+            return std::same_as<V, bool>;
+        } else if constexpr (std::is_integral_v<M>) {
+            return std::is_integral_v<V> && !std::same_as<V, bool>;
+        } else if constexpr (std::is_floating_point_v<M>) {
+            return std::is_arithmetic_v<V> && !std::same_as<V, bool>;
+        } else {
+            return false;
+        }
+    }
+
     std::vector<entry> entries_;
 };
 
