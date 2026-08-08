@@ -1,7 +1,5 @@
 #pragma once
 
-#include "metal/query/core_types.hpp"
-
 #include <optional>
 #include <string>
 #include <vector>
