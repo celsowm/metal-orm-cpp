@@ -1,0 +1,108 @@
+#pragma once
+
+#include "metal/ddl.hpp"
+#include "metal/reference_traits.hpp"
+#include "metal/schema_types.hpp"
+
+#include <algorithm>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
+namespace metal {
+
+template <reflect::Entity T>
+ExpectedTable expected_table(const Dialect& dialect) {
+    static_assert(reflect::validate_mapping<T>());
+
+    ExpectedTable expected;
+    expected.table.name = reflect::table_name<T>();
+    expected.create_table_sql = create_table_sql<T>(dialect);
+
+    reflect::for_each_column<T>([&]<std::meta::info Member>() {
+        using M = reflect::member_type_t<Member>;
+        DatabaseColumn column;
+        column.name = reflect::column_name<Member>();
+        column.type = sqlite_type_name<M>();
+        column.not_null = !is_optional_v<M>;
+        column.auto_increment = reflect::has<mapping::generated_t>(Member);
+        expected.table.columns.push_back(std::move(column));
+        if constexpr (reflect::has<mapping::primary_key_t>(Member)) {
+            expected.table.primary_key.push_back(reflect::column_name<Member>());
+        }
+    });
+
+    template for (constexpr auto relation : reflect::data_members<T>()) {
+        if constexpr (reflect::has_relation_annotation<relation>()) {
+            using A = reflect::relation_annotation_t<relation>;
+            using Traits = mapping::relation_annotation_traits<A>;
+            if constexpr (Traits::kind == mapping::relation_kind::belongs_to) {
+                using Target = reflect::single_target_t<reflect::member_type_t<relation>>;
+                constexpr auto fk = Traits::foreign_key();
+                constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
+                const auto fk_name = reflect::column_name<fk>();
+                auto found = std::find_if(
+                    expected.table.columns.begin(), expected.table.columns.end(),
+                    [&](const DatabaseColumn& column) { return column.name == fk_name; });
+                if (found != expected.table.columns.end()) {
+                    found->references = ForeignKeyReference{
+                        .table = reflect::table_name<Target>(),
+                        .column = reflect::column_name<target_key>()
+                    };
+                }
+            }
+        }
+    }
+
+    return expected;
+}
+
+template <reflect::Entity... Ts>
+ExpectedSchema expected_schema(const Dialect& dialect) {
+    ExpectedSchema result;
+    result.tables.reserve(sizeof...(Ts));
+    (result.tables.push_back(expected_table<Ts>(dialect)), ...);
+    return result;
+}
+
+template <reflect::Entity T, std::meta::info... Members>
+void add_expected_index(
+    ExpectedSchema& schema,
+    const Dialect& dialect,
+    std::string name,
+    bool unique = false) {
+    static_assert(sizeof...(Members) > 0,
+                  "MetalORM: schema index requires at least one reflected column");
+    static_assert((std::same_as<reflect::owner_type_t<Members>, T> && ...),
+                  "MetalORM: schema index members must belong to the declared entity");
+    static_assert((reflect::is_persistent_member<Members>() && ...),
+                  "MetalORM: schema index members must be persistent scalar columns");
+
+    const auto table_name = reflect::table_name<T>();
+    auto table = std::find_if(
+        schema.tables.begin(), schema.tables.end(),
+        [&](const ExpectedTable& entry) { return entry.table.name == table_name; });
+    if (table == schema.tables.end()) {
+        throw std::invalid_argument("MetalORM: expected schema does not contain the indexed entity table");
+    }
+
+    DatabaseIndex index;
+    index.name = std::move(name);
+    index.unique = unique;
+    (index.columns.push_back(DatabaseIndexColumn{reflect::column_name<Members>()}), ...);
+
+    std::string sql = "CREATE ";
+    if (unique) sql += "UNIQUE ";
+    sql += "INDEX IF NOT EXISTS " + dialect.quote_identifier(index.name) +
+           " ON " + dialect.quote_identifier(table_name) + " (";
+    for (std::size_t i = 0; i < index.columns.size(); ++i) {
+        if (i) sql += ", ";
+        sql += dialect.quote_identifier(index.columns[i].column);
+    }
+    sql += ");";
+
+    table->table.indexes.push_back(index);
+    table->create_index_sql.push_back(std::move(sql));
+}
+
+} // namespace metal
