@@ -84,6 +84,29 @@ int main() {
     assert((row_ids(db->execute(has_cpp_sql.sql, has_cpp_sql.params).rows) ==
             std::vector<std::int64_t>{1, 3}));
 
+    // The relation predicate must be compiled before an existing root LIMIT.
+    auto limited_root = metal::select<RpUser>()
+        .order_by(metal::field<^^RpUser::id>, false)
+        .limit(1);
+    auto limited_has_cpp = metal::where_has<^^RpUser::posts>(
+        limited_root,
+        [](auto& posts) {
+            posts.where(metal::like(metal::field<^^RpPost::title>, "C++%"));
+        });
+    const auto limited_has_cpp_sql = limited_has_cpp.compile(dialect);
+    assert((row_ids(db->execute(limited_has_cpp_sql.sql, limited_has_cpp_sql.params).rows) ==
+            std::vector<std::int64_t>{3}));
+
+    // Child LIMIT/OFFSET must run after correlation, not on the global child table.
+    auto has_second_post = metal::where_has<^^RpUser::posts>(
+        metal::select<RpUser>(),
+        [](auto& posts) {
+            posts.order_by(metal::field<^^RpPost::id>).limit(100).offset(1);
+        });
+    const auto has_second_post_sql = has_second_post.compile(dialect);
+    assert((row_ids(db->execute(has_second_post_sql.sql, has_second_post_sql.params).rows) ==
+            std::vector<std::int64_t>{1}));
+
     auto no_posts = metal::where_has_not<^^RpUser::posts>(metal::select<RpUser>());
     const auto no_posts_sql = no_posts.compile(dialect);
     assert(no_posts_sql.sql.find("NOT EXISTS") != std::string::npos);
@@ -118,12 +141,34 @@ int main() {
     assert(page.page_size == 2);
     assert((row_ids(page.items) == std::vector<std::int64_t>{4, 5}));
 
+    // execute_paged owns pagination and therefore ignores an earlier LIMIT/OFFSET.
+    auto prelimited = metal::select<RpUser>()
+        .order_by(metal::field<^^RpUser::id>)
+        .limit(1)
+        .offset(1);
+    const auto replaced_page = metal::execute_paged(
+        prelimited, *db, dialect, metal::PageOptions{.page = 2, .page_size = 2});
+    assert(replaced_page.total_items == 5);
+    assert((row_ids(replaced_page.items) == std::vector<std::int64_t>{3, 4}));
+
     metal::Session session{db};
     const auto entity_page = metal::execute_paged(
         admins, session, metal::PageOptions{.page = 1, .page_size = 1});
     assert(entity_page.total_items == 2);
     assert((entity_ids(entity_page.items) == std::vector<std::int64_t>{1}));
     assert(session.find<RpUser>(1) == entity_page.items.front());
+
+    // A 1:N join physically duplicates user 1. Tracked pagination must page roots.
+    auto joined_users = metal::select<RpUser>()
+        .join<^^RpUser::posts>()
+        .order_by(metal::field<^^RpUser::id>);
+    const auto joined_page_1 = metal::execute_paged(
+        joined_users, session, metal::PageOptions{.page = 1, .page_size = 2});
+    assert(joined_page_1.total_items == 3);
+    assert((entity_ids(joined_page_1.items) == std::vector<std::int64_t>{1, 3}));
+    const auto joined_page_2 = metal::execute_paged(
+        joined_users, session, metal::PageOptions{.page = 2, .page_size = 2});
+    assert((entity_ids(joined_page_2.items) == std::vector<std::int64_t>{4}));
 
     const std::vector<metal::CursorOrderTerm> id_order{
         metal::cursor_order(metal::field<^^RpUser::id>)};
@@ -167,6 +212,20 @@ int main() {
     assert((entity_ids(tracked_cursor.items) == std::vector<std::int64_t>{1, 2}));
     assert(tracked_cursor.items.front() == session.find<RpUser>(1));
 
+    auto joined_cursor_1 = metal::execute_cursor(
+        joined_users,
+        session,
+        id_order,
+        metal::CursorPageOptions{.first = 2});
+    assert((entity_ids(joined_cursor_1.items) == std::vector<std::int64_t>{1, 3}));
+    assert(joined_cursor_1.page_info.has_next_page);
+    auto joined_cursor_2 = metal::execute_cursor(
+        joined_users,
+        session,
+        id_order,
+        metal::CursorPageOptions{.first = 2, .after = joined_cursor_1.page_info.end_cursor});
+    assert((entity_ids(joined_cursor_2.items) == std::vector<std::int64_t>{4}));
+
     const std::vector<metal::CursorOrderTerm> score_order{
         metal::cursor_order(metal::field<^^RpUser::score>, false),
         metal::cursor_order(metal::field<^^RpUser::id>)};
@@ -190,6 +249,15 @@ int main() {
         signature_rejected = true;
     }
     assert(signature_rejected);
+
+    // Mode, not cursor field name, chooses keyset direction, matching TypeScript.
+    auto first_before = metal::execute_cursor(
+        metal::select<RpUser>(),
+        *db,
+        dialect,
+        id_order,
+        metal::CursorPageOptions{.first = 2, .before = second.page_info.start_cursor});
+    assert((row_ids(first_before.items) == std::vector<std::int64_t>{4, 5}));
 
     return 0;
 }
