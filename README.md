@@ -4,21 +4,21 @@
 
 > A C++26-native ORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.1`
+**Version:** `0.0.2`
 
 MetalORM C++ is not a C++20 port with a reflection adapter bolted on. Reflection is the architecture.
 There is intentionally no `entity_traits<T>`, no registration macro, no compatibility metadata layer and no support for pre-C++26 compilers.
+
+For now, **SQLite is intentionally the only executor/dialect**. The project is prioritizing the C++26 object/metadata model before multiplying database backends.
 
 ## Requirements
 
 - GCC 16+
 - `-std=c++26 -freflection`
 - CMake 3.20+
-- SQLite 3 development headers for the 0.0.1 executor
+- SQLite 3 development headers
 
-GCC 16 implements the C++26 reflection proposal P2996R13 together with annotations (P3394R4), `define_static_*` (P3491R3) and expansion statements (P1306R5).
-
-## Model
+## Model once, reflect everywhere
 
 ```cpp
 #include <metal/metal.hpp>
@@ -26,8 +26,12 @@ GCC 16 implements the C++26 reflection proposal P2996R13 together with annotatio
 struct [[=metal::mapping::table{"roles"}]] Role {
     [[=metal::mapping::primary_key, =metal::mapping::generated]]
     std::int64_t id{};
-
     std::string name;
+};
+
+struct [[=metal::mapping::table{"user_roles"}]] UserRole {
+    [[=metal::mapping::primary_key]] std::int64_t user_id{};
+    [[=metal::mapping::primary_key]] std::int64_t role_id{};
 };
 
 struct [[=metal::mapping::table{"users"}]] User {
@@ -35,35 +39,39 @@ struct [[=metal::mapping::table{"users"}]] User {
     std::int64_t id{};
 
     std::string name;
-    int age{};
-    bool active{true};
 
-    [[=metal::mapping::many_to_many{"user_roles", "user_id", "role_id"}]]
+    [[=metal::mapping::many_to_many<
+        ^^UserRole,
+        ^^UserRole::user_id,
+        ^^UserRole::role_id>{}]]
     std::vector<std::shared_ptr<Role>> roles;
 };
 ```
 
-There is no duplicated schema declaration. `User` is the schema source of truth.
+There is no duplicated relation schema. The N:N annotation carries reflections, not strings. MetalORM derives the pivot table name, pivot column names, root primary key and target primary key from the reflected declarations.
 
-MetalORM reflects it with:
+The pivot is a normal mapped C++ type. Because it has a composite primary key, it satisfies `Mapped<UserRole>` but intentionally not `Entity<UserRole>`: `Session`/Identity Map entities require exactly one primary key.
 
-```cpp
-^^User
-^^User::name
-std::meta::nonstatic_data_members_of(...)
-std::meta::annotations_of_with_type(...)
-std::meta::identifier_of(...)
-```
+## Relationship annotations
 
-and accesses discovered members with splicing:
+All relationship metadata is strongly tied to reflected members:
 
 ```cpp
-entity.[:member:]
+[[=metal::mapping::has_many<^^Post::user_id>{}]]
+std::vector<std::shared_ptr<Post>> posts;
+
+[[=metal::mapping::has_one<^^Profile::user_id>{}]]
+std::shared_ptr<Profile> profile;
+
+[[=metal::mapping::belongs_to<^^Comment::user_id>{}]]
+std::shared_ptr<User> author;
 ```
 
-## Query
+The omitted local/target key defaults to that side's primary key. Non-default keys can also be supplied as reflections.
 
-Reflections are used directly as non-type template arguments:
+MetalORM validates relation shape and keys at compile time. A `has_many` on a `shared_ptr`, a FK reflected from the wrong class, incompatible key types, conflicting annotations, duplicate columns, or an invalid generated key is a compile error rather than a runtime ORM error.
+
+## Query + include
 
 ```cpp
 auto users = session.query<User>()
@@ -72,42 +80,55 @@ auto users = session.query<User>()
         (metal::field<^^User::active> == true)
     )
     .order_by(metal::field<^^User::name>)
+    .include<^^User::posts>()
+    .include<^^User::profile>()
     .include<^^User::roles>()
     .all();
 ```
 
-The field type is derived from `std::meta::type_of(^^User::age)`, so comparisons remain strongly typed.
-Cross-entity `where` expressions are different C++ types and cannot be passed to the wrong query.
+`include<^^...>()` dispatches from the annotation type at compile time to batched `belongs_to`, `has_one`, `has_many`, or `many_to_many` loading.
 
-## What 0.0.1 proves
+All hydrated targets pass through the same session Identity Map. If multiple roots reference the same row, they share the same C++ entity instance.
+
+## C++26 machinery used directly
+
+MetalORM intentionally exposes and builds around the adopted language facilities:
+
+```cpp
+^^User
+^^User::name
+std::meta::info
+std::meta::nonstatic_data_members_of(...)
+std::meta::annotations_of(...)
+std::meta::annotations_of_with_type(...)
+std::meta::type_of(...)
+std::meta::parent_of(...)
+std::meta::identifier_of(...)
+std::define_static_array(...)
+template for (...)
+entity.[:Member:]
+```
+
+Reflections are also used as non-type template arguments in fields and relationship metadata.
+
+## What 0.0.2 contains
 
 - C++26 annotations as ORM mapping metadata
 - zero handwritten member lists
-- compile-time member enumeration with expansion statements
-- splice-based hydration and snapshots
+- `Mapped<T>` and `Entity<T>` concepts
+- compile-time model validation
 - typed expression AST for `=`, `<>`, `>`, `>=`, `<`, `<=`, `AND`, `OR`, `NOT`
 - reflected `SELECT`
-- reflected SQLite DDL generation
+- reflected SQLite DDL
+- single and composite primary-key DDL
 - SQLite executor
 - `Session`
 - Unit of Work
-- dirty checking by reflected snapshots
+- reflected snapshots + dirty checking
 - generated primary keys
 - Identity Map
-- batched many-to-many hydration
-- identity preservation across N:N relationships
-
-## Identity Map + N:N
-
-If two users have the same role, the role is the same entity instance inside a session:
-
-```cpp
-auto users = session.query<User>()
-    .include<^^User::roles>()
-    .all();
-
-assert(users[0]->roles[0] == users[1]->roles[0]);
-```
+- batched `belongs_to`, `has_one`, `has_many`, `many_to_many`
+- shared target identity across relations
 
 ## Build
 
@@ -117,36 +138,31 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The CMake project deliberately fails on GCC < 16 and on non-GNU compilers for this first release.
-That restriction should disappear only when another mainstream compiler implements the same C++26 reflection model — not through a compatibility implementation.
+The CMake project deliberately fails on GCC < 16 and on non-GNU compilers for this release. That restriction should disappear only when another mainstream compiler implements the same C++26 reflection model, not through a compatibility metadata implementation.
 
-## Architecture
+## Direction
 
-The TypeScript MetalORM has three useful levels: SQL/query AST, ORM runtime, and entity metadata.
-The C++ port keeps that separation, but its metadata level is native C++26 reflection rather than decorators plus a runtime registry.
+The TypeScript MetalORM separates SQL/query AST, ORM runtime, and entity metadata. MetalORM C++ keeps those architectural layers, but the metadata layer is native C++26 reflection rather than decorators plus a runtime registry.
 
 ```text
-C++ entity declarations
-        │
-        │ ^^ + annotations
-        ▼
- compile-time metadata
-        │
-   ┌────┼───────────┐
-   ▼    ▼           ▼
-  DDL  Query AST   Hydration
-   │    │           │
-   └────┴─────┬─────┘
-              ▼
-          Orm Session
-              │
+C++ declarations + annotations
+           │
+           │ ^^
+           ▼
+   compile-time model
+           │
+   ┌───────┼───────────┐
+   ▼       ▼           ▼
+  DDL   Query AST   Hydration
+   │       │           │
+   └───────┴─────┬─────┘
+                 ▼
+              Session
+                 │
        Unit of Work / Identity Map
-              │
-              ▼
-           Executor
+                 │
+                 ▼
+              SQLite
 ```
 
-## Non-goals of 0.0.1
-
-The TypeScript project already has substantially more surface area. This first C++ version deliberately does not fake parity.
-Upcoming work can add PostgreSQL/MySQL/SQL Server dialects, one-to-one/one-to-many relations, pivot mutation (`attach`, `detach`, `sync`), richer SQL AST nodes, schema diff/introspection, hooks, events, pooling, cache and bulk operations on top of the same reflection-first foundation.
+The next layers can add relation mutation (`attach`, `detach`, `sync`), cascades and a richer SQL AST while keeping SQLite as the proving ground.
