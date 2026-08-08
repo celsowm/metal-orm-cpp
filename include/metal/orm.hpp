@@ -7,6 +7,7 @@
 #include "metal/polymorphic.hpp"
 #include "metal/query.hpp"
 #include "metal/reflection.hpp"
+#include "metal/reference_traits.hpp"
 #include "metal/relation_change_processor.hpp"
 #include "metal/runtime_types.hpp"
 #include "metal/unit_of_work.hpp"
@@ -137,9 +138,6 @@ public:
     DomainEventBus& domain_events() noexcept { return domain_events_; }
     const DomainEventBus& domain_events() const noexcept { return domain_events_; }
 
-    // Like the TypeScript runtime, raw flush only executes the UoW. Session
-    // interceptors, relation processing and domain-event dispatch belong to
-    // commit()/transaction(). Table hooks still run because they are UoW hooks.
     void flush() { unit_of_work_.flush(); }
 
     void commit() {
@@ -172,8 +170,6 @@ public:
             throw;
         }
 
-        // Database commit is already final here. Handler failures propagate as
-        // post-commit failures; they never trigger a misleading database rollback.
         unit_of_work_.dispatch_domain_events();
     }
 
@@ -527,7 +523,62 @@ private:
             if constexpr (reflect::has_relation_annotation<relation>()) {
                 using A = reflect::relation_annotation_t<relation>;
                 using Traits = mapping::relation_annotation_traits<A>;
-                if constexpr (Traits::kind == mapping::relation_kind::has_many) {
+                if constexpr (Traits::kind == mapping::relation_kind::belongs_to) {
+                    using Target = reflect::single_target_t<reflect::member_type_t<relation>>;
+                    constexpr auto foreign_key = Traits::foreign_key();
+                    constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
+                    using ForeignKey = reflect::member_type_t<foreign_key>;
+
+                    auto weak = std::weak_ptr<Root>(root);
+                    auto& reference = root->[:relation:];
+                    reference._metal_bind_loader([this, weak] {
+                        if (auto locked = weak.lock()) {
+                            std::vector<std::shared_ptr<Root>> roots{locked};
+                            load_belongs_to_batch<Root, relation>(roots);
+                        }
+                    });
+                    reference._metal_bind_attach([weak](Target& target) {
+                        if (auto locked = weak.lock()) {
+                            const Value key = to_value(target.[:target_key:]);
+                            if (!std::holds_alternative<std::nullptr_t>(key) &&
+                                !(target_key == reflect::primary_key_member<Target>() &&
+                                  reflect::primary_key_is_generated<Target>() &&
+                                  is_empty_generated_value(key))) {
+                                (*locked).[:foreign_key:] = from_value<ForeignKey>(key);
+                            }
+                        }
+                    });
+                    reference._metal_bind_reset([weak] {
+                        if (auto locked = weak.lock()) {
+                            if constexpr (is_optional_v<ForeignKey>) {
+                                (*locked).[:foreign_key:] = std::nullopt;
+                            } else {
+                                throw std::runtime_error(
+                                    "MetalORM: clearing belongs_to requires a nullable foreign key");
+                            }
+                        }
+                    });
+                } else if constexpr (Traits::kind == mapping::relation_kind::has_one) {
+                    using Target = reflect::single_target_t<reflect::member_type_t<relation>>;
+                    constexpr auto target_fk = Traits::target_foreign_key();
+                    constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
+                    using ForeignKey = reflect::member_type_t<target_fk>;
+
+                    auto weak = std::weak_ptr<Root>(root);
+                    auto& reference = root->[:relation:];
+                    reference._metal_bind_loader([this, weak] {
+                        if (auto locked = weak.lock()) {
+                            std::vector<std::shared_ptr<Root>> roots{locked};
+                            load_has_one_batch<Root, relation>(roots);
+                        }
+                    });
+                    reference._metal_bind_attach([weak](Target& target) {
+                        if (auto locked = weak.lock()) {
+                            target.[:target_fk:] = from_value<ForeignKey>(
+                                to_value((*locked).[:local_key:]));
+                        }
+                    });
+                } else if constexpr (Traits::kind == mapping::relation_kind::has_many) {
                     using Target = reflect::has_many_target_t<reflect::member_type_t<relation>>;
                     constexpr auto target_fk = Traits::target_foreign_key();
                     constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
@@ -761,11 +812,12 @@ private:
         constexpr auto target_fk = Traits::target_foreign_key();
         constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
         std::unordered_map<std::string, std::shared_ptr<Root>> roots_by_key;
+        std::unordered_map<Root*, std::shared_ptr<Target>> loaded;
         std::vector<Value> keys;
         for (auto& root : roots) {
-            (*root).[:Relation:].reset();
             const auto key = to_value((*root).[:local_key:]);
             roots_by_key[value_key(key)] = root;
+            loaded[root.get()] = {};
             keys.push_back(key);
         }
         std::string sql = "SELECT ";
@@ -780,7 +832,10 @@ private:
             auto root_key = row.find("__metal_root_key");
             if (root_key == row.end()) continue;
             auto root = roots_by_key.find(value_key(root_key->second));
-            if (root != roots_by_key.end()) (*root->second).[:Relation:] = hydrate<Target>(row);
+            if (root != roots_by_key.end()) loaded[root->second.get()] = hydrate<Target>(row);
+        }
+        for (auto& root : roots) {
+            (*root).[:Relation:]._metal_hydrate(std::move(loaded[root.get()]));
         }
     }
 
@@ -794,24 +849,35 @@ private:
         constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
         std::vector<Value> keys;
         for (auto& root : roots) {
-            (*root).[:Relation:].reset();
-            keys.push_back(to_value((*root).[:foreign_key:]));
+            const Value key = to_value((*root).[:foreign_key:]);
+            if (!std::holds_alternative<std::nullptr_t>(key)) keys.push_back(key);
         }
-        std::string sql = "SELECT ";
-        append_target_columns<Target>(sql, "t");
-        sql += " FROM " + dialect_->quote_identifier(reflect::table_name<Target>()) + " t";
-        sql += " WHERE t." + dialect_->quote_identifier(reflect::column_name<target_key>()) + " IN (";
-        append_in_placeholders(sql, keys.size());
-        sql += ");";
-        const auto result = executor_->execute(sql, keys);
         std::unordered_map<std::string, std::shared_ptr<Target>> targets_by_key;
-        for (const auto& row : result.rows) {
-            auto target = hydrate<Target>(row);
-            targets_by_key[value_key(to_value((*target).[:target_key:]))] = target;
+        if (!keys.empty()) {
+            std::string sql = "SELECT ";
+            append_target_columns<Target>(sql, "t");
+            sql += " FROM " + dialect_->quote_identifier(reflect::table_name<Target>()) + " t";
+            sql += " WHERE t." + dialect_->quote_identifier(reflect::column_name<target_key>()) + " IN (";
+            append_in_placeholders(sql, keys.size());
+            sql += ");";
+            const auto result = executor_->execute(sql, keys);
+            for (const auto& row : result.rows) {
+                auto target = hydrate<Target>(row);
+                targets_by_key[value_key(to_value((*target).[:target_key:]))] = target;
+            }
         }
         for (auto& root : roots) {
-            const auto key = value_key(to_value((*root).[:foreign_key:]));
-            if (auto target = targets_by_key.find(key); target != targets_by_key.end()) (*root).[:Relation:] = target->second;
+            const Value raw = to_value((*root).[:foreign_key:]);
+            if (std::holds_alternative<std::nullptr_t>(raw)) {
+                (*root).[:Relation:]._metal_hydrate({});
+                continue;
+            }
+            const auto key = value_key(raw);
+            if (auto target = targets_by_key.find(key); target != targets_by_key.end()) {
+                (*root).[:Relation:]._metal_hydrate(target->second);
+            } else {
+                (*root).[:Relation:]._metal_hydrate({});
+            }
         }
     }
 
