@@ -104,6 +104,11 @@ if(METAL_ORM_BUILD_TESTS)
         tests/compile_fail/wrong_graph_value.cpp
         "graph value is incompatible with the reflected member type"
     )
+    metal_expect_compile_failure(
+        wrong-schema-index-member
+        tests/compile_fail/wrong_schema_index_member.cpp
+        "schema index members must belong to the declared entity"
+    )
 
     enable_testing()
 
