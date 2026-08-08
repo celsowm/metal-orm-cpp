@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.13`
+**Version:** `0.0.14`
 
 MetalORM C++ deliberately has no compatibility metadata layer and no C++20/23 fallback. The TypeScript `metal-orm` repository is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
 
@@ -49,6 +49,7 @@ There are no registration macros or duplicated `entity_traits<T>` declarations. 
 Session
   ├── IdentityMap
   ├── UnitOfWork
+  │     └── nested rollback checkpoints
   └── RelationChangeProcessor
           │
           ▼
@@ -59,6 +60,37 @@ Session
 ```
 
 The Unit of Work and relation mutation use the same INSERT/UPDATE/DELETE AST instead of maintaining a second hand-written SQL path.
+
+## Transactions and savepoints — 0.0.14
+
+Transaction capability is part of the executor contract. SQLite exposes both transactions and savepoints.
+
+```cpp
+session.transaction([](metal::Session& tx) {
+    auto user = tx.find<User>(1);
+    user->name = "outer";
+
+    tx.transaction([](metal::Session& nested) {
+        // SAVEPOINT metalorm_sp_1
+        // changes are flushed before RELEASE SAVEPOINT
+    });
+});
+```
+
+The outer scope uses `BEGIN / COMMIT`. Nested scopes use `SAVEPOINT / RELEASE SAVEPOINT`. A nested failure executes `ROLLBACK TO SAVEPOINT` and marks the outer transaction rollback-only; catching the nested exception does not make the outer transaction committable.
+
+Unlike a SQL-only wrapper, the C++ runtime checkpoints ORM state at every transaction/savepoint boundary. Rollback restores:
+
+- reflected scalar values;
+- dirty-check `original` snapshots and entity status;
+- tracked entities removed during a failed DELETE;
+- generated primary keys assigned by rolled-back INSERTs;
+- Identity Map membership;
+- reflected relation wrapper state, including collection baselines and pending pivot/morph changes.
+
+A successful inner savepoint does not destroy the outer checkpoint. Therefore a later outer rollback can still undo an inner INSERT and restore relation state even after the inner scope was successfully flushed and released.
+
+`Session::commit()` uses the same checkpoint mechanism. If database commit fails, ORM state is restored instead of leaving a generated ID or dirty snapshot falsely marked as committed.
 
 ## Relation collections
 
@@ -160,14 +192,6 @@ auto users = metal::where_has<^^User::posts>(
     });
 ```
 
-`where_has_not` produces the inverse relation condition:
-
-```cpp
-auto users_without_posts =
-    metal::where_has_not<^^User::posts>(
-        metal::select<User>());
-```
-
 For a direct target predicate:
 
 ```cpp
@@ -176,104 +200,47 @@ auto admins = metal::where_relation<^^User::roles>(
     metal::field<^^Role::name> == "admin");
 ```
 
-Relation filters can be composed:
-
-```cpp
-auto admins_with_cpp_posts =
-    metal::where_has<^^User::posts>(
-        admins,
-        [](auto& posts) {
-            posts.where(
-                metal::like(
-                    metal::field<^^Post::title>,
-                    "C++%"));
-        });
-```
-
 `belongs_to`, `has_one`, `has_many`, N:N, `morph_one`, and `morph_many` correlations derive their keys from relation metadata. `morph_to` is rejected for `where_has` because one relation can resolve to different physical target tables, matching the TypeScript restriction.
 
-0.0.13 moves relation correlation into the SELECT compiler's `WHERE` position. This matters for child pagination:
+0.0.13 moved relation correlation into the SELECT compiler's `WHERE` position. Callback-local `ORDER BY / LIMIT / OFFSET` therefore runs after correlation, while root relation predicates run before root pagination. Nested correlated scopes use internal aliases such as `t0`, `t0_rel`, `t0_rel_rel`, preventing child subqueries from shadowing outer aliases.
 
-```cpp
-auto roots = metal::where_has<^^User::posts>(
-    metal::select<User>(),
-    [](auto& posts) {
-        posts
-            .order_by(metal::field<^^Post::id>)
-            .limit(10)
-            .offset(1);
-    });
-```
-
-The generated semantic order is now:
-
-```text
-child predicates
-AND relation correlation
-ORDER BY
-LIMIT / OFFSET
-```
-
-rather than applying correlation around an already-paginated child query. A relation filter attached to a root query with an existing `LIMIT/OFFSET` is likewise evaluated before that root pagination.
-
-Nested correlated scopes use internal aliases such as `t0`, `t0_rel`, `t0_rel_rel`, preventing child subqueries from shadowing their outer correlation alias. Normal non-correlated SQL preserves the established `t0/t1/p0` alias shape.
-
-`match_relation<^^Relation>(...)` exposes the relation-matching contract with the same typed correlation engine. TypeScript currently renders `match()` as INNER JOIN + DISTINCT; the C++ implementation uses EXISTS so relation correlation has one source of truth while preserving root-filtering behavior.
+`match_relation<^^Relation>(...)` shares the same typed correlation engine. TypeScript renders `match()` as INNER JOIN + DISTINCT; C++ uses EXISTS to keep relation correlation in one implementation while preserving root-filtering behavior.
 
 ## Offset pagination — 0.0.13
 
-Level 1 / row pagination stays independent of Session:
+Level 1 row pagination stays independent of Session:
 
 ```cpp
 auto result = metal::execute_paged(
     query,
     executor,
     dialect,
-    metal::PageOptions{
-        .page = 2,
-        .page_size = 25
-    });
+    metal::PageOptions{.page = 2, .page_size = 25});
 ```
 
-It returns `Row` values and counts physical result rows.
-
-For tracked root entities, use the Session overload:
+For tracked root entities:
 
 ```cpp
 auto result = metal::execute_paged(
     query,
     session,
-    metal::PageOptions{
-        .page = 1,
-        .page_size = 25
-    });
+    metal::PageOptions{.page = 1, .page_size = 25});
 ```
 
-Pagination helpers own the requested page and therefore strip earlier query `LIMIT/OFFSET` before applying `PageOptions`, matching TypeScript `executePaged` behavior.
+Pagination helpers own the requested page and strip earlier query `LIMIT/OFFSET`. The Session path is root-aware: explicit 1:N/N:N joins are deduplicated by reflected root PK while preserving query order, and roots are materialized through the Identity Map.
 
-The Session path is **root-aware**. If an explicit 1:N/N:N JOIN physically returns the same root multiple times, MetalORM deduplicates by the reflected root PK while preserving result order, counts unique roots, slices the requested page, and materializes each root through the Identity Map.
-
-Tracked pagination requires a complete root-entity projection. DTO/partial projections should use the row overload rather than create partially managed entities.
-
-The current root-aware implementation materializes the unpaged matching row stream before deduplication. That is a performance optimization target, not a semantic parity gap.
+Tracked pagination requires a complete root-entity projection. DTO/partial projections should use the row overload.
 
 ## Cursor pagination — 0.0.13
 
-Cursor ordering is expressed using reflected fields:
+Cursor ordering uses reflected fields:
 
 ```cpp
 std::vector order{
-    metal::cursor_order(
-        metal::field<^^User::score>,
-        false),
-    metal::cursor_order(
-        metal::field<^^User::id>)
+    metal::cursor_order(metal::field<^^User::score>, false),
+    metal::cursor_order(metal::field<^^User::id>)
 };
-```
 
-Forward page:
-
-```cpp
 auto page = metal::execute_cursor(
     metal::select<User>(),
     session,
@@ -281,31 +248,9 @@ auto page = metal::execute_cursor(
     metal::CursorPageOptions{.first = 25});
 ```
 
-Next page:
+The keyset implementation supports lexicographic multi-column predicates, mixed ASC/DESC, `first/after`, `last/before`, `limit + 1`, non-null cursor values, ordering signatures, and tracked-root deduplication for row-multiplying joins.
 
-```cpp
-auto next = metal::execute_cursor(
-    metal::select<User>(),
-    session,
-    order,
-    metal::CursorPageOptions{
-        .first = 25,
-        .after = page.page_info.end_cursor
-    });
-```
-
-Backward pagination uses `last` / `before`. The implementation follows the TypeScript keyset semantics:
-
-- lexicographic predicates for multiple ORDER BY columns;
-- direction-aware ASC/DESC comparisons;
-- mode-driven keyset direction (`first` means after semantics; `last` means before semantics);
-- `limit + 1` page detection;
-- forward and backward pagination;
-- non-null cursor values;
-- an ORDER BY signature embedded in the opaque cursor so a cursor cannot be silently reused with a different ordering;
-- root-PK deduplication before page-size detection for tracked queries containing row-multiplying explicit joins.
-
-The cursor encoding is intentionally opaque and internal to the C++ API; semantic compatibility does not imply a cross-language TypeScript/C++ wire-format guarantee.
+Cursor encoding is intentionally opaque and internal to the C++ API; semantic parity does not imply TypeScript/C++ wire-format interchange.
 
 ## Shared DML AST
 
