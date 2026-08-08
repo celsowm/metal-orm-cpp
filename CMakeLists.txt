@@ -69,6 +69,11 @@ if(METAL_ORM_BUILD_TESTS)
         tests/compile_fail/wrong_pivot_collection.cpp
         "many_to_many collection pivot type must match the reflected pivot annotation"
     )
+    metal_expect_compile_failure(
+        wrong-pivot-patch-member
+        tests/compile_fail/wrong_pivot_patch_member.cpp
+        "pivot_patch member must belong to the pivot type"
+    )
 
     enable_testing()
 
