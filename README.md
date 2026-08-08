@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.10`
+**Version:** `0.0.11`
 
 MetalORM C++ is deliberately not a C++20 ORM with a reflection adapter. Reflection is the architecture: no `entity_traits<T>`, no registration macros, no compatibility metadata layer, and no pre-C++26 fallback.
 
@@ -278,7 +278,7 @@ User -> UserRole pivot -> Role
 
 ## Advanced SELECT AST
 
-`0.0.10` ports the next MetalORM query-builder family without creating a raw-SQL side channel.
+`0.0.10` ports the advanced MetalORM SELECT family without creating a raw-SQL side channel.
 
 ### BETWEEN and EXISTS
 
@@ -361,20 +361,95 @@ auto query = metal::select<Employee>()
             .as("previous_salary"));
 ```
 
-The current catalog includes:
+The current catalog includes `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `NTILE`, `LAG`, `LEAD`, `FIRST_VALUE`, and `LAST_VALUE`. Partition/order fields remain constrained by the typed query scope and literal arguments are bound as parameters.
+
+## Computed expressions and derived tables
+
+`0.0.11` unifies computed query values under one recursive typed scalar AST:
 
 ```text
-ROW_NUMBER
-RANK
-DENSE_RANK
-NTILE
-LAG
-LEAD
-FIRST_VALUE
-LAST_VALUE
+ScalarTerm<Result, Owners...>
+  ├── reflected column
+  ├── literal parameter
+  ├── aggregate
+  ├── SQL function
+  ├── CASE
+  └── window function
 ```
 
-Partition/order fields remain constrained by the typed query scope and literal arguments are bound as parameters.
+This means computed expressions preserve the same compile-time owner scope as direct fields.
+
+### Derived tables / fromSubquery
+
+```cpp
+auto source = metal::select<User>()
+    .clear_projection()
+    .project(metal::field<^^User::id>)
+    .project(metal::field<^^User::name>)
+    .project(metal::field<^^User::score>)
+    .where(metal::field<^^User::score> >= 10);
+
+auto query = metal::select<User>()
+    .from_subquery(source, "high_scores")
+    .clear_projection()
+    .project(metal::field<^^User::id>)
+    .project(
+        metal::concat(
+            metal::field<^^User::name>,
+            std::string{"!"})
+            .as("display_name"))
+    .where(metal::field<^^User::score> <= 20);
+```
+
+The source is still a typed `BasicSelectQuery`, and parameters are preserved in SQL lexical order across outer projections, the derived subquery, and outer predicates.
+
+SQLite does not support derived-table column alias-list syntax such as `AS d(a, b)`. Because SQLite is intentionally the only backend today, passing a non-empty `column_aliases` list is rejected explicitly; alias the source projections instead.
+
+### CASE expressions
+
+```cpp
+auto band = metal::case_when(
+        metal::field<^^User::score> > 20,
+        std::string{"high"})
+    .when(
+        metal::field<^^User::score> > 10,
+        std::string{"medium"})
+    .otherwise(std::string{"low"});
+
+auto query = metal::select<User>()
+    .clear_projection()
+    .project(band.as("band"))
+    .where(band == std::string{"high"});
+```
+
+CASE branch result compatibility and all referenced entity owners are carried by the C++ type.
+
+### Typed SQL functions
+
+Functions can be nested without dropping field ownership or turning columns into strings:
+
+```cpp
+auto query = metal::select<User>()
+    .clear_projection()
+    .project(
+        metal::lower(
+            metal::trim(metal::field<^^User::name>))
+            .as("normalized"))
+    .project(
+        metal::year(metal::field<^^User::created_at>)
+            .as("year"))
+    .where(
+        metal::lower(
+            metal::trim(metal::field<^^User::name>)) == "alice");
+```
+
+Representative helper families include text operations, numeric functions, control flow (`coalesce`, `if_null`, `nullif`, `greatest`, `least`), date/time helpers, and JSON path/length/aggregation helpers. The C++ port also exposes:
+
+```cpp
+metal::sql_function<Result>("CUSTOM_FUNCTION", args...)
+```
+
+for SQLite functions not yet wrapped. The function name must be a simple identifier and literal arguments remain parameterized. Some optional math/extension functions depend on how SQLite itself was built, so `docs/PARITY.md` distinguishes AST/API coverage from guaranteed runtime availability.
 
 ## Shared DML AST
 
@@ -474,6 +549,22 @@ Session
         SQLite
 ```
 
+## Query-module architecture
+
+The public include remains small:
+
+```text
+metal/query.hpp
+  └── query/core.hpp
+      ├── core_types.hpp
+      └── compiler.hpp -> sqlite_compiler.hpp
+  ├── query/expressions.hpp
+  ├── query/functions.hpp
+  └── query/select.hpp
+```
+
+The split keeps AST types, SQLite rendering, typed expression construction, function helpers, and SELECT state/building in separate responsibilities instead of letting `query.hpp` grow indefinitely.
+
 ## Compile-time model validation
 
 Mappings and typed relation payloads fail at compile time for cases including:
@@ -490,7 +581,7 @@ Mappings and typed relation payloads fail at compile time for cases including:
 - duplicate mapped column names;
 - invalid generated-key declarations.
 
-Query AST validation additionally constrains reflected fields to the current query scope and rejects scalar-subquery, CTE-column-list, and set-operation projection arity mismatches before emitting SQL.
+Query AST validation additionally constrains reflected fields — including fields nested inside functions and CASE branches — to the current query scope and rejects scalar-subquery, CTE-column-list, and set-operation projection arity mismatches before emitting SQL.
 
 ## C++26 machinery used directly
 
@@ -511,25 +602,24 @@ entity.[:Member:]
 
 Reflections are non-type template arguments throughout mapping, queries, relation metadata and mutation. Structural class NTTPs carry Morph discriminator values at compile time.
 
-## What 0.0.10 contains
+## What 0.0.11 contains
 
 - C++26 static reflection and annotations as the only metadata model
 - `Mapped<T>` / `Entity<T>` concepts and `consteval` validation
 - typed SELECT SQL AST with compile-time query scope
+- modular query AST/compiler/expression/function/select headers behind `metal/query.hpp`
+- recursive `ScalarTerm<Result, Owners...>` computed expressions
 - reflected joins, projections, predicates, aggregates, grouping and scalar subqueries
-- `BETWEEN` / `NOT BETWEEN` and typed `EXISTS` / `NOT EXISTS`
-- CTEs and genuinely recursive CTE traversal
-- UNION / UNION ALL / INTERSECT / EXCEPT with projection-arity validation
-- typed window-function projections and partition/order specs
+- BETWEEN / EXISTS, CTEs, recursive CTEs, set operations, and window functions
+- typed derived-table / `from_subquery` sources
+- typed searched CASE expressions usable in projection and predicates
+- broad SQLite text/numeric/control/date/JSON function helper surface
+- validated generic `sql_function<Result>` extensibility
 - shared INSERT / UPDATE / DELETE AST builders
 - multi-row INSERT and typed INSERT ... SELECT
-- INSERT/UPDATE/DELETE RETURNING, including aliases
-- SQLite ON CONFLICT DO NOTHING / DO UPDATE with conflict targets and update predicates
-- `excluded(column)` conflict-update operands
-- reflected SQLite DDL, including composite primary keys
-- SQLite executor
+- INSERT/UPDATE/DELETE RETURNING and SQLite ON CONFLICT
+- reflected SQLite DDL and SQLite executor
 - `Session` coordinating `IdentityMap`, `UnitOfWork`, and `RelationChangeProcessor`
-- reflected dirty checking and generated keys
 - dedicated has-many / N:N relation collections and partial typed pivots
 - alternate non-primary N:N `targetKey` behavior
 - MorphTo/MorphOne/MorphMany runtime parity
@@ -549,4 +639,4 @@ The CMake project intentionally fails on GCC < 16 and on non-GNU compilers today
 
 ## Direction
 
-The TypeScript MetalORM remains the feature and behavior reference. With the 0.0.10 advanced SELECT family closed, the next parity target is derived-table / `fromSubquery` support, CASE expressions, and the broader SQL function catalog; relation-query helpers and pagination follow after that.
+The TypeScript MetalORM remains the feature and behavior reference. With derived tables, CASE, and the computed/function AST family closed in 0.0.11, the next parity target is relation-query helpers (`whereHas`, `whereHasNot`, relation conditions) plus pagination and cursor-pagination helpers.
