@@ -4,11 +4,13 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.15`
+**Version:** `0.0.16`
 
-MetalORM C++ deliberately has no compatibility metadata layer and no C++20/23 fallback. The TypeScript `metal-orm` repository is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
+MetalORM C++ deliberately has no C++20/23 compatibility layer. The TypeScript [`metal-orm`](https://github.com/celsowm/metal-orm) repository is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
 
-For now, **SQLite is intentionally the only executor/dialect**.
+For now, **SQLite is intentionally the only executor/dialect** while semantic parity is built out.
+
+See [`docs/PARITY.md`](docs/PARITY.md) for the detailed parity matrix and remaining gaps.
 
 ## Requirements
 
@@ -17,7 +19,7 @@ For now, **SQLite is intentionally the only executor/dialect**.
 - CMake 3.20+
 - SQLite 3 development headers
 
-## Reflection-native models
+## Reflection-native entities
 
 ```cpp
 #include <metal/metal.hpp>
@@ -41,7 +43,7 @@ struct [[=metal::mapping::table{"users"}]] User {
 };
 ```
 
-There are no registration macros or duplicated `entity_traits<T>` declarations. Columns, keys and relations are discovered from the C++ type itself.
+There are no registration macros or duplicated `entity_traits<T>` declarations. Columns, keys and relations are discovered from the C++ type itself and validated with `consteval` reflection.
 
 ## Runtime architecture
 
@@ -49,7 +51,7 @@ There are no registration macros or duplicated `entity_traits<T>` declarations. 
 Session
   ├── IdentityMap
   ├── UnitOfWork
-  │     ├── table lifecycle hooks
+  │     ├── typed lifecycle hooks
   │     └── nested rollback checkpoints
   ├── RelationChangeProcessor
   ├── Session interceptors
@@ -62,134 +64,9 @@ Session
         SQLite
 ```
 
-The Unit of Work and relation mutation use the same INSERT/UPDATE/DELETE AST instead of maintaining a second hand-written SQL path.
+The Unit of Work, graph persistence and relation mutations reuse the same runtime/DML infrastructure rather than maintaining independent SQL paths.
 
-## Transactions and savepoints — 0.0.14
-
-Transaction capability is part of the executor contract. SQLite exposes both transactions and savepoints.
-
-```cpp
-session.transaction([](metal::Session& tx) {
-    auto user = tx.find<User>(1);
-    user->name = "outer";
-
-    tx.transaction([](metal::Session& nested) {
-        // SAVEPOINT metalorm_sp_1
-        // changes are flushed before RELEASE SAVEPOINT
-    });
-});
-```
-
-The outer scope uses `BEGIN / COMMIT`. Nested scopes use `SAVEPOINT / RELEASE SAVEPOINT`. A nested failure executes `ROLLBACK TO SAVEPOINT` and marks the outer transaction rollback-only; catching the nested exception does not make the outer transaction committable.
-
-Unlike a SQL-only wrapper, the C++ runtime checkpoints ORM state at every transaction/savepoint boundary. Rollback restores reflected scalar values, dirty snapshots/status, generated IDs, Identity Map membership, deleted tracking and relation wrapper state. A successful inner savepoint does not destroy the outer checkpoint, so an outer rollback can still undo inner work.
-
-`Session::commit()` uses the same checkpoint mechanism. If database commit fails, ORM state is restored instead of leaving a generated ID or dirty snapshot falsely marked as committed.
-
-## Lifecycle hooks, interceptors and events — 0.0.15
-
-Table hooks are typed by entity:
-
-```cpp
-metal::TableHooks<User> hooks;
-
-hooks.before_insert = [](metal::Session&, User& user) {
-    user.name = normalize(user.name);
-};
-
-hooks.after_insert = [](metal::Session&, User& user) {
-    user.domain_events.raise(UserCreated{user.id});
-};
-
-session.register_table_hooks<User>(std::move(hooks));
-```
-
-The lifecycle matches the TypeScript Unit of Work:
-
-```text
-INSERT: beforeInsert -> INSERT/generated id -> snapshot/identity -> afterInsert
-UPDATE: dirty diff -> beforeUpdate -> UPDATE -> refreshed snapshot -> afterUpdate
-DELETE: beforeDelete -> DELETE/remove tracking -> afterDelete
-```
-
-The C++ registration surface is deliberately type-safe and Session-bound. TypeScript stores the same lifecycle callbacks on `TableDef`; this binding-scope difference is documented rather than hidden as fake 1:1 API syntax.
-
-Session-wide flush interceptors remain a separate concept:
-
-```cpp
-session.register_interceptor({
-    .before_flush = [](metal::Session&) {},
-    .after_flush = [](metal::Session&) {}
-});
-```
-
-They surround the complete commit/transaction flush pipeline. Raw `session.flush()` remains UoW-only, so table hooks run there but Session interceptors, relation processing and domain-event dispatch do not.
-
-Domain events are typed C++ values rather than string-discriminated public payloads:
-
-```cpp
-struct UserCreated {
-    std::int64_t id{};
-};
-
-struct UserRenamed {
-    std::int64_t id{};
-    std::string name;
-};
-
-using UserEvents = metal::domain_event_queue<UserCreated, UserRenamed>;
-
-struct [[=metal::mapping::table{"users"}]] User {
-    [[=metal::mapping::primary_key, =metal::mapping::generated]]
-    std::int64_t id{};
-    std::string name;
-
-    [[=metal::mapping::ignore]]
-    UserEvents domain_events;
-};
-```
-
-Raise and handle them with compile-time event types:
-
-```cpp
-user.domain_events.raise(UserCreated{user.id});
-
-session.register_domain_event_handler<UserCreated>(
-    [](const UserCreated& event, metal::Session& committed) {
-        // the outermost database COMMIT is already successful here
-    });
-```
-
-Event queues participate in transaction checkpoints. An event raised inside a failed transaction/savepoint disappears with that rollback rather than leaking into a later commit. Nested `RELEASE SAVEPOINT` never dispatches. Events dispatch only after successful outermost COMMIT.
-
-If a handler itself throws, the error is a **post-commit** failure: it propagates, but MetalORM does not issue a fake rollback for database work that is already committed. Matching the TypeScript bus, the queue is cleared only after all handlers complete, so a failing handler leaves it available for caller-defined recovery or retry policy.
-
-## Relation collections
-
-MetalORM C++ mirrors the distinct TypeScript relation roles:
-
-```cpp
-metal::has_many_collection<Post>
-metal::many_to_many_collection<Role, UserRole>
-metal::morph_one_reference<Cover>
-metal::morph_many_collection<Attachment>
-metal::morph_to_reference<Post, Video>
-```
-
-Many-to-many relations support entity or target-key attach/detach, `sync_by_ids()`, typed pivot hydration, alternate `targetKey`, and partial C++26 pivot patches:
-
-```cpp
-metal::pivot_patch<UserRole> patch;
-patch
-    .set<^^UserRole::label>(std::string{"owner"})
-    .set<^^UserRole::weight>(std::int64_t{10});
-
-user->roles.attach(role, patch);
-```
-
-The patch accepts only reflected members of the declared pivot type and validates value compatibility at compile time.
-
-## Typed SELECT AST
+## Querying
 
 Fields carry their entity owner in the C++ type:
 
@@ -207,169 +84,268 @@ auto query = metal::select<User>()
     .having(metal::count(metal::field<^^Post::id>) > 1);
 ```
 
-`Post` fields do not satisfy the query constraints until a reflected join introduces `Post` into the typed query scope.
+`Post` fields do not satisfy the query scope until a reflected join introduces `Post`.
 
-The SELECT AST includes reflected joins, predicates/subqueries, aggregates/GROUP BY/HAVING, CTEs/recursive CTEs, set operations, window functions, derived tables, searched CASE and recursive typed SQL function expressions.
+The SELECT AST includes:
 
-## Computed expressions
+- reflected JOINs;
+- typed predicates and subqueries;
+- aggregates / GROUP BY / HAVING;
+- CTEs and recursive CTEs;
+- UNION / UNION ALL / INTERSECT / EXCEPT;
+- derived tables;
+- CASE;
+- window functions;
+- typed SQL functions;
+- relation predicates (`where_has`, `where_has_not`, `where_relation`);
+- offset and keyset/cursor pagination.
 
-Computed values share one recursive type:
+## DML
 
-```text
-ScalarTerm<Result, Owners...>
-  ├── reflected column
-  ├── literal parameter
-  ├── aggregate
-  ├── SQL function
-  ├── CASE
-  └── window function
-```
-
-This preserves query ownership through nesting:
-
-```cpp
-auto normalized = metal::lower(
-    metal::trim(metal::field<^^User::name>));
-
-auto band = metal::case_when(
-        metal::field<^^User::score> > 20,
-        std::string{"high"})
-    .otherwise(std::string{"normal"});
-```
-
-The SQLite function catalog includes broad text, numeric, control-flow, date/time and JSON families. Optional SQLite math/extension functions remain dependent on the linked SQLite build.
-
-## Relation query predicates — 0.0.13
-
-Relation filtering is reflection-driven; relation names and correlation keys are not supplied as strings.
-
-```cpp
-auto users = metal::where_has<^^User::posts>(
-    metal::select<User>(),
-    [](auto& posts) {
-        posts.where(
-            metal::like(
-                metal::field<^^Post::title>,
-                "C++%"));
-    });
-```
-
-For a direct target predicate:
-
-```cpp
-auto admins = metal::where_relation<^^User::roles>(
-    metal::select<User>(),
-    metal::field<^^Role::name> == "admin");
-```
-
-`belongs_to`, `has_one`, `has_many`, N:N, `morph_one`, and `morph_many` correlations derive their keys from relation metadata. `morph_to` is rejected for `where_has` because one relation can resolve to different physical target tables, matching the TypeScript restriction.
-
-0.0.13 moved relation correlation into the SELECT compiler's `WHERE` position. Callback-local `ORDER BY / LIMIT / OFFSET` runs after correlation, while root relation predicates run before root pagination. Nested correlated scopes use internal aliases such as `t0`, `t0_rel`, `t0_rel_rel`, preventing child subqueries from shadowing outer aliases.
-
-`match_relation<^^Relation>(...)` shares the same typed correlation engine. TypeScript renders `match()` as INNER JOIN + DISTINCT; C++ uses EXISTS to keep relation correlation in one implementation while preserving root-filtering behavior.
-
-## Offset pagination — 0.0.13
-
-Level 1 row pagination stays independent of Session:
-
-```cpp
-auto result = metal::execute_paged(
-    query,
-    executor,
-    dialect,
-    metal::PageOptions{.page = 2, .page_size = 25});
-```
-
-For tracked root entities:
-
-```cpp
-auto result = metal::execute_paged(
-    query,
-    session,
-    metal::PageOptions{.page = 1, .page_size = 25});
-```
-
-Pagination helpers own the requested page and strip earlier query `LIMIT/OFFSET`. The Session path is root-aware: explicit 1:N/N:N joins are deduplicated by reflected root PK while preserving query order, and roots are materialized through the Identity Map.
-
-Tracked pagination requires a complete root-entity projection. DTO/partial projections should use the row overload.
-
-## Cursor pagination — 0.0.13
-
-Cursor ordering uses reflected fields:
-
-```cpp
-std::vector order{
-    metal::cursor_order(metal::field<^^User::score>, false),
-    metal::cursor_order(metal::field<^^User::id>)
-};
-
-auto page = metal::execute_cursor(
-    metal::select<User>(),
-    session,
-    order,
-    metal::CursorPageOptions{.first = 25});
-```
-
-The keyset implementation supports lexicographic multi-column predicates, mixed ASC/DESC, `first/after`, `last/before`, `limit + 1`, non-null cursor values, ordering signatures, and tracked-root deduplication for row-multiplying joins.
-
-Cursor encoding is intentionally opaque and internal to the C++ API; semantic parity does not imply TypeScript/C++ wire-format interchange.
-
-## Shared DML AST
+The same DML AST is public and used by the runtime:
 
 ```cpp
 auto insert = metal::InsertQueryBuilder{"users"}
     .values({
-        {{"name", std::string{"Alice"}}},
-        {{"name", std::string{"Bob"}}}
+        {"name", std::string{"Alice"}},
+        {"score", std::int64_t{10}}
     })
     .returning({"id", "name"});
 ```
 
-Supported DML includes multi-row INSERT, typed INSERT ... SELECT, RETURNING on INSERT/UPDATE/DELETE, and SQLite ON CONFLICT DO NOTHING / DO UPDATE with `excluded(column)`.
+Supported SQLite-oriented DML includes:
 
-## Query module structure
+- multi-row INSERT;
+- INSERT ... SELECT;
+- UPDATE / DELETE;
+- RETURNING;
+- ON CONFLICT DO NOTHING;
+- ON CONFLICT DO UPDATE;
+- `excluded(column)`.
 
-```text
-metal/query.hpp
-  ├── query/core.hpp
-  │    ├── core_types.hpp
-  │    └── compiler.hpp -> sqlite_compiler.hpp
-  ├── query/expressions.hpp
-  ├── query/functions.hpp
-  ├── query/select.hpp
-  ├── query/relation_queries.hpp
-  ├── query/relation_match.hpp
-  └── query/pagination.hpp
+## Relation wrappers
 
-metal/runtime_pagination.hpp
-  └── Session / IdentityMap integration
-```
-
-## C++26 machinery used directly
+The runtime models relation roles explicitly:
 
 ```cpp
-^^User
-^^User::name
-std::meta::info
-std::meta::nonstatic_data_members_of(...)
-std::meta::annotations_of(...)
-std::meta::annotations_of_with_type(...)
-std::meta::type_of(...)
-std::meta::parent_of(...)
-std::meta::identifier_of(...)
-std::define_static_array(...)
-template for (...)
-entity.[:Member:]
+metal::belongs_to_reference<Author>
+metal::has_one_reference<Profile>
+metal::has_many_collection<Post>
+metal::many_to_many_collection<Role, UserRole>
+metal::morph_one_reference<Cover>
+metal::morph_many_collection<Attachment>
+metal::morph_to_reference<Post, Video>
 ```
+
+The new `belongs_to_reference<T>` / `has_one_reference<T>` wrappers are the intended canonical single-reference shapes. Their full generic lazy/mutation integration and removal of legacy raw-`shared_ptr` relation shape are the focused 0.0.17 task; graph persistence already uses the typed wrappers.
+
+### Typed N:N pivot patches
+
+```cpp
+metal::pivot_patch<UserRole> patch;
+patch
+    .set<^^UserRole::label>(std::string{"owner"})
+    .set<^^UserRole::weight>(std::int64_t{10});
+
+user->roles.attach(role, patch);
+```
+
+The patch accepts only reflected members of the declared pivot type and validates value compatibility at compile time. Alternate relation `targetKey` values are respected end-to-end.
+
+## Graph persistence — 0.0.16
+
+The TypeScript implementation accepts DTO-like nested objects. C++ expresses the same graph semantics through a reflection-typed payload:
+
+```cpp
+auto payload = metal::graph<User>()
+    .set<^^User::name>(std::string{"Celso"})
+    .relation<^^User::profile>(
+        metal::graph<Profile>()
+            .set<^^Profile::bio>(std::string{"C++26"}))
+    .relation<^^User::posts>([](auto& posts) {
+        posts.add(
+            metal::graph<Post>()
+                .set<^^Post::title>(std::string{"Reflection"}));
+        posts.add_id(42);
+    });
+
+auto user = metal::save_graph(session, payload);
+```
+
+Scalar fields are reflected template arguments. Invalid owners, relation members or incompatible values fail during compilation rather than becoming runtime string-key errors.
+
+### Save, update and patch
+
+```cpp
+metal::save_graph(session, payload);
+metal::update_graph(session, payload_with_pk);
+metal::patch_graph(session, partial_payload_with_pk);
+```
+
+`update_graph` and `patch_graph` require the root primary key in the graph payload and return an empty `shared_ptr` when the root does not exist.
+
+Omitted scalar fields and omitted relations remain untouched.
+
+### Prune collection members
+
+```cpp
+metal::GraphOptions options{
+    .prune_missing = true
+};
+
+auto updated = metal::update_graph(
+    session,
+    payload,
+    options);
+```
+
+For has-many/morph-many this removes missing members according to relation cascade semantics. For N:N it detaches missing links.
+
+### Pivot data inside a graph
+
+```cpp
+metal::pivot_patch<UserRole> owner;
+owner.set<^^UserRole::label>(std::string{"owner"});
+
+auto payload = metal::graph<User>()
+    .relation<^^User::roles>([&](auto& roles) {
+        roles.add(
+            metal::graph<Role>()
+                .set<^^Role::name>(std::string{"admin"}),
+            owner);
+    });
+```
+
+No second pivot-payload representation is introduced: graph persistence reuses `pivot_patch<Pivot>`.
+
+Graph operations are transactional by default and compose with the existing UnitOfWork checkpoint system. Generated IDs, relation wrapper state and queued domain events therefore participate in rollback.
+
+## Transactions and savepoints
+
+```cpp
+session.transaction([](metal::Session& tx) {
+    auto user = tx.find<User>(1);
+    user->name = "outer";
+
+    tx.transaction([](metal::Session& nested) {
+        // SAVEPOINT metalorm_sp_1
+    });
+});
+```
+
+The outer scope uses `BEGIN / COMMIT`. Nested scopes use `SAVEPOINT / RELEASE SAVEPOINT`. A failed nested scope executes `ROLLBACK TO SAVEPOINT` and marks the outer transaction rollback-only.
+
+Rollback restores both SQL state and ORM memory state:
+
+- reflected scalar values;
+- dirty snapshots/status;
+- generated IDs;
+- Identity Map membership;
+- deleted tracking;
+- relation wrapper state;
+- queued domain events.
+
+## Lifecycle hooks and interceptors
+
+Lifecycle hooks are Session-bound in both the C++ and current TypeScript implementations:
+
+```cpp
+metal::TableHooks<User> hooks;
+
+hooks.before_insert = [](metal::Session&, User& user) {
+    user.name = normalize(user.name);
+};
+
+hooks.after_insert = [](metal::Session&, User& user) {
+    user.domain_events.raise(UserCreated{user.id});
+};
+
+session.register_table_hooks<User>(std::move(hooks));
+```
+
+Lifecycle ordering is:
+
+```text
+INSERT: beforeInsert -> INSERT/generated id -> snapshot/identity -> afterInsert
+UPDATE: dirty diff -> beforeUpdate -> UPDATE -> refreshed snapshot -> afterUpdate
+DELETE: beforeDelete -> DELETE/remove tracking -> afterDelete
+```
+
+Session-wide interceptors are separate:
+
+```cpp
+session.register_interceptor({
+    .before_flush = [](metal::Session&) {},
+    .after_flush = [](metal::Session&) {}
+});
+```
+
+Raw `session.flush()` is UoW-only. Interceptors, relation processing and event dispatch belong to `commit()` / `transaction()`.
+
+## Typed domain events
+
+```cpp
+struct UserCreated {
+    std::int64_t id{};
+};
+
+using UserEvents = metal::domain_event_queue<UserCreated>;
+
+struct [[=metal::mapping::table{"users"}]] EventUser {
+    [[=metal::mapping::primary_key, =metal::mapping::generated]]
+    std::int64_t id{};
+
+    [[=metal::mapping::ignore]]
+    UserEvents domain_events;
+};
+```
+
+```cpp
+user.domain_events.raise(UserCreated{user.id});
+
+session.register_domain_event_handler<UserCreated>(
+    [](const UserCreated& event, metal::Session&) {
+        // outermost COMMIT already succeeded
+    });
+```
+
+Nested SAVEPOINT release never dispatches events. Failed transaction scopes restore event queues. Handler failures after COMMIT are propagated as post-commit failures and never cause a fake rollback.
+
+## SQLite DDL
+
+```cpp
+const auto sql = metal::create_table_sql<User>(dialect);
+```
+
+The current DDL layer covers the SQLite foundation and composite primary keys used by relation pivots. Introspection/diff/migration tooling remains a later parity area.
 
 ## Build
 
 ```bash
-cmake -S . -B build -G Ninja
+cmake -S . -B build \
+  -DCMAKE_CXX_COMPILER=g++-16 \
+  -DMETAL_ORM_BUILD_TESTS=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The project intentionally rejects GCC < 16 and non-GNU compilers today. Another compiler should be supported when it implements the same C++26 reflection model, not through a legacy metadata fallback.
+MetalORM intentionally refuses older compilers instead of shipping a compatibility metadata system.
 
-See [`docs/PARITY.md`](docs/PARITY.md) for the explicit TypeScript parity matrix and ordered remaining gaps, and [`CHANGELOG.md`](CHANGELOG.md) for release history.
+## Current roadmap
+
+The immediate next release is deliberately narrow:
+
+### 0.0.17
+
+- finish Session-bound lazy loading for `belongs_to_reference<T>` and `has_one_reference<T>`;
+- process generic `set/reset` mutations and cascade semantics through `RelationChangeProcessor`;
+- accept/rollback single-reference baselines consistently;
+- remove raw `std::shared_ptr<T>` as a valid reflected relation shape.
+
+After that, parity moves to larger ecosystem modules such as schema introspection/diff, bulk operations, DTO/OpenAPI, cache, Tree/MPTT, pooling and code generation.
+
+## Status
+
+The project is intentionally experimental and tracks bleeding-edge C++26 reflection. The TypeScript implementation remains the behavioral reference; deviations are recorded in [`docs/PARITY.md`](docs/PARITY.md), not hidden behind compatibility shims.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for release-by-release changes.
