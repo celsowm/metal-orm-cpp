@@ -9,6 +9,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <typeindex>
 #include <unordered_map>
 #include <utility>
@@ -113,6 +114,7 @@ public:
 
     template <reflect::Entity T, typename Key>
     std::shared_ptr<T> find(const Key& key) {
+        static_assert(reflect::validate_mapping<T>());
         const Value pk = to_value(key);
         if (auto existing = identity_map_.get<T>(pk)) return existing;
 
@@ -126,6 +128,7 @@ public:
 
     template <reflect::Entity T>
     void persist(const std::shared_ptr<T>& entity) {
+        static_assert(reflect::validate_mapping<T>());
         if (!entity) throw std::invalid_argument("MetalORM: cannot persist a null entity");
         if (auto it = tracked_.find(entity.get()); it != tracked_.end()) {
             if (it->second.status == EntityStatus::Removed) it->second.status = EntityStatus::Managed;
@@ -136,6 +139,7 @@ public:
 
     template <reflect::Entity T>
     void remove(const std::shared_ptr<T>& entity) {
+        static_assert(reflect::validate_mapping<T>());
         if (!entity) return;
         if (!tracked_.contains(entity.get())) track<T>(entity, EntityStatus::Managed);
         tracked_.at(entity.get()).status = EntityStatus::Removed;
@@ -249,47 +253,173 @@ private:
         return values;
     }
 
-    template <reflect::Entity Root, std::meta::info Relation>
-    void load_many_to_many_batch(std::vector<std::shared_ptr<Root>>& roots) {
-        static_assert(std::same_as<reflect::owner_type_t<Relation>, Root>);
-        static_assert(reflect::has<mapping::many_to_many>(Relation),
-                      "MetalORM: include<> requires a [[=metal::mapping::many_to_many{...}]] member");
+    template <reflect::Entity Target>
+    void append_target_columns(std::string& sql, std::string_view alias) const {
+        bool first = true;
+        reflect::for_each_column<Target>([&]<std::meta::info Member>() {
+            if (!first) sql += ", ";
+            first = false;
+            sql += std::string(alias) + "." + dialect_->quote_identifier(reflect::column_name<Member>());
+        });
+    }
 
+    void append_in_placeholders(std::string& sql, std::size_t count) const {
+        for (std::size_t i = 0; i < count; ++i) {
+            if (i) sql += ", ";
+            sql += dialect_->placeholder(i + 1);
+        }
+    }
+
+    template <reflect::Entity Root, std::meta::info Relation>
+    void load_has_many_batch(std::vector<std::shared_ptr<Root>>& roots) {
+        using A = reflect::relation_annotation_t<Relation>;
+        using Traits = mapping::relation_annotation_traits<A>;
         using Collection = reflect::member_type_t<Relation>;
-        static_assert(reflect::is_many_collection_v<Collection>,
-                      "MetalORM 0.0.1: many-to-many member must be std::vector<std::shared_ptr<T>>");
         using Target = reflect::many_target_t<Collection>;
-        static_assert(reflect::Entity<Target>, "MetalORM: many-to-many target must be an entity");
 
         if (roots.empty()) return;
-        constexpr auto relation = reflect::annotation<mapping::many_to_many>(Relation);
+        constexpr auto target_fk = Traits::target_foreign_key();
+        constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
+
+        std::unordered_map<std::string, std::shared_ptr<Root>> roots_by_key;
+        std::vector<Value> keys;
+        for (auto& root : roots) {
+            (*root).[:Relation:].clear();
+            const auto key = to_value((*root).[:local_key:]);
+            roots_by_key[value_key(key)] = root;
+            keys.push_back(key);
+        }
+
+        std::string sql = "SELECT ";
+        append_target_columns<Target>(sql, "t");
+        sql += ", t." + dialect_->quote_identifier(reflect::column_name<target_fk>()) + " AS \"__metal_root_key\"";
+        sql += " FROM " + dialect_->quote_identifier(reflect::table_name<Target>()) + " t";
+        sql += " WHERE t." + dialect_->quote_identifier(reflect::column_name<target_fk>()) + " IN (";
+        append_in_placeholders(sql, keys.size());
+        sql += ");";
+
+        const auto result = executor_->execute(sql, keys);
+        for (const auto& row : result.rows) {
+            auto root_key = row.find("__metal_root_key");
+            if (root_key == row.end()) continue;
+            auto root = roots_by_key.find(value_key(root_key->second));
+            if (root == roots_by_key.end()) continue;
+            auto target = hydrate<Target>(row);
+            auto& collection = (*root->second).[:Relation:];
+            if (std::find(collection.begin(), collection.end(), target) == collection.end()) {
+                collection.push_back(std::move(target));
+            }
+        }
+    }
+
+    template <reflect::Entity Root, std::meta::info Relation>
+    void load_has_one_batch(std::vector<std::shared_ptr<Root>>& roots) {
+        using A = reflect::relation_annotation_t<Relation>;
+        using Traits = mapping::relation_annotation_traits<A>;
+        using Target = reflect::single_target_t<reflect::member_type_t<Relation>>;
+
+        if (roots.empty()) return;
+        constexpr auto target_fk = Traits::target_foreign_key();
+        constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
+
+        std::unordered_map<std::string, std::shared_ptr<Root>> roots_by_key;
+        std::vector<Value> keys;
+        for (auto& root : roots) {
+            (*root).[:Relation:].reset();
+            const auto key = to_value((*root).[:local_key:]);
+            roots_by_key[value_key(key)] = root;
+            keys.push_back(key);
+        }
+
+        std::string sql = "SELECT ";
+        append_target_columns<Target>(sql, "t");
+        sql += ", t." + dialect_->quote_identifier(reflect::column_name<target_fk>()) + " AS \"__metal_root_key\"";
+        sql += " FROM " + dialect_->quote_identifier(reflect::table_name<Target>()) + " t";
+        sql += " WHERE t." + dialect_->quote_identifier(reflect::column_name<target_fk>()) + " IN (";
+        append_in_placeholders(sql, keys.size());
+        sql += ");";
+
+        const auto result = executor_->execute(sql, keys);
+        for (const auto& row : result.rows) {
+            auto root_key = row.find("__metal_root_key");
+            if (root_key == row.end()) continue;
+            auto root = roots_by_key.find(value_key(root_key->second));
+            if (root == roots_by_key.end()) continue;
+            (*root->second).[:Relation:] = hydrate<Target>(row);
+        }
+    }
+
+    template <reflect::Entity Root, std::meta::info Relation>
+    void load_belongs_to_batch(std::vector<std::shared_ptr<Root>>& roots) {
+        using A = reflect::relation_annotation_t<Relation>;
+        using Traits = mapping::relation_annotation_traits<A>;
+        using Target = reflect::single_target_t<reflect::member_type_t<Relation>>;
+
+        if (roots.empty()) return;
+        constexpr auto foreign_key = Traits::foreign_key();
+        constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
+
+        std::vector<Value> keys;
+        for (auto& root : roots) {
+            (*root).[:Relation:].reset();
+            keys.push_back(to_value((*root).[:foreign_key:]));
+        }
+
+        std::string sql = "SELECT ";
+        append_target_columns<Target>(sql, "t");
+        sql += " FROM " + dialect_->quote_identifier(reflect::table_name<Target>()) + " t";
+        sql += " WHERE t." + dialect_->quote_identifier(reflect::column_name<target_key>()) + " IN (";
+        append_in_placeholders(sql, keys.size());
+        sql += ");";
+
+        const auto result = executor_->execute(sql, keys);
+        std::unordered_map<std::string, std::shared_ptr<Target>> targets_by_key;
+        for (const auto& row : result.rows) {
+            auto target = hydrate<Target>(row);
+            targets_by_key[value_key(to_value((*target).[:target_key:]))] = target;
+        }
+
+        for (auto& root : roots) {
+            const auto key = value_key(to_value((*root).[:foreign_key:]));
+            if (auto target = targets_by_key.find(key); target != targets_by_key.end()) {
+                (*root).[:Relation:] = target->second;
+            }
+        }
+    }
+
+    template <reflect::Entity Root, std::meta::info Relation>
+    void load_many_to_many_batch(std::vector<std::shared_ptr<Root>>& roots) {
+        using A = reflect::relation_annotation_t<Relation>;
+        using Traits = mapping::relation_annotation_traits<A>;
+        using Collection = reflect::member_type_t<Relation>;
+        using Target = reflect::many_target_t<Collection>;
+
+        if (roots.empty()) return;
+        constexpr auto pivot_reflection = Traits::pivot();
+        using Pivot = [: pivot_reflection :];
+        constexpr auto pivot_root_fk = Traits::pivot_root_foreign_key();
+        constexpr auto pivot_target_fk = Traits::pivot_target_foreign_key();
+        constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
+        constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
 
         std::unordered_map<std::string, std::shared_ptr<Root>> roots_by_id;
         std::vector<Value> root_ids;
         for (auto& root : roots) {
             (*root).[:Relation:].clear();
-            const auto id = reflect::value_for_column(*root, relation.root_key.view());
+            const auto id = to_value((*root).[:local_key:]);
             roots_by_id[value_key(id)] = root;
             root_ids.push_back(id);
         }
 
         std::string sql = "SELECT ";
-        bool first = true;
-        reflect::for_each_column<Target>([&]<std::meta::info Member>() {
-            if (!first) sql += ", ";
-            first = false;
-            sql += "t." + dialect_->quote_identifier(reflect::column_name<Member>());
-        });
-        sql += ", p." + dialect_->quote_identifier(relation.pivot_root_fk.view()) + " AS \"__metal_root_id\"";
+        append_target_columns<Target>(sql, "t");
+        sql += ", p." + dialect_->quote_identifier(reflect::column_name<pivot_root_fk>()) + " AS \"__metal_root_id\"";
         sql += " FROM " + dialect_->quote_identifier(reflect::table_name<Target>()) + " t";
-        sql += " JOIN " + dialect_->quote_identifier(relation.pivot_table.view()) + " p ON p." +
-               dialect_->quote_identifier(relation.pivot_target_fk.view()) + " = t." +
-               dialect_->quote_identifier(relation.target_key.view());
-        sql += " WHERE p." + dialect_->quote_identifier(relation.pivot_root_fk.view()) + " IN (";
-        for (std::size_t i = 0; i < root_ids.size(); ++i) {
-            if (i) sql += ", ";
-            sql += dialect_->placeholder(i + 1);
-        }
+        sql += " JOIN " + dialect_->quote_identifier(reflect::table_name<Pivot>()) + " p ON p." +
+               dialect_->quote_identifier(reflect::column_name<pivot_target_fk>()) + " = t." +
+               dialect_->quote_identifier(reflect::column_name<target_key>());
+        sql += " WHERE p." + dialect_->quote_identifier(reflect::column_name<pivot_root_fk>()) + " IN (";
+        append_in_placeholders(sql, root_ids.size());
         sql += ");";
 
         const auto result = executor_->execute(sql, root_ids);
@@ -381,6 +511,7 @@ private:
 
 template <reflect::Entity T>
 std::vector<std::shared_ptr<T>> EntityQuery<T>::all() {
+    static_assert(reflect::validate_mapping<T>());
     auto roots = session_.execute_query(query_);
     for (auto& include : includes_) include(roots);
     return roots;
@@ -391,12 +522,32 @@ template <std::meta::info Relation>
 EntityQuery<T>& EntityQuery<T>::include() {
     static_assert(std::same_as<reflect::owner_type_t<Relation>, T>,
                   "MetalORM: included relation must belong to the queried entity");
-    static_assert(reflect::has<mapping::many_to_many>(Relation),
-                  "MetalORM 0.0.1: include<> currently supports many-to-many relations");
+    static_assert(reflect::has_relation_annotation<Relation>(),
+                  "MetalORM: include<> requires a reflected relationship annotation");
+    static_assert(reflect::validate_mapping<T>());
+
+    using A = reflect::relation_annotation_t<Relation>;
+    using Traits = mapping::relation_annotation_traits<A>;
     auto* session = &session_;
-    includes_.push_back([session](auto& roots) {
-        session->template load_many_to_many_batch<T, Relation>(roots);
-    });
+
+    if constexpr (Traits::kind == mapping::relation_kind::belongs_to) {
+        includes_.push_back([session](auto& roots) {
+            session->template load_belongs_to_batch<T, Relation>(roots);
+        });
+    } else if constexpr (Traits::kind == mapping::relation_kind::has_one) {
+        includes_.push_back([session](auto& roots) {
+            session->template load_has_one_batch<T, Relation>(roots);
+        });
+    } else if constexpr (Traits::kind == mapping::relation_kind::has_many) {
+        includes_.push_back([session](auto& roots) {
+            session->template load_has_many_batch<T, Relation>(roots);
+        });
+    } else if constexpr (Traits::kind == mapping::relation_kind::many_to_many) {
+        includes_.push_back([session](auto& roots) {
+            session->template load_many_to_many_batch<T, Relation>(roots);
+        });
+    }
+
     return *this;
 }
 
