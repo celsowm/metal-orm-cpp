@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.8`
+**Version:** `0.0.9`
 
 MetalORM C++ is deliberately not a C++20 ORM with a reflection adapter. Reflection is the architecture: no `entity_traits<T>`, no registration macros, no compatibility metadata layer, and no pre-C++26 fallback.
 
@@ -287,21 +287,62 @@ User -> UserRole pivot -> Role
 
 ## Shared DML AST
 
-Like the original MetalORM, persistence and relation mutation share DML builders instead of maintaining a second hand-written SQL path:
+Like the original MetalORM, persistence and relation mutation share DML builders instead of maintaining a second hand-written SQL path. `0.0.9` expands that shared layer to the richer SQLite DML surface.
+
+### Multi-row INSERT + RETURNING
 
 ```cpp
-auto insert = metal::InsertQueryBuilder{"users"}
-    .values({metal::DmlAssignment{"name", std::string{"Celso"}}});
+auto query = metal::InsertQueryBuilder{"users"}
+    .values({
+        {{"name", std::string{"Alice"}}, {"score", std::int64_t{10}}},
+        {{"name", std::string{"Bob"}},   {"score", std::int64_t{20}}}
+    })
+    .returning({"id", "name"})
+    .compile(dialect);
 
-auto update = metal::UpdateQueryBuilder{"users"}
-    .set({metal::DmlAssignment{"name", std::string{"Updated"}}})
-    .where_eq("id", std::int64_t{1});
-
-auto erase = metal::DeleteQueryBuilder{"users"}
-    .where_eq("id", std::int64_t{1});
+auto result = db->execute(query.sql, query.params);
 ```
 
-`UnitOfWork` and `RelationChangeProcessor` compile these ASTs through the same SQLite dialect.
+`RETURNING` is supported on INSERT, UPDATE and DELETE and flows through the normal `QueryResult.rows` path.
+
+### INSERT ... SELECT
+
+The source is the existing typed SELECT AST, not raw SQL:
+
+```cpp
+auto source = metal::select<Source>();
+source
+    .clear_projection()
+    .project(metal::field<^^Source::name>)
+    .project(metal::field<^^Source::score>)
+    .where(metal::field<^^Source::score> >= 10);
+
+metal::insert_into<Target>()
+    .from_select(source, {"name", "score"})
+    .returning({"id"});
+```
+
+`VALUES` and `SELECT` are mutually exclusive sources, matching the MetalORM TypeScript insert-state model.
+
+### SQLite UPSERT / ON CONFLICT
+
+```cpp
+auto query = metal::InsertQueryBuilder{"users"}
+    .values({
+        {"email", std::string{"alice@example.com"}},
+        {"name", std::string{"Alice"}}
+    })
+    .on_conflict({"email"})
+    .do_update({
+        {"name", metal::excluded("name")}
+    })
+    .returning({"id", "name"})
+    .compile(dialect);
+```
+
+`on_conflict(columns)` requires explicit SQLite conflict-target columns. Both `do_nothing()` and `do_update(...)` are supported, and `do_update` accepts an optional predicate list. `excluded(column)` is accepted only in the conflict-update assignment branch.
+
+Normal UoW persistence and relation mutation continue compiling through these same builders.
 
 ## Cascade semantics
 
@@ -381,13 +422,17 @@ entity.[:Member:]
 
 Reflections are non-type template arguments throughout mapping, queries, relation metadata and mutation. Structural class NTTPs carry Morph discriminator values at compile time.
 
-## What 0.0.8 contains
+## What 0.0.9 contains
 
 - C++26 static reflection and annotations as the only metadata model
 - `Mapped<T>` / `Entity<T>` concepts and `consteval` validation
 - typed SELECT SQL AST with compile-time query scope
 - reflected joins, projections, predicates, aggregates, grouping and scalar subqueries
 - shared INSERT / UPDATE / DELETE AST builders
+- multi-row INSERT and typed INSERT ... SELECT
+- INSERT/UPDATE/DELETE RETURNING, including aliases
+- SQLite ON CONFLICT DO NOTHING / DO UPDATE with conflict targets and update predicates
+- `excluded(column)` conflict-update operands
 - reflected SQLite DDL, including composite primary keys
 - SQLite executor
 - `Session` coordinating `IdentityMap`, `UnitOfWork`, and `RelationChangeProcessor`
@@ -415,4 +460,4 @@ The CMake project intentionally fails on GCC < 16 and on non-GNU compilers today
 
 ## Direction
 
-The TypeScript MetalORM remains the feature and behavior reference. With the Morph family closed in 0.0.8, the next parity gap is richer DML (`RETURNING`, multi-row INSERT, INSERT ... SELECT and the SQLite conflict/upsert surface), followed by the remaining query-builder features such as CTEs, set operations and window functions.
+The TypeScript MetalORM remains the feature and behavior reference. With richer DML closed in 0.0.9, the next parity target is the broader query-builder surface: CTE/recursive CTE, set operations, EXISTS/NOT EXISTS, BETWEEN and window functions.
