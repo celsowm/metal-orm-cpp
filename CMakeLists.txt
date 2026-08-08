@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(metal-orm VERSION 0.0.16 LANGUAGES CXX)
+project(metal-orm VERSION 0.0.17 LANGUAGES CXX)
 
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    message(FATAL_ERROR "MetalORM 0.0.16 is intentionally C++26-native and currently requires GCC 16+ reflection support")
+    message(FATAL_ERROR "MetalORM 0.0.17 is intentionally C++26-native and currently requires GCC 16+ reflection support")
 endif()
 
 if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
-    message(FATAL_ERROR "MetalORM 0.0.16 requires GCC 16 or newer")
+    message(FATAL_ERROR "MetalORM 0.0.17 requires GCC 16 or newer")
 endif()
 
 find_package(SQLite3 REQUIRED)
@@ -63,6 +63,11 @@ if(METAL_ORM_BUILD_TESTS)
         wrong-relation-shape
         tests/compile_fail/wrong_relation_shape.cpp
         "has_many member must be metal::has_many_collection<T>"
+    )
+    metal_expect_compile_failure(
+        raw-shared-ptr-single-relation
+        tests/compile_fail/raw_shared_ptr_single_relation.cpp
+        "belongs_to member must be metal::belongs_to_reference<T>"
     )
     metal_expect_compile_failure(
         wrong-pivot-collection
@@ -148,4 +153,8 @@ if(METAL_ORM_BUILD_TESTS)
     add_executable(metal-orm-graph-parity-tests tests/test_graph_parity.cpp)
     target_link_libraries(metal-orm-graph-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-graph-parity-tests COMMAND metal-orm-graph-parity-tests)
+
+    add_executable(metal-orm-single-reference-parity-tests tests/test_single_reference_parity.cpp)
+    target_link_libraries(metal-orm-single-reference-parity-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-single-reference-parity-tests COMMAND metal-orm-single-reference-parity-tests)
 endif()
