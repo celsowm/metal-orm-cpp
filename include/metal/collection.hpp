@@ -24,20 +24,14 @@ public:
     using value_type = std::shared_ptr<T>;
     using const_iterator = typename std::vector<value_type>::const_iterator;
 
-    has_many_collection() = default;
-
     [[nodiscard]] bool loaded() const noexcept { return loaded_; }
     [[nodiscard]] bool empty() const noexcept { return items_.empty(); }
     [[nodiscard]] std::size_t size() const noexcept { return items_.size(); }
-
     const value_type& operator[](std::size_t index) const { return items_.at(index); }
     const value_type& at(std::size_t index) const { return items_.at(index); }
     const std::vector<value_type>& get_items() const noexcept { return items_; }
-
     const_iterator begin() const noexcept { return items_.begin(); }
     const_iterator end() const noexcept { return items_.end(); }
-    const_iterator cbegin() const noexcept { return items_.cbegin(); }
-    const_iterator cend() const noexcept { return items_.cend(); }
 
     const std::vector<value_type>& load() {
         if (!loaded_) {
@@ -61,7 +55,8 @@ public:
 
     void attach(value_type value) {
         if (!value) throw std::invalid_argument("MetalORM: cannot attach a null entity");
-        if (!contains(items_, value)) items_.push_back(std::move(value));
+        if (attach_hook_) attach_hook_(*value);
+        items_.push_back(std::move(value));
     }
 
     bool remove(const value_type& value) {
@@ -73,15 +68,13 @@ public:
     }
 
     void clear() { items_.clear(); }
-
-    [[nodiscard]] bool dirty() const {
-        return !_metal_added().empty() || !_metal_removed().empty();
-    }
+    [[nodiscard]] bool dirty() const { return !_metal_added().empty() || !_metal_removed().empty(); }
 
     void _metal_bind_loader(std::function<void()> loader) { loader_ = std::move(loader); }
+    void _metal_bind_attach(std::function<void(T&)> hook) { attach_hook_ = std::move(hook); }
 
     void _metal_hydrate(std::vector<value_type> values) {
-        items_ = deduplicate(std::move(values));
+        items_ = std::move(values);
         baseline_ = items_;
         loaded_ = true;
     }
@@ -105,17 +98,11 @@ private:
         return std::find(values.begin(), values.end(), value) != values.end();
     }
 
-    static std::vector<value_type> deduplicate(std::vector<value_type> values) {
-        std::vector<value_type> out;
-        out.reserve(values.size());
-        for (auto& value : values) if (value && !contains(out, value)) out.push_back(std::move(value));
-        return out;
-    }
-
     bool loaded_{false};
     std::vector<value_type> items_;
     std::vector<value_type> baseline_;
     std::function<void()> loader_;
+    std::function<void(T&)> attach_hook_;
 };
 
 template <typename T, typename Pivot>
@@ -125,20 +112,14 @@ public:
     using pivot_type = Pivot;
     using const_iterator = typename std::vector<value_type>::const_iterator;
 
-    many_to_many_collection() = default;
-
     [[nodiscard]] bool loaded() const noexcept { return loaded_; }
     [[nodiscard]] bool empty() const noexcept { return items_.empty(); }
     [[nodiscard]] std::size_t size() const noexcept { return items_.size(); }
-
     const value_type& operator[](std::size_t index) const { return items_.at(index); }
     const value_type& at(std::size_t index) const { return items_.at(index); }
     const std::vector<value_type>& get_items() const noexcept { return items_; }
-
     const_iterator begin() const noexcept { return items_.begin(); }
     const_iterator end() const noexcept { return items_.end(); }
-    const_iterator cbegin() const noexcept { return items_.cbegin(); }
-    const_iterator cend() const noexcept { return items_.cend(); }
 
     const std::vector<value_type>& load() {
         if (!loaded_) {
@@ -153,9 +134,7 @@ public:
 
     template <typename Key>
     requires (!std::same_as<std::remove_cvref_t<Key>, value_type>)
-    value_type attach(Key&& key) {
-        return attach_id_value(to_value(std::forward<Key>(key)), std::nullopt);
-    }
+    value_type attach(Key&& key) { return attach_id_value(to_value(std::forward<Key>(key)), std::nullopt); }
 
     template <typename Key>
     requires (!std::same_as<std::remove_cvref_t<Key>, value_type>)
@@ -200,12 +179,10 @@ public:
             });
             if (!exists) attach_id_value(value, std::nullopt);
         }
-        items_.erase(
-            std::remove_if(items_.begin(), items_.end(), [&](const auto& item) {
-                const auto identity = identity_key_(*item);
-                return identity && !desired.contains(*identity);
-            }),
-            items_.end());
+        items_.erase(std::remove_if(items_.begin(), items_.end(), [&](const auto& item) {
+            const auto identity = identity_key_(*item);
+            return identity && !desired.contains(*identity);
+        }), items_.end());
     }
 
     const Pivot* pivot(const value_type& value) const {
@@ -222,7 +199,6 @@ public:
     }
 
     void _metal_bind_loader(std::function<void()> loader) { loader_ = std::move(loader); }
-
     void _metal_bind_identity(
         std::function<std::optional<std::string>(const T&)> identity_key,
         std::function<value_type(const Value&)> id_factory) {
@@ -264,11 +240,7 @@ public:
     }
 
     const Pivot* _metal_pivot(const value_type& value) const { return pivot(value); }
-
-    void _metal_accept_changes() {
-        baseline_ = items_;
-        pivot_updates_.clear();
-    }
+    void _metal_accept_changes() { baseline_ = items_; pivot_updates_.clear(); }
 
 private:
     void attach_impl(value_type value, std::optional<Pivot> pivot_value) {
@@ -339,27 +311,14 @@ private:
 
 namespace metal::reflect {
 
-template <typename T>
-struct many_collection_traits {
-    static constexpr bool value = false;
+template <typename T> struct many_collection_traits { static constexpr bool value = false; };
+template <typename Target> struct many_collection_traits<metal::has_many_collection<Target>> {
+    static constexpr bool value = true; using target_type = Target;
 };
-
-template <typename Target>
-struct many_collection_traits<metal::has_many_collection<Target>> {
-    static constexpr bool value = true;
-    using target_type = Target;
+template <typename Target, typename Pivot> struct many_collection_traits<metal::many_to_many_collection<Target, Pivot>> {
+    static constexpr bool value = true; using target_type = Target;
 };
-
-template <typename Target, typename Pivot>
-struct many_collection_traits<metal::many_to_many_collection<Target, Pivot>> {
-    static constexpr bool value = true;
-    using target_type = Target;
-};
-
-template <typename T>
-inline constexpr bool is_many_collection_v = many_collection_traits<std::remove_cvref_t<T>>::value;
-
-template <typename T>
-using many_target_t = typename many_collection_traits<std::remove_cvref_t<T>>::target_type;
+template <typename T> inline constexpr bool is_many_collection_v = many_collection_traits<std::remove_cvref_t<T>>::value;
+template <typename T> using many_target_t = typename many_collection_traits<std::remove_cvref_t<T>>::target_type;
 
 } // namespace metal::reflect
