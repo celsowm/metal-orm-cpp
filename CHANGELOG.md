@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.0.3 - 2026-08-08
+
+Mutable reflected relation collections. SQLite remains the only executor/dialect intentionally.
+
+- Add `metal::collection<T>` with `attach`, `detach`, `sync`, `loaded`, `dirty`, iteration and indexed access.
+- Replace `std::vector<std::shared_ptr<T>>` as the supported shape for `has_many` and `many_to_many` relations.
+- Track relation state as current items versus an accepted baseline, so opposite mutations before `commit()` cancel naturally.
+- Flush relation diffs through the same Unit of Work transaction as entity inserts/updates/deletes.
+- Add relation cascade metadata with concise C++26 annotation syntax.
+- Support cascade persist for `has_many` and `many_to_many` attached targets.
+- Support cascade remove for `has_many` detached targets.
+- Reject cascade remove/all for N:N at compile time because targets may be shared by multiple roots.
+- Make `has_many` relation flush update reflected foreign keys after generated IDs exist.
+- Make N:N relation flush generate SQLite `INSERT OR IGNORE` / `DELETE` against the reflected pivot type.
+- Keep collection hydration batched and Identity-Map-aware.
+- Add end-to-end coverage for attach/detach/sync, cascaded inserts, cascaded child removal, pivot diffing and reload verification.
+- Add a compile-fail test for destructive N:N cascade configuration.
+
 ## 0.0.2 - 2026-08-08
 
 Reflection-native relationship release. SQLite remains the only executor/dialect intentionally.
