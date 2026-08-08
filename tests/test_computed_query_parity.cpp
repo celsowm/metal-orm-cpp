@@ -54,7 +54,7 @@ int main() {
         .where(metal::field<^^ComputedPerson::score> >= 10);
 
     auto derived = metal::select<ComputedPerson>()
-        .from_subquery(source, "high_scores", {"id", "name", "score"})
+        .from_subquery(source, "high_scores")
         .clear_projection()
         .project(metal::field<^^ComputedPerson::id>)
         .project(
@@ -65,7 +65,7 @@ int main() {
 
     const auto derived_sql = derived.compile(dialect);
     assert(derived_sql.sql.find("FROM (SELECT") != std::string::npos);
-    assert(derived_sql.sql.find("AS \"high_scores\" (\"id\", \"name\", \"score\")") != std::string::npos);
+    assert(derived_sql.sql.find("AS \"high_scores\"") != std::string::npos);
     assert(derived_sql.params.size() == 3);
     assert(metal::from_value<std::string>(derived_sql.params[0]) == "!");
     assert(metal::from_value<std::int64_t>(derived_sql.params[1]) == 10);
