@@ -5,6 +5,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 struct [[=metal::mapping::table{"tx_children"}]] TxChild {
     [[=metal::mapping::primary_key, =metal::mapping::generated]]
@@ -54,6 +55,32 @@ public:
     void begin_transaction() override { inner_->begin_transaction(); }
     void commit_transaction() override { inner_->commit_transaction(); }
     void rollback_transaction() override { inner_->rollback_transaction(); }
+
+private:
+    std::shared_ptr<metal::SQLiteExecutor> inner_;
+};
+
+class CommitFailExecutor final : public metal::DbExecutor {
+public:
+    explicit CommitFailExecutor(std::shared_ptr<metal::SQLiteExecutor> inner)
+        : inner_(std::move(inner)) {}
+
+    metal::QueryResult execute(
+        const std::string& sql,
+        const std::vector<metal::Value>& params = {}) override {
+        return inner_->execute(sql, params);
+    }
+
+    [[nodiscard]] metal::ExecutorCapabilities capabilities() const noexcept override {
+        return {true, true};
+    }
+
+    void begin_transaction() override { inner_->begin_transaction(); }
+    void commit_transaction() override { throw std::runtime_error("commit failed"); }
+    void rollback_transaction() override { inner_->rollback_transaction(); }
+    void savepoint(std::string_view name) override { inner_->savepoint(name); }
+    void release_savepoint(std::string_view name) override { inner_->release_savepoint(name); }
+    void rollback_to_savepoint(std::string_view name) override { inner_->rollback_to_savepoint(name); }
 
 private:
     std::shared_ptr<metal::SQLiteExecutor> inner_;
@@ -187,6 +214,26 @@ int main() {
     assert(parent->children.empty());
     assert(!session.unit_of_work().contains(rolled_back_child.get()));
     assert(scalar_i64(*db, "SELECT COUNT(*) AS value FROM tx_children WHERE name = 'savepoint-child';") == 0);
+
+    // A failed COMMIT must roll back both SQLite and the checkpoint-mutated object/UoW state.
+    auto raw_commit_failure = std::make_shared<metal::SQLiteExecutor>(":memory:");
+    raw_commit_failure->execute(metal::create_table_sql<TxParent>(dialect));
+    auto commit_failure = std::make_shared<CommitFailExecutor>(raw_commit_failure);
+    metal::Session failing_commit{commit_failure};
+    auto commit_candidate = std::make_shared<TxParent>();
+    commit_candidate->name = "must-roll-back";
+    failing_commit.persist(commit_candidate);
+    bool commit_rejected = false;
+    try {
+        failing_commit.commit();
+    } catch (const std::runtime_error&) {
+        commit_rejected = true;
+    }
+    assert(commit_rejected);
+    assert(commit_candidate->id == 0);
+    assert(failing_commit.unit_of_work().contains(commit_candidate.get()));
+    assert(failing_commit.unit_of_work().find(commit_candidate.get())->status == metal::EntityStatus::New);
+    assert(scalar_i64(*raw_commit_failure, "SELECT COUNT(*) AS value FROM tx_parents;") == 0);
 
     // Nested transactions require explicit savepoint capability.
     auto raw_no_savepoint = std::make_shared<metal::SQLiteExecutor>(":memory:");
