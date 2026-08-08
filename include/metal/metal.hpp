@@ -6,6 +6,7 @@
 #include "metal/execution.hpp"
 #include "metal/identity_map.hpp"
 #include "metal/mapping.hpp"
+#include "metal/polymorphic.hpp"
 #include "metal/orm.hpp"
 #include "metal/query.hpp"
 #include "metal/reflection.hpp"
