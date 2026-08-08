@@ -1,9 +1,7 @@
 #include <metal/reflection.hpp>
 
 #include <cstdint>
-#include <memory>
 #include <string>
-#include <vector>
 
 struct [[=metal::mapping::table{"posts"}]] BadPost {
     [[=metal::mapping::primary_key, =metal::mapping::generated]]
@@ -16,7 +14,7 @@ struct [[=metal::mapping::table{"users"}]] BadUser {
     std::int64_t id{};
 
     [[=metal::mapping::has_many<^^BadPost::user_id>{}]]
-    std::vector<std::shared_ptr<BadPost>> posts;
+    metal::collection<BadPost> posts;
 };
 
 static_assert(metal::reflect::validate_mapping<BadUser>());
