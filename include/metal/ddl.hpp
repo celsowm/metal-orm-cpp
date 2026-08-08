@@ -1,5 +1,6 @@
 #pragma once
 
+#include "metal/reference_traits.hpp"
 #include "metal/query.hpp"
 
 #include <string>
