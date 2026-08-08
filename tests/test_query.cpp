@@ -32,13 +32,13 @@ struct [[=metal::mapping::table{"q_users"}]] QueryUser {
     std::optional<std::string> nickname;
 
     [[=metal::mapping::has_many<^^QueryPost::user_id>{}]]
-    metal::collection<QueryPost> posts;
+    metal::has_many_collection<QueryPost> posts;
 
     [[=metal::mapping::many_to_many<
         ^^QueryUserRole,
         ^^QueryUserRole::user_id,
         ^^QueryUserRole::role_id>{}]]
-    metal::collection<QueryRole> roles;
+    metal::many_to_many_collection<QueryRole, QueryUserRole> roles;
 };
 
 template <typename Q>
