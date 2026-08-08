@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.9`
+**Version:** `0.0.10`
 
 MetalORM C++ is deliberately not a C++20 ORM with a reflection adapter. Reflection is the architecture: no `entity_traits<T>`, no registration macros, no compatibility metadata layer, and no pre-C++26 fallback.
 
@@ -140,8 +140,6 @@ user->roles.detach(std::string{"ADMIN"});
 
 ### Morph one
 
-The parent owns a typed reference while the target stores the polymorphic id/type pair:
-
 ```cpp
 struct Cover {
     std::optional<std::int64_t> imageable_id;
@@ -181,8 +179,6 @@ struct Post {
 };
 ```
 
-The collection keeps the has-many-style surface:
-
 ```cpp
 auto attachment = post->attachments.add();
 attachment->name = "spec.pdf";
@@ -195,8 +191,6 @@ post->attachments.clear();
 When parent and child are both new, the first Unit of Work flush generates the parent PK, the relation processor reapplies the final id/type pair, and the second flush persists those final values.
 
 ### Morph to
-
-The inverse side keeps the discriminator and polymorphic key on the root entity. Instead of the TypeScript runtime `targets` object, C++26 encodes the target map into the relation type itself:
 
 ```cpp
 struct Activity {
@@ -227,9 +221,7 @@ activity->subject.reset();
 session.commit();
 ```
 
-The target set and discriminator values are compile-time data. Validation rejects duplicate/empty discriminator values, incompatible id/target-key types, targets missing from the typed reference, fields belonging to the wrong owner, and wrong relation wrappers.
-
-MorphTo lazy loading groups roots by discriminator and performs one query per concrete target type, then hydrates targets through the normal Identity Map. MetalORM TS explicitly has no JOIN-based MorphTo include; the typed SQL model likewise does not pretend a polymorphic target is one physical table. `subject.load()` is the parity path.
+The target set and discriminator values are compile-time data. MorphTo lazy loading groups roots by discriminator and performs one query per concrete target type, then hydrates targets through the normal Identity Map. MetalORM TS explicitly has no JOIN-based MorphTo include; `subject.load()` is the parity path.
 
 ## Lazy and eager relation loading
 
@@ -271,8 +263,7 @@ auto query = metal::select<User>()
             metal::field<^^Post::id>,
             std::vector<std::int64_t>{1, 2, 3}))
     .group_by(metal::field<^^User::name>)
-    .having(
-        metal::count(metal::field<^^Post::id>) > 1)
+    .having(metal::count(metal::field<^^Post::id>) > 1)
     .order_by(metal::field<^^User::name>, false)
     .limit(5);
 ```
@@ -285,9 +276,109 @@ For N:N, one reflected relation expands into both joins:
 User -> UserRole pivot -> Role
 ```
 
+## Advanced SELECT AST
+
+`0.0.10` ports the next MetalORM query-builder family without creating a raw-SQL side channel.
+
+### BETWEEN and EXISTS
+
+```cpp
+auto subquery = metal::select<User>()
+    .clear_projection()
+    .project(metal::field<^^User::id>)
+    .where(metal::field<^^User::active> == true);
+
+auto query = metal::select<User>()
+    .where(
+        metal::between(metal::field<^^User::score>, 10, 100) &&
+        metal::exists(subquery));
+```
+
+`not_between(...)` and `not_exists(...)` use the same expression AST and compose with `&&`, `||`, and `!`.
+
+### CTEs and recursive CTEs
+
+```cpp
+auto active = metal::select<User>()
+    .where(metal::field<^^User::active> == true);
+
+auto query = metal::select<User>()
+    .with("active_users", active)
+    .from("active_users");
+```
+
+A real recursive traversal keeps table members reflected while the CTE name remains a SQL identifier:
+
+```cpp
+auto tree = metal::select<Node>()
+    .where(metal::is_null(metal::field<^^Node::parent_id>));
+
+auto step = metal::select<Node>();
+step.join_cte<^^Node::parent_id>("tree", "id");
+tree.union_all(step);
+
+auto query = metal::select<Node>()
+    .with_recursive(
+        "tree",
+        tree,
+        {"id", "parent_id", "name"})
+    .from("tree");
+```
+
+CTE column lists are checked against projection arity before compilation.
+
+### Set operations
+
+```cpp
+auto current = metal::select<User>()
+    .clear_projection()
+    .project(metal::field<^^User::id>);
+
+auto archived = metal::select<ArchivedUser>()
+    .clear_projection()
+    .project(metal::field<^^ArchivedUser::id>);
+
+current.union_all(archived);
+```
+
+The AST supports `union_with`, `union_all`, `intersect`, and `except_with`. Both sides must project the same number of expressions. Compound `ORDER BY`, `LIMIT`, and `OFFSET` are emitted after the set-operation chain.
+
+### Window functions
+
+```cpp
+auto query = metal::select<Employee>()
+    .clear_projection()
+    .project(metal::field<^^Employee::id>)
+    .project(
+        metal::row_number()
+            .partition_by(metal::field<^^Employee::department>)
+            .order_by(metal::field<^^Employee::salary>, false)
+            .as("rank_in_department"))
+    .project(
+        metal::lag(metal::field<^^Employee::salary>, 1, 0)
+            .partition_by(metal::field<^^Employee::department>)
+            .order_by(metal::field<^^Employee::id>)
+            .as("previous_salary"));
+```
+
+The current catalog includes:
+
+```text
+ROW_NUMBER
+RANK
+DENSE_RANK
+NTILE
+LAG
+LEAD
+FIRST_VALUE
+LAST_VALUE
+```
+
+Partition/order fields remain constrained by the typed query scope and literal arguments are bound as parameters.
+
 ## Shared DML AST
 
-Like the original MetalORM, persistence and relation mutation share DML builders instead of maintaining a second hand-written SQL path. `0.0.9` expands that shared layer to the richer SQLite DML surface.
+Like the original MetalORM, persistence and relation mutation share DML builders instead of maintaining a second hand-written SQL path. `0.0.9` expanded that shared layer to the richer SQLite DML surface.
 
 ### Multi-row INSERT + RETURNING
 
@@ -306,8 +397,6 @@ auto result = db->execute(query.sql, query.params);
 `RETURNING` is supported on INSERT, UPDATE and DELETE and flows through the normal `QueryResult.rows` path.
 
 ### INSERT ... SELECT
-
-The source is the existing typed SELECT AST, not raw SQL:
 
 ```cpp
 auto source = metal::select<Source>();
@@ -340,7 +429,7 @@ auto query = metal::InsertQueryBuilder{"users"}
     .compile(dialect);
 ```
 
-`on_conflict(columns)` requires explicit SQLite conflict-target columns. Both `do_nothing()` and `do_update(...)` are supported, and `do_update` accepts an optional predicate list. `excluded(column)` is accepted only in the conflict-update assignment branch.
+`on_conflict(columns)` requires explicit SQLite conflict-target columns. Both `do_nothing()` and `do_update(...)` are supported. `excluded(column)` is accepted only in the conflict-update assignment branch.
 
 Normal UoW persistence and relation mutation continue compiling through these same builders.
 
@@ -369,8 +458,6 @@ UnitOfWork.flush()
         ↓
 COMMIT
 ```
-
-That ordering is particularly important for Morph relations because a parent or target can receive a generated key in the first flush before the polymorphic id field is finalized.
 
 ## Runtime architecture
 
@@ -403,6 +490,8 @@ Mappings and typed relation payloads fail at compile time for cases including:
 - duplicate mapped column names;
 - invalid generated-key declarations.
 
+Query AST validation additionally constrains reflected fields to the current query scope and rejects scalar-subquery, CTE-column-list, and set-operation projection arity mismatches before emitting SQL.
+
 ## C++26 machinery used directly
 
 ```cpp
@@ -422,12 +511,16 @@ entity.[:Member:]
 
 Reflections are non-type template arguments throughout mapping, queries, relation metadata and mutation. Structural class NTTPs carry Morph discriminator values at compile time.
 
-## What 0.0.9 contains
+## What 0.0.10 contains
 
 - C++26 static reflection and annotations as the only metadata model
 - `Mapped<T>` / `Entity<T>` concepts and `consteval` validation
 - typed SELECT SQL AST with compile-time query scope
 - reflected joins, projections, predicates, aggregates, grouping and scalar subqueries
+- `BETWEEN` / `NOT BETWEEN` and typed `EXISTS` / `NOT EXISTS`
+- CTEs and genuinely recursive CTE traversal
+- UNION / UNION ALL / INTERSECT / EXCEPT with projection-arity validation
+- typed window-function projections and partition/order specs
 - shared INSERT / UPDATE / DELETE AST builders
 - multi-row INSERT and typed INSERT ... SELECT
 - INSERT/UPDATE/DELETE RETURNING, including aliases
@@ -437,13 +530,9 @@ Reflections are non-type template arguments throughout mapping, queries, relatio
 - SQLite executor
 - `Session` coordinating `IdentityMap`, `UnitOfWork`, and `RelationChangeProcessor`
 - reflected dirty checking and generated keys
-- `has_many_collection<T>` and `many_to_many_collection<T, Pivot>`
-- typed partial `pivot_patch<Pivot>` mutations
+- dedicated has-many / N:N relation collections and partial typed pivots
 - alternate non-primary N:N `targetKey` behavior
-- `morph_one_reference<T>` / `morph_many_collection<T>` / `morph_to_reference<T...>`
-- compile-time Morph target/discriminator metadata and validation
-- lazy polymorphic loading and eager MorphOne/MorphMany loading
-- polymorphic cascade persist/remove behavior through the shared UoW flow
+- MorphTo/MorphOne/MorphMany runtime parity
 - MetalORM-compatible cascade vocabulary including `link`
 
 See `docs/PARITY.md` for the explicit reference matrix and ordered parity roadmap.
@@ -460,4 +549,4 @@ The CMake project intentionally fails on GCC < 16 and on non-GNU compilers today
 
 ## Direction
 
-The TypeScript MetalORM remains the feature and behavior reference. With richer DML closed in 0.0.9, the next parity target is the broader query-builder surface: CTE/recursive CTE, set operations, EXISTS/NOT EXISTS, BETWEEN and window functions.
+The TypeScript MetalORM remains the feature and behavior reference. With the 0.0.10 advanced SELECT family closed, the next parity target is derived-table / `fromSubquery` support, CASE expressions, and the broader SQL function catalog; relation-query helpers and pagination follow after that.
