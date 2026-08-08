@@ -237,7 +237,11 @@ inline SchemaPlan synchronize_schema(
     DbExecutor& executor,
     const Dialect& dialect,
     const SynchronizeOptions& options = {}) {
-    const auto plan = diff_schema(expected, actual, dialect, options);
+    const auto plan = diff_schema(
+        expected,
+        actual,
+        dialect,
+        SchemaDiffOptions{.allow_destructive = options.allow_destructive});
     execute_schema_plan(plan, executor, options);
     return plan;
 }
