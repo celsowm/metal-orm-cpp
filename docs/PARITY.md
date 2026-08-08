@@ -26,126 +26,63 @@ Legend:
 | Transactional `commit()` | ✅ | executor capabilities + rollback restoration |
 | Nested transactions/savepoints | ✅ | BEGIN outer; SAVEPOINT/RELEASE inner |
 | rollback-only nested failure | ✅ | inner failure poisons outer scope |
-| rollback-safe in-memory UoW state | ✅ | status/original/current scalar snapshot checkpoints |
+| rollback-safe in-memory UoW state | ✅ | scalar/runtime checkpoints |
 | rollback-safe generated IDs | ✅ | generated PK returns to checkpoint value |
 | rollback-safe relation state | ✅ | reflected relation-wrapper snapshots |
-| Table lifecycle hooks | ✅ | both implementations are Session-bound; C++ registration is entity-type-safe |
-| Session interceptors | ✅ | `before_flush` / `after_flush` wrap the full flush pipeline |
-| Domain events | ✅ | typed queues + handlers; dispatch only after successful outermost commit |
-| saveGraph/updateGraph/patchGraph | ✅ | typed nested graph payloads, pivots, pruning, single references and transaction integration |
+| Table lifecycle hooks | ✅ | Session-bound in both TS and C++ |
+| Session interceptors | ✅ | `before_flush` / `after_flush` |
+| Domain events | ✅ | dispatch only after successful outermost commit |
+| saveGraph/updateGraph/patchGraph | ✅ | typed nested graph payloads, pivots, pruning and transaction integration |
 
 ## Transaction parity — 0.0.14
 
-The executor exposes transaction capabilities explicitly. SQLite implements `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE SAVEPOINT`, and `ROLLBACK TO SAVEPOINT`; savepoint identifiers are validated before interpolation.
-
-`Session::transaction()` mirrors the TypeScript nested-transaction contract. A successful nested scope flushes and releases its savepoint. If a nested scope throws, MetalORM rolls back to that savepoint and marks the Session rollback-only. Catching the inner exception does not make the outer transaction committable.
-
-Every transaction/savepoint checkpoint records whether an entity existed in tracking, `EntityStatus`, the dirty-check snapshot, reflected persistent scalar values and rollback-sensitive runtime members. Rollback restores generated IDs, updates, deletes, Identity Map membership and relation wrapper state as well as database rows.
+SQLite exposes transaction/savepoint capabilities explicitly. `Session::transaction()` mirrors the TypeScript nested-transaction contract: outer scope uses BEGIN/COMMIT, nested scope uses SAVEPOINT/RELEASE, and any failed nested scope marks the Session rollback-only. Checkpoints restore scalar values, generated IDs, tracking status, Identity Map membership, relations and event queues.
 
 ## Lifecycle and domain events — 0.0.15
 
-The runtime has two distinct lifecycle surfaces:
-
-1. entity/table lifecycle hooks execute inside the Unit of Work for INSERT/UPDATE/DELETE;
-2. Session interceptors wrap the complete flush pipeline.
-
-```cpp
-metal::TableHooks<User> hooks;
-hooks.before_insert = [](metal::Session&, User& user) {
-    user.name = normalize(user.name);
-};
-
-session.register_table_hooks<User>(std::move(hooks));
-```
-
-After the corresponding TypeScript refactor on 2026-08-08, lifecycle policy is Session-bound in **both** repositories. `TableDef`/mapping metadata no longer owns runtime hooks in the TypeScript reference either. The C++ API additionally uses the entity type as its public registration key.
-
-Table-hook ordering follows the reference UoW:
-
-```text
-INSERT: beforeInsert -> INSERT/generated id -> snapshot/identity -> afterInsert
-UPDATE: dirty diff -> beforeUpdate -> UPDATE -> refreshed snapshot -> afterUpdate
-DELETE: beforeDelete -> DELETE/remove tracking -> afterDelete
-```
-
-Raw `Session::flush()` remains UoW-only: table hooks execute, but Session interceptors, relation processing and domain-event dispatch do not.
-
-Domain events use typed queues and dispatch only after a successful outermost COMMIT. SAVEPOINT release never dispatches. Event queues participate in transaction checkpoints, and post-COMMIT handler errors propagate without a fake database rollback.
+Table hooks run inside the Unit of Work; Session interceptors wrap the full commit pipeline. Raw `Session::flush()` remains UoW-only. Domain events dispatch after the successful outermost COMMIT and never on SAVEPOINT release. Post-COMMIT handler failures propagate without pretending that the database commit was rolled back.
 
 ## Graph persistence — 0.0.16
 
-The JavaScript/TypeScript implementation accepts DTO-like object payloads. The C++ port expresses the same semantic payload through reflected builders so invalid entity fields, relation targets and scalar value types can fail at compile time.
+C++ represents the TS DTO graph contract with reflected `graph<T>()` payloads:
 
 ```cpp
 auto payload = metal::graph<User>()
     .set<^^User::name>(std::string{"Celso"})
-    .relation<^^User::profile>(
-        metal::graph<Profile>()
-            .set<^^Profile::bio>(std::string{"C++26"}))
     .relation<^^User::posts>([](auto& posts) {
         posts.add(
             metal::graph<Post>()
                 .set<^^Post::title>(std::string{"Reflection"}));
-        posts.add_id(42);
     });
 
 auto user = metal::save_graph(session, payload);
 ```
 
-The public operations are `save_graph`, `update_graph` and `patch_graph`. Omitted fields and relations are untouched. `GraphOptions::prune_missing` removes/detaches collection members not represented in the graph. Collection payloads support nested graph values, existing entities and IDs; N:N entries additionally accept `pivot_patch<Pivot>` and respect alternate `targetKey` metadata.
-
-Graph execution composes with `Session::transaction()` by default, therefore database writes, generated IDs, runtime relation state and queued domain events remain under the transaction checkpoint.
-
-The C++ graph API is intentionally not a dynamic `Record<string, unknown>` clone. Its stronger reflected shape is a language-binding adaptation; graph behavior remains the parity target.
+`save_graph`, `update_graph`, `patch_graph`, `prune_missing`, nested single/collection relations, IDs, N:N pivots, generated keys, lifecycle hooks and domain events share the same transactional runtime.
 
 ## Dedicated single references — 0.0.17
 
-`belongsTo` and `hasOne` now use dedicated wrappers exclusively:
+`belongsTo` and `hasOne` use dedicated wrappers exclusively:
 
 ```cpp
 metal::belongs_to_reference<User> author;
 metal::has_one_reference<Profile> profile;
 ```
 
-A raw `std::shared_ptr<T>` member annotated as either relation is rejected by mapping validation. There is no legacy compatibility specialization.
-
-Both wrappers expose:
-
-```text
-load / loaded
-get
-set / reset
-dirty
-```
-
-Session binding supplies lazy loaders. Eager and lazy hydration call `_metal_hydrate()` internally, which establishes `current == baseline`; reading a relation therefore never creates a false mutation. User `set/reset` changes `current` while preserving the baseline until a successful commit accepts the relation state.
-
-For `belongsTo`, `set()` synchronizes the root FK immediately when the target relation key is already available. If a configured cascade-persist target receives a generated key during the first UoW flush, relation processing resolves the key afterward and the second UoW flush persists the root FK. Clearing requires a nullable root FK in the C++ type.
-
-For `hasOne`, the child carries the FK. Replacing a loaded reference attaches the new child and detaches the old child; detach nulls a nullable child FK or applies cascade remove when configured. Newly attached targets participate in cascade persist.
-
-The same generic transaction checkpoint introduced in 0.0.14 copies relation wrappers. A rollback therefore restores both the pointer and its baseline/dirty state; no single-reference-specific rollback side channel was added.
-
-The dedicated 0.0.17 SQLite E2E covers new-root/generated-key attachment, lazy loading, Identity Map reuse, belongs-to set/reset, has-one replacement/reset, nullable detach, cascade persist and transaction rollback. Compile-fail tests separately reject raw `shared_ptr` belongs-to and has-one shapes.
+Raw `std::shared_ptr<T>` annotated as either relation is rejected at compile time. The wrappers provide lazy/eager hydration, `load/get/set/reset`, dirty baselines, cascade-persist integration and rollback-safe state.
 
 ## Relations
 
 | MetalORM capability | C++ status | Notes |
 | --- | --- | --- |
-| belongsTo | ✅ | dedicated reference, lazy/eager hydration, target-key FK sync, set/reset, rollback |
-| hasOne | ✅ | dedicated reference, lazy/eager hydration, replacement/detach, cascade and rollback |
-| hasMany | ✅/🟡 | dedicated collection; broader JS-object conveniences remain language-specific |
-| belongsToMany | ✅ | lazy/eager loading, IDs, sync, typed pivot patches, alternate `targetKey` |
-| morphTo | ✅ | typed target set, lazy resolution, switching/reset, cascade persist |
-| morphOne | ✅ | dedicated reference, lazy/eager loading, mutation/cascade |
-| morphMany | ✅ | dedicated collection, lazy/eager loading, mutation/cascade |
-| cascade none/all/persist/remove/link | ✅ | aligned vocabulary and runtime semantics for supported relation operations |
-
-`has_many_collection<T>` supports `load`, `get_items`, `add`, `attach`, `remove`, `clear`, Session-bound lazy loading and reflected FK assignment.
-
-`many_to_many_collection<T, Pivot>` supports entity/ID attach and detach, `sync_by_ids`, typed pivot hydration, partial `pivot_patch<Pivot>`, alternate non-primary target keys and Identity Map integration after hydration.
-
-`morph_to` encodes discriminator targets at compile time. The discriminator set and target-key compatibility are `consteval` validated. MorphTo intentionally has no single-table JOIN representation; lazy polymorphic resolution is the parity path, matching the TypeScript restriction.
+| belongsTo | ✅ | dedicated reference, lazy/eager, target-key FK sync, rollback |
+| hasOne | ✅ | dedicated reference, replacement/detach, cascade and rollback |
+| hasMany | ✅/🟡 | dedicated collection; JS-object conveniences are language-specific |
+| belongsToMany | ✅ | lazy/eager, IDs, sync, typed pivot patches, alternate `targetKey` |
+| morphTo | ✅ | typed target set, lazy resolution, switching/reset |
+| morphOne | ✅ | dedicated reference, lazy/eager, mutation/cascade |
+| morphMany | ✅ | dedicated collection, lazy/eager, mutation/cascade |
+| cascade none/all/persist/remove/link | ✅ | aligned vocabulary/runtime behavior |
 
 ## Query builder and DML
 
@@ -158,16 +95,16 @@ The dedicated 0.0.17 SQLite E2E covers new-root/generated-key attachment, lazy l
 | EXISTS / NOT EXISTS | ✅ | typed SELECT subqueries |
 | reflected JOINs | ✅ | N:1 / 1:1 / 1:N / N:N |
 | projections/aliases | ✅ | columns, aggregates, functions, CASE, windows |
-| aggregates/GROUP BY/HAVING | ✅/🟡 | core set; optional SQLite extension functions vary by build |
+| aggregates/GROUP BY/HAVING | ✅/🟡 | optional SQLite extensions vary by build |
 | CTE / recursive CTE | ✅ | recursive traversal tested on SQLite |
 | UNION / UNION ALL / INTERSECT / EXCEPT | ✅ | projection arity validated |
 | window functions | ✅ | ranking, NTILE, LAG/LEAD, FIRST/LAST VALUE |
-| derived tables / fromSubquery | ✅ | SQLite alias-list restriction diagnosed explicitly |
+| derived tables / fromSubquery | ✅ | SQLite alias-list restriction diagnosed |
 | CASE | ✅ | searched CASE in projection/predicates |
-| SQL function AST | ✅ | recursive typed scalar node + validated generic function helper |
-| text/control/date/JSON functions | ✅/🟡 | broad SQLite catalog; TS cross-dialect-only helpers remain backend-specific |
-| numeric function catalog | ✅/🟡 | AST surface broad; optional SQLite math support depends on linked build |
-| INSERT/UPDATE/DELETE AST | ✅ | public builders + UoW + relation processor share it |
+| SQL function AST | ✅ | recursive typed scalar node |
+| text/control/date/JSON functions | ✅/🟡 | backend-specific extension edges remain |
+| numeric function catalog | ✅/🟡 | optional SQLite math functions depend on build |
+| INSERT/UPDATE/DELETE AST | ✅ | public builders + runtime share it |
 | multi-row INSERT | ✅ | accumulated VALUES rows |
 | INSERT ... SELECT | ✅ | typed SELECT source |
 | RETURNING | ✅ | INSERT/UPDATE/DELETE |
@@ -175,42 +112,56 @@ The dedicated 0.0.17 SQLite E2E covers new-root/generated-key attachment, lazy l
 
 ## Relation-query parity — 0.0.13
 
-| Capability | Status | Notes |
-| --- | --- | --- |
-| whereHas | ✅ | reflected correlated EXISTS injected before child/root pagination |
-| whereHasNot | ✅ | reflected NOT EXISTS with the same correlation pipeline |
-| relation conditions | ✅ | `where_relation<^^Relation>(..., targetPredicate)` |
-| relation match | ✅ behavioral | shared correlation engine; SQL shape intentionally differs from TS `INNER JOIN + DISTINCT` |
-| N:N relation predicates | ✅ | reflected pivot and target keys |
-| MorphOne/MorphMany relation predicates | ✅ | reflected id/type correlation |
-| MorphTo whereHas | intentionally unsupported | same physical-target ambiguity as TS |
-
-Correlation lives in the SELECT `WHERE` compilation point. Callback-local `ORDER BY / LIMIT / OFFSET` runs after correlation, and root relation predicates run before root pagination. Nested correlation aliases prevent alias shadowing while ordinary queries retain stable `t0/t1/p0` aliases.
+`where_has`, `where_has_not`, `where_relation` and behavioral `match_relation` use reflected correlation. Correlation is compiled in the real WHERE position before child/root pagination. Nested scopes use hierarchical aliases to avoid shadowing.
 
 ## Pagination parity — 0.0.13
 
-The raw executor overload remains row-oriented. The Session overload is root-oriented and deduplicates explicit row-multiplying joins by reflected root PK while preserving result order. Cursor pagination supports forward/backward mode, `limit + 1`, multi-column lexicographic keys, mixed ASC/DESC, non-null keys, ordering signatures and tracked root deduplication.
+Raw executor pagination is row-oriented. Session pagination is root-oriented and deduplicates row-multiplying joins by reflected root PK. Cursor pagination supports forward/backward mode, `limit + 1`, multi-column lexicographic keys, mixed ASC/DESC, ordering signatures and root deduplication.
 
-Tracked root pagination currently chooses semantic correctness over a SQL-only optimization and may materialize more candidate rows before deduplication. That is a performance opportunity, not a behavior gap.
+## SQLite schema parity — 0.0.18
 
-## Query architecture
+Schema state is represented independently from ORM mapping:
 
-`query.hpp` remains a façade:
+```cpp
+auto actual = metal::introspect_sqlite(executor, {
+    .exclude_tables = {"schema_comments"},
+    .include_views = true
+});
 
-```text
-query.hpp
-  ├── core.hpp
-  │    ├── core_types.hpp
-  │    └── compiler.hpp -> sqlite_compiler.hpp
-  ├── expressions.hpp
-  ├── functions.hpp
-  ├── select.hpp
-  ├── relation_queries.hpp
-  ├── relation_match.hpp
-  └── pagination.hpp
+auto expected = metal::expected_schema<User, Post>(dialect);
+metal::add_expected_index<User, ^^User::email>(
+    expected,
+    dialect,
+    "users_email_idx",
+    true);
+
+auto plan = metal::diff_schema(expected, actual, dialect);
 ```
 
-Session-specific tracked pagination remains isolated in `runtime_pagination.hpp`.
+The SQLite introspector reads tables, ordered PK columns, column type/nullability/default, AUTOINCREMENT, foreign-key metadata/actions, user indexes, views and optional `schema_comments` table/column comments. Include/exclude table and view filters mirror the TS surface.
+
+Two SQLite introspection normalizations intentionally avoid false self-diffs that exist in the current TS implementation: a PRAGMA primary-key column is treated as non-null even when SQLite reports `notnull=0`, and AUTOINCREMENT is detected from the table DDL instead of being hard-coded false. A schema created by MetalORM must not immediately diff against itself.
+
+Expected schema is reflection-derived. Index columns are declared with reflected members rather than strings:
+
+```cpp
+metal::add_expected_index<User, ^^User::email, ^^User::tenant_id>(
+    expected, dialect, "users_email_tenant_idx", true);
+```
+
+`diff_schema` / `synchronize_schema` follow the TS safety contract:
+
+- missing table -> CREATE TABLE + expected indexes, safe;
+- missing column -> ALTER TABLE ADD, safe;
+- missing index -> CREATE INDEX, safe;
+- extra table/index -> destructive and SQL is emitted only with `allow_destructive=true`;
+- SQLite ALTER COLUMN -> warning only;
+- SQLite DROP COLUMN -> warning + no rebuild SQL;
+- `dry_run=true` never executes the plan.
+
+ORM relation metadata is deliberately not treated as a physical FK constraint declaration. The TypeScript model also keeps relation metadata separate from column `references`. Introspection reports real FK constraints, while reflected FK/check/default declaration remains a later DDL-metadata extension rather than hidden inference.
+
+The 0.0.18 E2E requires the complete cycle `expected -> synchronize -> introspect -> diff` to converge to an empty plan with no warnings.
 
 ## Schema/tooling/ecosystem
 
@@ -218,21 +169,26 @@ Session-specific tracked pagination remains isolated in `runtime_pagination.hpp`
 | --- | --- |
 | SQLite DDL generation | ✅ foundational |
 | composite PK DDL | ✅ |
-| schema introspection | ❌ |
-| schema diff | ❌ |
-| migrations/tooling | ❌ |
+| SQLite schema introspection | ✅ |
+| schema diff / plan execution | ✅/🟡 |
+| schema synchronize / dry-run / destructive policy | ✅ |
+| physical FK/check/default declaration metadata | ❌ |
+| migration history/versioned migration runner | not present as a distinct TS subsystem |
+| bulk operations | ❌ |
 | DTO/OpenAPI | ❌ |
 | Tree/MPTT | ❌ |
 | cache layer | ❌ |
-| bulk operations | ❌ |
 | procedure calls | ❌ |
 | pooling | ❌ |
 | DB-to-entity code generation | ❌ |
 
+The 🟡 on schema diff reflects the expected-metadata surface, not the diff engine: reflected tables currently expose scalar type/nullability/generated state and explicitly-added indexes, but do not yet have C++ annotations for physical FK/default/check constraints.
+
 ## Ordered parity roadmap
 
-The narrow runtime gaps through graph persistence and single-reference semantics are now closed through 0.0.17. The next version should be selected from a **fresh audit of current TypeScript capabilities**, rather than preserving an old checklist after the reference implementation changes.
+A fresh audit of the current TypeScript repository shows a concrete bulk subsystem (`bulk insert/update/delete/upsert`, chunking, transaction controls, returning and dialect strategy metadata). Therefore the next focused release is:
 
-Known larger gaps currently include schema introspection/diff/migrations, bulk operations, DTO/OpenAPI, cache, Tree/MPTT, pooling and DB-to-entity generation. SQLite remains the only backend while these parity layers are evaluated.
+1. **0.0.19:** bulk insert/update/delete/upsert for SQLite, reusing the existing DML AST and Session transaction semantics; reflected `by`/returning columns instead of string column APIs where C++ can make them static.
+2. Then re-audit DTO/OpenAPI, cache, Tree/MPTT, pooling and DB-to-entity generation against the current TS tree.
 
-A later query-performance pass may replace in-memory root deduplication with a root-aware SQL page plan, provided it preserves the tested 0.0.13 semantics.
+A later performance pass may replace in-memory root pagination deduplication with a root-aware SQL page plan, provided it preserves the tested 0.0.13 semantics.
