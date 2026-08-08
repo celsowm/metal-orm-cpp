@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(metal-orm VERSION 0.0.15 LANGUAGES CXX)
+project(metal-orm VERSION 0.0.16 LANGUAGES CXX)
 
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    message(FATAL_ERROR "MetalORM 0.0.15 is intentionally C++26-native and currently requires GCC 16+ reflection support")
+    message(FATAL_ERROR "MetalORM 0.0.16 is intentionally C++26-native and currently requires GCC 16+ reflection support")
 endif()
 
 if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
-    message(FATAL_ERROR "MetalORM 0.0.15 requires GCC 16 or newer")
+    message(FATAL_ERROR "MetalORM 0.0.16 requires GCC 16 or newer")
 endif()
 
 find_package(SQLite3 REQUIRED)
@@ -88,6 +88,11 @@ if(METAL_ORM_BUILD_TESTS)
         duplicate-morph-discriminator
         tests/compile_fail/duplicate_morph_discriminator.cpp
         "morph_to discriminator values must be non-empty and unique"
+    )
+    metal_expect_compile_failure(
+        wrong-graph-value
+        tests/compile_fail/wrong_graph_value.cpp
+        "graph value is incompatible with the reflected member type"
     )
 
     enable_testing()
