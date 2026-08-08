@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.12`
+**Version:** `0.0.13`
 
 MetalORM C++ deliberately has no compatibility metadata layer and no C++20/23 fallback. The TypeScript `metal-orm` repository is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
 
@@ -145,7 +145,7 @@ auto band = metal::case_when(
 
 The SQLite function catalog includes broad text, numeric, control-flow, date/time and JSON families. Optional SQLite math/extension functions remain dependent on the linked SQLite build.
 
-## Relation query predicates — 0.0.12
+## Relation query predicates — 0.0.13
 
 Relation filtering is reflection-driven; relation names and correlation keys are not supplied as strings.
 
@@ -192,11 +192,35 @@ auto admins_with_cpp_posts =
 
 `belongs_to`, `has_one`, `has_many`, N:N, `morph_one`, and `morph_many` correlations derive their keys from relation metadata. `morph_to` is rejected for `where_has` because one relation can resolve to different physical target tables, matching the TypeScript restriction.
 
-`match_relation<^^Relation>(...)` exposes the relation-matching contract with the same typed correlation engine. The TypeScript implementation renders `match()` as INNER JOIN + DISTINCT; the C++ implementation uses EXISTS to avoid maintaining two independent correlation compilers while preserving root-filtering behavior.
+0.0.13 moves relation correlation into the SELECT compiler's `WHERE` position. This matters for child pagination:
 
-Normal relation predicates and child-query filters are supported. Callback-local pagination (`LIMIT/OFFSET` inside the relation child query) remains an explicitly tracked edge case because the current C++ correlation wrapper is applied around the configured child query.
+```cpp
+auto roots = metal::where_has<^^User::posts>(
+    metal::select<User>(),
+    [](auto& posts) {
+        posts
+            .order_by(metal::field<^^Post::id>)
+            .limit(10)
+            .offset(1);
+    });
+```
 
-## Offset pagination — 0.0.12
+The generated semantic order is now:
+
+```text
+child predicates
+AND relation correlation
+ORDER BY
+LIMIT / OFFSET
+```
+
+rather than applying correlation around an already-paginated child query. A relation filter attached to a root query with an existing `LIMIT/OFFSET` is likewise evaluated before that root pagination.
+
+Nested correlated scopes use internal aliases such as `t0`, `t0_rel`, `t0_rel_rel`, preventing child subqueries from shadowing their outer correlation alias. Normal non-correlated SQL preserves the established `t0/t1/p0` alias shape.
+
+`match_relation<^^Relation>(...)` exposes the relation-matching contract with the same typed correlation engine. TypeScript currently renders `match()` as INNER JOIN + DISTINCT; the C++ implementation uses EXISTS so relation correlation has one source of truth while preserving root-filtering behavior.
+
+## Offset pagination — 0.0.13
 
 Level 1 / row pagination stays independent of Session:
 
@@ -211,7 +235,7 @@ auto result = metal::execute_paged(
     });
 ```
 
-It returns `Row` values and counts result rows.
+It returns `Row` values and counts physical result rows.
 
 For tracked root entities, use the Session overload:
 
@@ -225,9 +249,15 @@ auto result = metal::execute_paged(
     });
 ```
 
-The Session path counts `DISTINCT` reflected root primary keys, reuses the Identity Map and requires a complete root-entity projection. DTO/partial projections should use the row overload instead of creating partially tracked entities.
+Pagination helpers own the requested page and therefore strip earlier query `LIMIT/OFFSET` before applying `PageOptions`, matching TypeScript `executePaged` behavior.
 
-## Cursor pagination — 0.0.12
+The Session path is **root-aware**. If an explicit 1:N/N:N JOIN physically returns the same root multiple times, MetalORM deduplicates by the reflected root PK while preserving result order, counts unique roots, slices the requested page, and materializes each root through the Identity Map.
+
+Tracked pagination requires a complete root-entity projection. DTO/partial projections should use the row overload rather than create partially managed entities.
+
+The current root-aware implementation materializes the unpaged matching row stream before deduplication. That is a performance optimization target, not a semantic parity gap.
+
+## Cursor pagination — 0.0.13
 
 Cursor ordering is expressed using reflected fields:
 
@@ -268,10 +298,12 @@ Backward pagination uses `last` / `before`. The implementation follows the TypeS
 
 - lexicographic predicates for multiple ORDER BY columns;
 - direction-aware ASC/DESC comparisons;
+- mode-driven keyset direction (`first` means after semantics; `last` means before semantics);
 - `limit + 1` page detection;
 - forward and backward pagination;
 - non-null cursor values;
-- an ORDER BY signature embedded in the opaque cursor so a cursor cannot be silently reused with a different ordering.
+- an ORDER BY signature embedded in the opaque cursor so a cursor cannot be silently reused with a different ordering;
+- root-PK deduplication before page-size detection for tracked queries containing row-multiplying explicit joins.
 
 The cursor encoding is intentionally opaque and internal to the C++ API; semantic compatibility does not imply a cross-language TypeScript/C++ wire-format guarantee.
 
