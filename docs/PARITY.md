@@ -23,11 +23,64 @@ Legend:
 | Session coordinator | ✅ | Coordinates UoW, Identity Map and relation processor |
 | Dirty snapshots | ✅ | Reflection-generated |
 | Persist/remove lifecycle | ✅ | Aligned with TS semantics |
-| Nested transactions/savepoints | ❌ | Next runtime family |
-| rollback-safe in-memory UoW state | ❌ | Next runtime family |
-| Interceptors/hooks | ❌ | Follows transactions |
-| Domain events | ❌ | Follows interceptors/hooks |
-| saveGraph/updateGraph/patchGraph | ❌ | Later runtime family |
+| Transactional `commit()` | ✅ | executor capabilities + rollback restoration |
+| Nested transactions/savepoints | ✅ | BEGIN outer; SAVEPOINT/RELEASE inner |
+| rollback-only nested failure | ✅ | inner failure poisons outer scope |
+| rollback-safe in-memory UoW state | ✅ | status/original/current scalar snapshot checkpoints |
+| rollback-safe generated IDs | ✅ | generated PK returns to checkpoint value |
+| rollback-safe relation state | ✅ | reflected relation-wrapper snapshots |
+| Interceptors/hooks | ❌ | next runtime family |
+| Domain events | ❌ | next runtime family |
+| saveGraph/updateGraph/patchGraph | ❌ | later runtime family |
+
+## Transaction parity — 0.0.14
+
+The executor now exposes transaction capabilities explicitly:
+
+```cpp
+struct ExecutorCapabilities {
+    bool transactions;
+    bool savepoints;
+};
+```
+
+SQLite advertises both capabilities and implements `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE SAVEPOINT`, and `ROLLBACK TO SAVEPOINT`. Savepoint identifiers are validated before being interpolated into control SQL.
+
+The scoped runtime API mirrors TypeScript semantics:
+
+```cpp
+session.transaction([](metal::Session& tx) {
+    // mutations
+
+    tx.transaction([](metal::Session& nested) {
+        // nested scope => SAVEPOINT metalorm_sp_1
+    });
+});
+```
+
+A successful nested scope flushes and releases its savepoint. If a nested scope throws, MetalORM rolls back to the savepoint and marks the session rollback-only. Catching that inner exception does **not** make the outer transaction committable; the outer scope subsequently rolls back.
+
+C++ additionally checkpoints the synchronous in-memory state mutated by its Unit of Work. Every transaction/savepoint checkpoint records:
+
+- whether each entity was already tracked;
+- `EntityStatus` and dirty-check `original` snapshot;
+- current persistent scalar values through reflection;
+- reflected relation-wrapper state, including collection baselines/pivot patches/morph references.
+
+That means rollback restores more than the SQLite rows. It also:
+
+- restores an updated object's scalar values to the transaction-entry state;
+- resurrects a tracked entity removed and flushed inside the failed transaction;
+- removes objects that became tracked only inside the failed scope;
+- removes rolled-back identities from the Identity Map and rebuilds valid identities;
+- resets a generated primary key assigned by an INSERT that did not commit;
+- restores relation collection/baseline state even when an inner savepoint had already successfully flushed and accepted the relation before the outer transaction failed.
+
+The outer checkpoint survives successful nested savepoint releases, so outer rollback remains capable of undoing all work performed by successful inner scopes.
+
+`commit()` uses the same checkpoint mechanism. If the database `COMMIT` fails, SQLite is rolled back and the pre-commit UoW/entity state is restored rather than leaving snapshots or generated keys falsely marked as committed.
+
+Nested transactions on an executor that reports `savepoints == false` fail deterministically instead of attempting a second `BEGIN`.
 
 ## Relations
 
@@ -102,66 +155,13 @@ The discriminator set and target-key compatibility are `consteval` validated. `M
 | MorphOne/MorphMany relation predicates | ✅ | reflected id/type correlation |
 | MorphTo whereHas | intentionally unsupported | same physical-target ambiguity as TS |
 
-The canonical API does not accept relation names or key names as strings:
-
-```cpp
-auto users = metal::where_has<^^User::posts>(
-    metal::select<User>(),
-    [](auto& posts) {
-        posts.where(metal::field<^^Post::published> == true);
-    });
-```
-
-`where_relation` is the concise target-predicate form:
-
-```cpp
-auto admins = metal::where_relation<^^User::roles>(
-    metal::select<User>(),
-    metal::field<^^Role::name> == "admin");
-```
-
-0.0.13 moves correlation into the SELECT `WHERE` compilation point instead of wrapping an already-compiled child query. Therefore callback-local `ORDER BY / LIMIT / OFFSET` runs **after** correlation, matching the TypeScript `applyRelationCorrelation()` ordering. A relation filter attached to a root query that already contains `LIMIT/OFFSET` is likewise applied before those clauses.
-
-Nested relation scopes use generated alias namespaces (`t0`, `t0_rel`, `t0_rel_rel`, ...) so inner subqueries cannot shadow an outer correlation alias. Outside correlated scopes the stable historic SQL aliases (`t0`, `t1`, `p0`) are preserved.
-
-For N:N correlation, the child target receives an `EXISTS` over the reflected pivot table. This keeps relation-key metadata in one correlation engine without injecting an unrelated JOIN into the child callback query.
-
-`match_relation` uses the same correlation engine. TypeScript currently renders `match()` as `INNER JOIN + DISTINCT`; C++ renders EXISTS because keeping one reflected correlation compiler avoids two semantically overlapping implementations. Root-filtering behavior is equivalent for the supported predicates; byte-for-byte SQL-shape parity is not a project requirement.
+0.0.13 moved correlation into the SELECT `WHERE` compilation point. Callback-local `ORDER BY / LIMIT / OFFSET` therefore runs after correlation, and root relation predicates are applied before root pagination. Nested correlation aliases (`t0`, `t0_rel`, ...) prevent alias shadowing while ordinary queries retain stable `t0/t1/p0` aliases.
 
 ## Pagination parity — 0.0.13
 
-### Offset pagination
+The raw executor overload remains row-oriented. The Session overload is root-oriented and deduplicates explicit row-multiplying joins by reflected root PK while preserving result order. Cursor pagination supports forward/backward mode, `limit + 1`, multi-column lexicographic keys, mixed ASC/DESC, non-null keys, ordering signatures and tracked root deduplication.
 
-Two execution levels mirror the TypeScript architecture:
-
-- `execute_paged(query, executor, dialect, options)` returns raw `Row` results and counts physical result rows;
-- `execute_paged(query, session, options)` returns tracked unique root entities.
-
-Pagination helpers first remove any previous query `LIMIT/OFFSET`, because `executePaged` owns the requested page just as the TypeScript builder overwrites those clauses.
-
-The Session overload is root-aware even for an explicit 1:N/N:N JOIN that physically multiplies rows: it deduplicates by the reflected root PK while preserving the query result order, counts unique roots, then slices the requested page. It refuses partial root projections rather than creating incomplete managed entities, and hydrated pages reuse the Identity Map.
-
-The current implementation chooses semantic correctness over a premature SQL-only optimization: tracked root pagination materializes the unpaged matching row stream before deduplication. This is a performance optimization opportunity, not a behavioral parity gap.
-
-### Cursor pagination
-
-Implemented:
-
-- `first` / `after` forward pagination;
-- `last` / `before` backward pagination;
-- mode-driven keyset direction (`first` => after semantics, `last` => before semantics), matching TS even for unusual `first + before` / `last + after` combinations;
-- `limit + 1` next/previous-page detection;
-- reflected `cursor_order(field<^^T::member>, direction)` terms;
-- lexicographic multi-column keyset predicates;
-- ASC/DESC-aware break operators;
-- non-null cursor keys;
-- order signature validation so cursors cannot be reused with a different ordering;
-- Session overload returning Identity-Map-managed entities;
-- root-PK deduplication for row-multiplying explicit joins before page-size/has-extra evaluation.
-
-Cursor payloads are opaque. The C++ encoder preserves the same semantic payload — version, ordered values and ordering signature — but does not promise TypeScript/C++ wire-format interchange.
-
-As with tracked offset pagination, the root-deduplicating cursor path may inspect more candidate rows than an eventual optimized SQL plan. The observable pagination semantics are closed; SQL-plan optimization can evolve independently.
+Tracked root pagination currently chooses semantic correctness over a SQL-only optimization and may materialize more candidate rows before deduplication. That is a performance opportunity, not a behavior gap.
 
 ## Query architecture
 
@@ -180,7 +180,7 @@ query.hpp
   └── pagination.hpp
 ```
 
-`select.hpp` exposes an internal extra-predicate compilation hook used by relation correlation and `without_pagination()` snapshots used by execution helpers. Session-specific tracked pagination remains isolated in `runtime_pagination.hpp` rather than growing the SELECT builder into a runtime monolith.
+Session-specific tracked pagination remains isolated in `runtime_pagination.hpp`.
 
 ## Schema/tooling/ecosystem
 
@@ -201,11 +201,10 @@ query.hpp
 
 ## Ordered parity roadmap
 
-The two semantic edges tracked after 0.0.12 are closed in 0.0.13. The next releases should return to runtime parity:
+With transaction/savepoint semantics and rollback-safe runtime state closed in 0.0.14, the next reference gaps are:
 
-1. **0.0.14:** nested transactions/savepoints plus rollback-safe in-memory Unit of Work / relation state.
-2. Then: interceptors/hooks and domain events.
-3. Then: `saveGraph` / `updateGraph` / `patchGraph`.
-4. Then: schema/tooling/ecosystem modules such as introspection/diff, bulk operations, DTO/OpenAPI, cache, Tree/MPTT, pooling and code generation.
+1. **0.0.15:** table hooks / Session interceptors and domain events, with dispatch timing tied to successful outermost commit.
+2. Then: `saveGraph` / `updateGraph` / `patchGraph`.
+3. Then: schema/tooling/ecosystem modules such as introspection/diff, bulk operations, DTO/OpenAPI, cache, Tree/MPTT, pooling and code generation.
 
-A later query-performance pass may replace in-memory root deduplication with a root-aware SQL page plan, provided it preserves the now-tested 0.0.13 semantics.
+A later query-performance pass may replace in-memory root deduplication with a root-aware SQL page plan, provided it preserves the tested 0.0.13 semantics.
