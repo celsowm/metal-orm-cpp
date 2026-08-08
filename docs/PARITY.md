@@ -98,29 +98,84 @@ Remaining relation adaptation work is limited to JS-object-model conveniences su
 | MetalORM capability | C++ status | Notes |
 | --- | --- | --- |
 | Typed SELECT AST | ✅ | Compile-time entity scope |
-| WHERE/comparisons/logical expressions | ✅ partial catalog | Core comparisons, logical operators, NULL, LIKE, IN, BETWEEN, EXISTS |
+| WHERE/comparisons/logical expressions | ✅ partial catalog | Computed scalar operands now share the same predicate AST |
 | IN / NULL / LIKE | ✅ | Typed values/subqueries |
 | BETWEEN / NOT BETWEEN | ✅ | First-class expression AST |
 | EXISTS / NOT EXISTS | ✅ | Typed SELECT subqueries |
 | Reflected JOINs | ✅ | Non-polymorphic typed joins + runtime MorphOne/MorphMany include |
-| Projections/aliases | ✅ | Columns + aggregates + window terms |
-| Aggregates/GROUP BY/HAVING | ✅ | Foundational aggregate set |
+| Projections/aliases | ✅ | Columns, aggregates, functions, CASE, and window terms |
+| Aggregates/GROUP BY/HAVING | ✅/🟡 | Core set plus STDDEV/VARIANCE AST; SQLite runtime availability can vary for extension functions |
 | Scalar IN subqueries | ✅ | Exactly-one projection validation |
 | CTE | ✅ | Multiple CTEs and optional column lists |
 | recursive CTE | ✅ | `WITH RECURSIVE` plus typed CTE join bridge; exercised on a real parent/child traversal |
 | UNION / UNION ALL | ✅ | Compound SELECT AST |
 | INTERSECT / EXCEPT | ✅ | Compound SELECT AST |
 | window functions | ✅ | ROW_NUMBER/RANK/DENSE_RANK/NTILE/LAG/LEAD/FIRST_VALUE/LAST_VALUE with partition/order specs |
+| derived tables / fromSubquery | ✅ | Typed subquery source + alias; SQLite column-alias-list syntax is explicitly rejected |
+| CASE | ✅ | Typed searched CASE usable in projections and predicates |
+| SQL function AST | ✅ | Recursive typed scalar node + validated custom function identifier |
+| SQLite text/control/date/JSON function families | ✅/🟡 | Broad executable catalog; TS-only/cross-dialect helpers continue to be filled as SQLite semantics are defined |
+| numeric function catalog | ✅/🟡 | Broad AST surface; execution of optional math functions depends on SQLite build capabilities |
 | INSERT/UPDATE/DELETE AST | ✅ | Shared by public builders, UoW and relation processor |
 | Multi-row INSERT | ✅ | Multiple `VALUES` rows in one statement |
 | INSERT ... SELECT | ✅ | Typed `BasicSelectQuery` source |
 | RETURNING | ✅ | INSERT/UPDATE/DELETE, including aliases |
 | SQLite UPSERT/conflict API | ✅ | target columns, DO NOTHING, DO UPDATE, update predicate, `excluded()` |
-| derived tables | ❌ | `fromSubquery` parity remains |
-| CASE | ❌ | Not ported yet |
-| JSON/function catalog | ❌ | Not ported yet |
-| relation query helpers (`whereHas`, etc.) | ❌ | Not ported yet |
-| pagination/cursor helpers | ❌ | Not ported yet |
+| relation query helpers (`whereHas`, etc.) | ❌ | Planned next |
+| pagination/cursor helpers | ❌ | Planned next |
+
+### Computed scalar AST
+
+0.0.11 removes the old projection-only split between columns, aggregates, and windows. These are now recursive scalar expressions:
+
+```text
+ScalarTerm<Result, Owners...>
+  ├── reflected column
+  ├── literal parameter
+  ├── aggregate
+  ├── function call
+  ├── CASE
+  └── window function
+```
+
+The owner pack propagates through nested expressions. This means, for example, `lower(field<^^Post::title>)` cannot be projected by a `select<User>()` until `Post` is actually part of the typed query scope.
+
+### Derived tables
+
+```cpp
+auto source = metal::select<User>()
+    .clear_projection()
+    .project(metal::field<^^User::id>)
+    .project(metal::field<^^User::name>)
+    .where(metal::field<^^User::score> >= 10);
+
+auto query = metal::select<User>()
+    .from_subquery(source, "high_scores")
+    .where(metal::field<^^User::score> <= 20);
+```
+
+The subquery remains a normal `BasicSelectQuery`, and projection/subquery/outer-predicate parameters are appended in SQL lexical order. SQLite does not support a derived-table column alias list of the form `AS alias(col1, col2)`, so the SQLite-only port rejects a non-empty alias list and requires aliases to be applied to source projections instead.
+
+### CASE and function expressions
+
+```cpp
+auto band = metal::case_when(
+        metal::field<^^User::score> > 20,
+        std::string{"high"})
+    .when(
+        metal::field<^^User::score> > 10,
+        std::string{"medium"})
+    .otherwise(std::string{"low"});
+
+auto query = metal::select<User>()
+    .clear_projection()
+    .project(band.as("band"))
+    .where(
+        metal::lower(
+            metal::trim(metal::field<^^User::name>)) == "alice");
+```
+
+Representative SQLite helper families now include text operations (`lower`, `upper`, trims, concat, substring, replace, length, left/right, character/byte helpers), numeric operations, control flow (`coalesce`, `if_null`, `nullif`, `greatest`, `least`), date/time helpers, and JSON path/length/aggregation helpers. `sql_function<Result>(name, ...)` is the extensibility path and accepts only a simple SQL identifier; literal arguments still become bound parameters.
 
 ### Advanced SELECT parity details
 
@@ -227,8 +282,8 @@ metal::InsertQueryBuilder{"users"}
 
 The next releases should close reference gaps rather than add unrelated capabilities:
 
-1. **0.0.11:** derived tables / `fromSubquery`, CASE expressions, and the general SQL function catalog.
-2. **0.0.12:** relation query helpers (`whereHas`, `whereHasNot`, relation conditions) and pagination/cursor helpers.
-3. Then: saveGraph/runtime hooks/events/transactions and the remaining ecosystem modules.
+1. **0.0.12:** relation query helpers (`whereHas`, `whereHasNot`, relation conditions) and pagination/cursor helpers.
+2. Then: nested transactions/savepoints, interceptors/hooks, domain events, and graph persistence/update helpers.
+3. Then: schema/tooling/ecosystem modules such as introspection/diff, bulk operations, DTO/OpenAPI, cache, Tree/MPTT, pooling, and code generation.
 
 This ordering may change when comparison with the TypeScript reference exposes a more fundamental dependency.
