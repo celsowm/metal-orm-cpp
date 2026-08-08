@@ -98,27 +98,74 @@ Remaining relation adaptation work is limited to JS-object-model conveniences su
 | MetalORM capability | C++ status | Notes |
 | --- | --- | --- |
 | Typed SELECT AST | ✅ | Compile-time entity scope |
-| WHERE/comparisons/logical expressions | ✅ partial catalog | More operators remain in 0.0.10 |
+| WHERE/comparisons/logical expressions | ✅ partial catalog | Core comparisons, logical operators, NULL, LIKE, IN, BETWEEN, EXISTS |
 | IN / NULL / LIKE | ✅ | Typed values/subqueries |
+| BETWEEN / NOT BETWEEN | ✅ | First-class expression AST |
+| EXISTS / NOT EXISTS | ✅ | Typed SELECT subqueries |
 | Reflected JOINs | ✅ | Non-polymorphic typed joins + runtime MorphOne/MorphMany include |
-| Projections/aliases | ✅ | Columns + aggregates |
+| Projections/aliases | ✅ | Columns + aggregates + window terms |
 | Aggregates/GROUP BY/HAVING | ✅ | Foundational aggregate set |
 | Scalar IN subqueries | ✅ | Exactly-one projection validation |
+| CTE | ✅ | Multiple CTEs and optional column lists |
+| recursive CTE | ✅ | `WITH RECURSIVE` plus typed CTE join bridge; exercised on a real parent/child traversal |
+| UNION / UNION ALL | ✅ | Compound SELECT AST |
+| INTERSECT / EXCEPT | ✅ | Compound SELECT AST |
+| window functions | ✅ | ROW_NUMBER/RANK/DENSE_RANK/NTILE/LAG/LEAD/FIRST_VALUE/LAST_VALUE with partition/order specs |
 | INSERT/UPDATE/DELETE AST | ✅ | Shared by public builders, UoW and relation processor |
 | Multi-row INSERT | ✅ | Multiple `VALUES` rows in one statement |
 | INSERT ... SELECT | ✅ | Typed `BasicSelectQuery` source |
 | RETURNING | ✅ | INSERT/UPDATE/DELETE, including aliases |
 | SQLite UPSERT/conflict API | ✅ | target columns, DO NOTHING, DO UPDATE, update predicate, `excluded()` |
-| CTE / recursive CTE | ❌ | Planned for 0.0.10 |
-| derived tables | ❌ | Not ported yet |
-| UNION/UNION ALL/INTERSECT/EXCEPT | ❌ | Planned for 0.0.10 |
-| EXISTS / NOT EXISTS | ❌ | Planned for 0.0.10 |
-| BETWEEN | ❌ | Planned for 0.0.10 |
-| window functions | ❌ | Planned for 0.0.10 |
+| derived tables | ❌ | `fromSubquery` parity remains |
 | CASE | ❌ | Not ported yet |
 | JSON/function catalog | ❌ | Not ported yet |
 | relation query helpers (`whereHas`, etc.) | ❌ | Not ported yet |
 | pagination/cursor helpers | ❌ | Not ported yet |
+
+### Advanced SELECT parity details
+
+CTEs reuse the same typed SELECT source rather than accepting raw SQL:
+
+```cpp
+auto active = metal::select<User>()
+    .where(metal::field<^^User::active> == true);
+
+auto query = metal::select<User>()
+    .with("active_users", active)
+    .from("active_users");
+```
+
+Recursive CTEs can join a reflected table member to a CTE column without introducing a string predicate:
+
+```cpp
+auto tree = metal::select<Node>()
+    .where(metal::is_null(metal::field<^^Node::parent_id>));
+
+auto step = metal::select<Node>();
+step.join_cte<^^Node::parent_id>("tree", "id");
+tree.union_all(step);
+
+auto query = metal::select<Node>()
+    .with_recursive("tree", tree, {"id", "parent_id", "name"})
+    .from("tree");
+```
+
+Set operations validate projection arity before producing SQL and compound-level ordering/pagination is emitted after the set-operation chain, matching the TypeScript compiler structure.
+
+Window terms remain typed projections:
+
+```cpp
+auto query = metal::select<Employee>()
+    .clear_projection()
+    .project(metal::field<^^Employee::id>)
+    .project(
+        metal::row_number()
+            .partition_by(metal::field<^^Employee::department>)
+            .order_by(metal::field<^^Employee::salary>, false)
+            .as("rank_in_department"));
+```
+
+Window field references remain constrained by the compile-time query scope and literal window arguments are parameterized.
 
 ### DML parity details
 
@@ -180,8 +227,8 @@ metal::InsertQueryBuilder{"users"}
 
 The next releases should close reference gaps rather than add unrelated capabilities:
 
-1. **0.0.10:** CTEs/recursive CTEs, set operations, EXISTS/NOT EXISTS, BETWEEN and window functions.
-2. Then: derived tables/CASE/function catalog and relation query helpers.
+1. **0.0.11:** derived tables / `fromSubquery`, CASE expressions, and the general SQL function catalog.
+2. **0.0.12:** relation query helpers (`whereHas`, `whereHasNot`, relation conditions) and pagination/cursor helpers.
 3. Then: saveGraph/runtime hooks/events/transactions and the remaining ecosystem modules.
 
 This ordering may change when comparison with the TypeScript reference exposes a more fundamental dependency.
