@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -66,7 +67,7 @@ int main() {
         .having(metal::count(metal::field<^^QueryPost::id>) > 1)
         .order_by(metal::field<^^QueryUser::name>, false)
         .limit(5)
-        .offset(2)
+        .offset(0)
         .compile(dialect);
 
     assert(grouped.sql ==
@@ -76,7 +77,7 @@ int main() {
         "WHERE (\"t0\".\"name\" LIKE ? AND \"t1\".\"id\" IN (?, ?, ?)) "
         "GROUP BY \"t0\".\"name\" "
         "HAVING COUNT(\"t1\".\"id\") > ? "
-        "ORDER BY \"t0\".\"name\" DESC LIMIT 5 OFFSET 2;");
+        "ORDER BY \"t0\".\"name\" DESC LIMIT 5 OFFSET 0;");
     assert(grouped.params.size() == 5);
 
     auto many_to_many = metal::select<QueryUser>()
@@ -110,4 +111,42 @@ int main() {
         .where(metal::in(metal::field<^^QueryUser::id>, std::vector<std::int64_t>{}))
         .compile(dialect);
     assert(empty_in.sql.find("WHERE 0 = 1") != std::string::npos);
+
+    auto db = std::make_shared<metal::SQLiteExecutor>(":memory:");
+    db->execute(metal::create_table_sql<QueryUser>(dialect));
+    db->execute(metal::create_table_sql<QueryPost>(dialect));
+    db->execute(metal::create_table_sql<QueryRole>(dialect));
+    db->execute(metal::create_table_sql<QueryUserRole>(dialect));
+
+    db->execute(
+        "INSERT INTO q_users(id, name, nickname) VALUES (?, ?, ?), (?, ?, ?);",
+        {std::int64_t{1}, std::string{"Celso"}, std::string{"celsowm"},
+         std::int64_t{2}, std::string{"Levi"}, nullptr});
+    db->execute(
+        "INSERT INTO q_posts(id, user_id, title) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?);",
+        {std::int64_t{1}, std::int64_t{1}, std::string{"C++26 reflection"},
+         std::int64_t{2}, std::int64_t{1}, std::string{"C++ ORM"},
+         std::int64_t{3}, std::int64_t{2}, std::string{"SQLite"}});
+    db->execute(
+        "INSERT INTO q_roles(id, name) VALUES (?, ?), (?, ?);",
+        {std::int64_t{10}, std::string{"admin"}, std::int64_t{20}, std::string{"developer"}});
+    db->execute(
+        "INSERT INTO q_user_roles(user_id, role_id) VALUES (?, ?), (?, ?);",
+        {std::int64_t{1}, std::int64_t{10}, std::int64_t{1}, std::int64_t{20}});
+
+    const auto grouped_result = db->execute(grouped.sql, grouped.params);
+    assert(grouped_result.rows.size() == 1);
+    assert(metal::from_value<std::string>(grouped_result.rows[0].at("name")) == "Celso");
+    assert(metal::from_value<std::int64_t>(grouped_result.rows[0].at("post_count")) == 2);
+
+    const auto relation_result = db->execute(many_to_many.sql, many_to_many.params);
+    assert(relation_result.rows.size() == 2);
+    assert(metal::from_value<std::string>(relation_result.rows[0].at("name")) == "Celso");
+
+    const auto subquery_result = db->execute(subquery.sql, subquery.params);
+    assert(subquery_result.rows.size() == 1);
+    assert(metal::from_value<std::string>(subquery_result.rows[0].at("name")) == "Celso");
+
+    const auto empty_result = db->execute(empty_in.sql, empty_in.params);
+    assert(empty_result.rows.empty());
 }
