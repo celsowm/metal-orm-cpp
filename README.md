@@ -148,7 +148,3 @@ C++ entity declarations
 
 The TypeScript project already has substantially more surface area. This first C++ version deliberately does not fake parity.
 Upcoming work can add PostgreSQL/MySQL/SQL Server dialects, one-to-one/one-to-many relations, pivot mutation (`attach`, `detach`, `sync`), richer SQL AST nodes, schema diff/introspection, hooks, events, pooling, cache and bulk operations on top of the same reflection-first foundation.
-
-## License
-
-MIT
