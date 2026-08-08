@@ -1,5 +1,7 @@
 # MetalORM C++
 
+![CI](https://github.com/celsowm/metal-orm-cpp/actions/workflows/ci.yml/badge.svg?branch=main)
+
 > A C++26-native ORM built around static reflection, annotations, splicing and expansion statements.
 
 **Version:** `0.0.1`
