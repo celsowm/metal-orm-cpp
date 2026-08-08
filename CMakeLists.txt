@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(metal-orm VERSION 0.0.3 LANGUAGES CXX)
+project(metal-orm VERSION 0.0.4 LANGUAGES CXX)
 
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    message(FATAL_ERROR "MetalORM 0.0.3 is intentionally C++26-native and currently requires GCC 16+ reflection support")
+    message(FATAL_ERROR "MetalORM 0.0.4 is intentionally C++26-native and currently requires GCC 16+ reflection support")
 endif()
 
 if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
-    message(FATAL_ERROR "MetalORM 0.0.3 requires GCC 16 or newer")
+    message(FATAL_ERROR "MetalORM 0.0.4 requires GCC 16 or newer")
 endif()
 
 find_package(SQLite3 REQUIRED)
@@ -71,7 +71,12 @@ if(METAL_ORM_BUILD_TESTS)
     )
 
     enable_testing()
+
     add_executable(metal-orm-tests tests/test_main.cpp)
     target_link_libraries(metal-orm-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-tests COMMAND metal-orm-tests)
+
+    add_executable(metal-orm-query-tests tests/test_query.cpp)
+    target_link_libraries(metal-orm-query-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-query-tests COMMAND metal-orm-query-tests)
 endif()
