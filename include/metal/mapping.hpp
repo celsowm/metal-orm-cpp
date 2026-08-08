@@ -46,19 +46,8 @@ inline constexpr primary_key_t primary_key{};
 inline constexpr generated_t generated{};
 inline constexpr ignore_t ignore{};
 
-enum class relation_kind {
-    belongs_to,
-    has_one,
-    has_many,
-    many_to_many
-};
-
-enum class cascade_mode {
-    none,
-    persist,
-    remove,
-    all
-};
+enum class relation_kind { belongs_to, has_one, has_many, many_to_many };
+enum class cascade_mode { none, persist, remove, all };
 
 constexpr bool cascades_persist(cascade_mode mode) noexcept {
     return mode == cascade_mode::persist || mode == cascade_mode::all;
@@ -68,33 +57,32 @@ constexpr bool cascades_remove(cascade_mode mode) noexcept {
     return mode == cascade_mode::remove || mode == cascade_mode::all;
 }
 
-// Relationship metadata carries reflections, never column/table names.
-// A null key means "use the primary key of that side".
+// Reflections are the relation metadata. Optional keys default to the PK.
 template <
     std::meta::info ForeignKey,
-    std::meta::info TargetKey = std::meta::info{},
-    cascade_mode Cascade = cascade_mode::none>
+    cascade_mode Cascade = cascade_mode::none,
+    std::meta::info TargetKey = std::meta::info{}>
 struct belongs_to {};
 
 template <
     std::meta::info TargetForeignKey,
-    std::meta::info LocalKey = std::meta::info{},
-    cascade_mode Cascade = cascade_mode::none>
+    cascade_mode Cascade = cascade_mode::none,
+    std::meta::info LocalKey = std::meta::info{}>
 struct has_one {};
 
 template <
     std::meta::info TargetForeignKey,
-    std::meta::info LocalKey = std::meta::info{},
-    cascade_mode Cascade = cascade_mode::none>
+    cascade_mode Cascade = cascade_mode::none,
+    std::meta::info LocalKey = std::meta::info{}>
 struct has_many {};
 
 template <
     std::meta::info Pivot,
     std::meta::info PivotRootForeignKey,
     std::meta::info PivotTargetForeignKey,
+    cascade_mode Cascade = cascade_mode::none,
     std::meta::info LocalKey = std::meta::info{},
-    std::meta::info TargetKey = std::meta::info{},
-    cascade_mode Cascade = cascade_mode::none>
+    std::meta::info TargetKey = std::meta::info{}>
 struct many_to_many {};
 
 template <typename T>
@@ -102,8 +90,8 @@ struct relation_annotation_traits {
     static constexpr bool value = false;
 };
 
-template <std::meta::info ForeignKey, std::meta::info TargetKey, cascade_mode Cascade>
-struct relation_annotation_traits<belongs_to<ForeignKey, TargetKey, Cascade>> {
+template <std::meta::info ForeignKey, cascade_mode Cascade, std::meta::info TargetKey>
+struct relation_annotation_traits<belongs_to<ForeignKey, Cascade, TargetKey>> {
     static constexpr bool value = true;
     static constexpr relation_kind kind = relation_kind::belongs_to;
     static constexpr cascade_mode cascade = Cascade;
@@ -111,8 +99,8 @@ struct relation_annotation_traits<belongs_to<ForeignKey, TargetKey, Cascade>> {
     static consteval std::meta::info target_key() { return TargetKey; }
 };
 
-template <std::meta::info TargetForeignKey, std::meta::info LocalKey, cascade_mode Cascade>
-struct relation_annotation_traits<has_one<TargetForeignKey, LocalKey, Cascade>> {
+template <std::meta::info TargetForeignKey, cascade_mode Cascade, std::meta::info LocalKey>
+struct relation_annotation_traits<has_one<TargetForeignKey, Cascade, LocalKey>> {
     static constexpr bool value = true;
     static constexpr relation_kind kind = relation_kind::has_one;
     static constexpr cascade_mode cascade = Cascade;
@@ -120,8 +108,8 @@ struct relation_annotation_traits<has_one<TargetForeignKey, LocalKey, Cascade>> 
     static consteval std::meta::info local_key() { return LocalKey; }
 };
 
-template <std::meta::info TargetForeignKey, std::meta::info LocalKey, cascade_mode Cascade>
-struct relation_annotation_traits<has_many<TargetForeignKey, LocalKey, Cascade>> {
+template <std::meta::info TargetForeignKey, cascade_mode Cascade, std::meta::info LocalKey>
+struct relation_annotation_traits<has_many<TargetForeignKey, Cascade, LocalKey>> {
     static constexpr bool value = true;
     static constexpr relation_kind kind = relation_kind::has_many;
     static constexpr cascade_mode cascade = Cascade;
@@ -133,16 +121,16 @@ template <
     std::meta::info Pivot,
     std::meta::info PivotRootForeignKey,
     std::meta::info PivotTargetForeignKey,
+    cascade_mode Cascade,
     std::meta::info LocalKey,
-    std::meta::info TargetKey,
-    cascade_mode Cascade>
+    std::meta::info TargetKey>
 struct relation_annotation_traits<many_to_many<
     Pivot,
     PivotRootForeignKey,
     PivotTargetForeignKey,
+    Cascade,
     LocalKey,
-    TargetKey,
-    Cascade>> {
+    TargetKey>> {
     static constexpr bool value = true;
     static constexpr relation_kind kind = relation_kind::many_to_many;
     static constexpr cascade_mode cascade = Cascade;
