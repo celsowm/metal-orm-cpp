@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -102,10 +103,14 @@ public:
 
 private:
     template <typename Patch>
-    static std::vector<DmlAssignment> pivot_payload(const Patch& patch) {
+    static std::vector<DmlAssignment> pivot_payload(
+        const Patch& patch,
+        std::string_view root_fk,
+        std::string_view target_fk) {
         std::vector<DmlAssignment> assignments;
         assignments.reserve(patch.entries().size());
         for (const auto& value : patch.entries()) {
+            if (value.column == root_fk || value.column == target_fk) continue;
             assignments.push_back({value.column, value.value});
         }
         return assignments;
@@ -173,6 +178,11 @@ private:
         constexpr auto pivot_target_fk = Traits::pivot_target_foreign_key();
         constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
         constexpr auto target_key_member = reflect::key_or_primary<Target>(Traits::target_key());
+        constexpr auto target_pk = reflect::primary_key_member<Target>();
+        constexpr bool target_key_is_pk = target_key_member == target_pk;
+
+        const auto pivot_root_column = reflect::column_name<pivot_root_fk>();
+        const auto pivot_target_column = reflect::column_name<pivot_target_fk>();
 
         auto& values = root.[:Relation:];
         const Value root_key = to_value(root.[:local_key:]);
@@ -183,19 +193,21 @@ private:
 
         for (const auto& target : values._metal_added()) {
             const Value target_key = to_value((*target).[:target_key_member:]);
-            if (std::holds_alternative<std::nullptr_t>(target_key) ||
-                (target_key_member == reflect::primary_key_member<Target>() &&
-                 reflect::primary_key_is_generated<Target>() && is_empty_generated_value(target_key))) {
+            bool missing_target_key = std::holds_alternative<std::nullptr_t>(target_key);
+            if constexpr (target_key_is_pk && reflect::primary_key_is_generated<Target>()) {
+                missing_target_key = missing_target_key || is_empty_generated_value(target_key);
+            }
+            if (missing_target_key) {
                 throw std::runtime_error(
                     "MetalORM: attached many_to_many target does not have a relation target key");
             }
 
             std::vector<DmlAssignment> assignments{
-                {reflect::column_name<pivot_root_fk>(), root_key},
-                {reflect::column_name<pivot_target_fk>(), target_key}
+                {pivot_root_column, root_key},
+                {pivot_target_column, target_key}
             };
             if (const auto* patch = values._metal_pivot_patch(target)) {
-                auto extra = pivot_payload(*patch);
+                auto extra = pivot_payload(*patch, pivot_root_column, pivot_target_column);
                 assignments.insert(assignments.end(), extra.begin(), extra.end());
             }
 
@@ -208,15 +220,15 @@ private:
         for (const auto& target : values._metal_pivot_updates()) {
             const auto* patch = values._metal_pivot_patch(target);
             if (!patch || patch->empty()) continue;
-            auto assignments = pivot_payload(*patch);
+            auto assignments = pivot_payload(*patch, pivot_root_column, pivot_target_column);
             if (assignments.empty()) continue;
 
             const Value target_key = to_value((*target).[:target_key_member:]);
             const auto compiled = UpdateQueryBuilder{reflect::table_name<Pivot>()}
                 .set(std::move(assignments))
                 .where({
-                    DmlPredicate{reflect::column_name<pivot_root_fk>(), CompareOp::Eq, root_key},
-                    DmlPredicate{reflect::column_name<pivot_target_fk>(), CompareOp::Eq, target_key}
+                    DmlPredicate{pivot_root_column, CompareOp::Eq, root_key},
+                    DmlPredicate{pivot_target_column, CompareOp::Eq, target_key}
                 })
                 .compile(dialect_);
             executor_.execute(compiled.sql, compiled.params);
@@ -226,12 +238,22 @@ private:
             const Value target_key = to_value((*target).[:target_key_member:]);
             const auto compiled = DeleteQueryBuilder{reflect::table_name<Pivot>()}
                 .where({
-                    DmlPredicate{reflect::column_name<pivot_root_fk>(), CompareOp::Eq, root_key},
-                    DmlPredicate{reflect::column_name<pivot_target_fk>(), CompareOp::Eq, target_key}
+                    DmlPredicate{pivot_root_column, CompareOp::Eq, root_key},
+                    DmlPredicate{pivot_target_column, CompareOp::Eq, target_key}
                 })
                 .compile(dialect_);
             executor_.execute(compiled.sql, compiled.params);
-            if constexpr (mapping::cascades_remove(Traits::cascade)) remove(target);
+
+            if constexpr (mapping::cascades_remove(Traits::cascade)) {
+                if (unit_of_work_.contains(target.get())) {
+                    remove(target);
+                } else {
+                    const auto target_delete = DeleteQueryBuilder{reflect::table_name<Target>()}
+                        .where_eq(reflect::column_name<target_key_member>(), target_key)
+                        .compile(dialect_);
+                    executor_.execute(target_delete.sql, target_delete.params);
+                }
+            }
         }
     }
 
