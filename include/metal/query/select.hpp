@@ -49,7 +49,6 @@ struct SetOperationSpec {
 
 struct DerivedSourceSpec {
     std::string alias;
-    std::vector<std::string> column_aliases;
     std::size_t projection_arity{};
     std::function<CompiledQuery(const Dialect&)> compile_query;
 };
@@ -201,14 +200,14 @@ public:
         std::string alias,
         std::vector<std::string> column_aliases = {}) {
         if (alias.empty()) throw std::invalid_argument("MetalORM: derived table requires a non-empty alias");
-        if (!column_aliases.empty() && column_aliases.size() != query.projection_arity()) {
-            throw std::logic_error("MetalORM: derived-table column aliases must match projection arity");
+        if (!column_aliases.empty()) {
+            throw std::logic_error(
+                "MetalORM: SQLite derived tables do not support column alias lists; alias the subquery projections instead");
         }
         const auto arity = query.projection_arity();
         state_->from_name.reset();
         state_->derived_source = DerivedSourceSpec{
             std::move(alias),
-            std::move(column_aliases),
             arity,
             [query = std::move(query)](const Dialect& dialect) mutable {
                 return query.compile_subquery(dialect);
@@ -440,16 +439,7 @@ private:
             const auto& derived = *state_->derived_source;
             auto source = derived.compile_query(dialect);
             out.params.insert(out.params.end(), source.params.begin(), source.params.end());
-            std::string sql = "(" + source.sql + ") AS " + dialect.quote_identifier(derived.alias);
-            if (!derived.column_aliases.empty()) {
-                sql += " (";
-                for (std::size_t i = 0; i < derived.column_aliases.size(); ++i) {
-                    if (i) sql += ", ";
-                    sql += dialect.quote_identifier(derived.column_aliases[i]);
-                }
-                sql += ")";
-            }
-            return sql;
+            return "(" + source.sql + ") AS " + dialect.quote_identifier(derived.alias);
         }
 
         std::string sql = dialect.quote_identifier(
