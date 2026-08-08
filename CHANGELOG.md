@@ -2,6 +2,22 @@
 
 All releases currently target GCC 16+ C++26 static reflection and intentionally use SQLite as the only executor/dialect.
 
+## 0.0.17 - 2026-08-08
+
+Dedicated single-reference parity release.
+
+- Made `belongs_to_reference<T>` and `has_one_reference<T>` the only valid reflected shapes for `belongsTo` and `hasOne` mappings.
+- Removed raw `std::shared_ptr<T>` relation compatibility from reflection validation instead of retaining a legacy fallback.
+- Added Session-bound lazy loaders for both single-reference wrappers and made eager/lazy hydration establish a clean wrapper baseline through `_metal_hydrate()`.
+- Added generic `set()` / `reset()` mutation tracking with baseline acceptance after successful commit.
+- Synchronize `belongsTo` root foreign keys from the reflected target key; newly generated relation keys are resolved after the first UoW flush and persisted by the second flush.
+- Added `hasOne` attach/detach processing through `RelationChangeProcessor`, including nullable child FK detach and cascade-remove behavior.
+- Added cascade-persist preparation for newly attached single-reference targets where configured.
+- Included single-reference baselines in the existing rollback-safe reflected runtime checkpoint path, so failed transactions restore both current pointer and dirty baseline.
+- Migrated the foundational runtime test models away from raw `shared_ptr` relations.
+- Added SQLite E2E coverage for lazy belongs-to/has-one loading, Identity Map reuse, set/reset, generated IDs, replacement/detach, cascade persist and transaction rollback.
+- Added compile-fail coverage proving raw `shared_ptr` is rejected separately for both belongs-to and has-one mappings.
+
 ## 0.0.16 - 2026-08-08
 
 Typed graph-persistence release.
@@ -14,7 +30,7 @@ Typed graph-persistence release.
 - Added `save_graph`, `update_graph` and `patch_graph`; update/patch require a reflected root PK and return an empty pointer when the root does not exist.
 - Added `GraphOptions::prune_missing` for has-many/morph-many removal and N:N detach semantics.
 - Made graph operations transactional by default through the existing Session transaction/checkpoint pipeline, preserving rollback of generated IDs, relation state and domain-event queues.
-- Added dedicated `belongs_to_reference<T>` and `has_one_reference<T>` wrappers as the future canonical single-reference shapes; the remaining generic lazy/mutation integration and removal of raw `shared_ptr` relation compatibility is scoped to 0.0.17.
+- Added dedicated `belongs_to_reference<T>` and `has_one_reference<T>` wrappers as the future canonical single-reference shapes; their generic runtime integration was completed in 0.0.17.
 - Added SQLite E2E coverage for root + has-one + has-many + N:N/pivot creation, generated keys, hooks/events, pruning, partial patch behavior, nested belongs-to creation and missing-root updates.
 - Added compile-fail coverage for incompatible reflected graph scalar values.
 - Updated lifecycle parity after the TypeScript reference moved table hooks to Session-bound registration as well; the old TableDef-vs-Session divergence no longer exists.
@@ -49,7 +65,7 @@ Nested-transaction and rollback-safe runtime parity release.
 - Restore UPDATE state after rollback, resurrect DELETE-tracked entities, rebuild the Identity Map, and remove entities introduced only inside a rolled-back scope.
 - Reset generated primary keys to their pre-transaction values when an INSERT is rolled back.
 - Preserve an outer checkpoint after a successful inner savepoint so a later outer rollback can undo inner inserts and accepted relation baselines.
-- Restore has-many/N:N/polymorphic wrapper state through reflection-generated relation restore closures instead of resetting only SQL state.
+- Restore relation wrapper state through reflection-generated restore closures instead of resetting only SQL state.
 - Made `commit()` transactional through executor capabilities and checkpoint restoration; a failed database COMMIT restores ORM state as well as rolling back SQLite.
 - Added a dedicated SQLite E2E suite covering rollback-safe UPDATE/DELETE/INSERT, generated IDs, nested success, rollback-only nested failure, relation state across released savepoints, commit failure, and missing-savepoint capability.
 
