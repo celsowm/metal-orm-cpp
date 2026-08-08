@@ -2,6 +2,24 @@
 
 All releases currently target GCC 16+ C++26 static reflection and intentionally use SQLite as the only executor/dialect.
 
+## 0.0.13 - 2026-08-08
+
+Relation-correlation and root-pagination hardening release.
+
+- Moved relation correlation into the SELECT compiler's WHERE position instead of wrapping already-compiled root/child queries.
+- Made callback-local relation `ORDER BY / LIMIT / OFFSET` run after the reflected correlation predicate, matching TypeScript `applyRelationCorrelation()` ordering.
+- Made relation predicates apply before an existing root `LIMIT/OFFSET`.
+- Added hierarchical aliases for nested correlated scopes (`t0`, `t0_rel`, `t0_rel_rel`, ...) so child subqueries cannot shadow outer aliases.
+- Preserved the established `t0/t1/p0` SQL alias shape for ordinary non-correlated joins.
+- Reworked N:N relation correlation as a reflected pivot `EXISTS` predicate inside the child WHERE pipeline.
+- Added `without_pagination()` query snapshots and made paging helpers own/replace previous LIMIT/OFFSET state.
+- Made Session offset pagination root-aware for explicit row-multiplying joins by deduplicating on the reflected root PK while preserving result order.
+- Made Session cursor pagination root-aware before page-size and `hasExtra` evaluation.
+- Kept raw row pagination row-oriented while tracked pagination remains root-oriented, matching the two abstraction levels of the reference runtime.
+- Hardened cursor keyset mode so `first` always uses after semantics and `last` always uses before semantics, independently of which cursor field carries the token.
+- Extended the SQLite E2E suite with root-limit correlation, child OFFSET correlation, pagination override, explicit 1:N JOIN paging, joined cursor paging, and unusual mode/cursor combinations.
+- Closed the two explicit semantic edges left by 0.0.12; remaining work returns to runtime parity (transactions/savepoints and rollback-safe state).
+
 ## 0.0.12 - 2026-08-08
 
 Relation-query and pagination parity release.
@@ -13,8 +31,7 @@ Relation-query and pagination parity release.
 - Added cursor pagination with `first`/`after`, `last`/`before`, `limit + 1`, forward/backward traversal, reflected ordering, multi-column keysets, non-null key enforcement, and order-signature validation.
 - Added `runtime_pagination.hpp` to keep Session materialization separate from the pure query AST.
 - Added SQLite E2E coverage for relation predicates, chained relation filters, raw/tracked paging, forward/backward cursor pages, multi-column ordering, and invalid cursor reuse.
-- Fixed cursor comparison direction to follow the TypeScript execution mode: forward pages use the after predicate and backward pages use the before predicate.
-- Documented two remaining edges instead of claiming false parity: callback-local relation `LIMIT/OFFSET`, and root-aware page extraction for explicitly joined queries that physically duplicate root rows.
+- Documented callback-local relation pagination and explicit-join root extraction as the two hardening edges subsequently closed in 0.0.13.
 
 ## 0.0.11 - 2026-08-08
 
