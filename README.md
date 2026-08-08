@@ -4,11 +4,11 @@
 
 > A C++26-native ORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.4`
+**Version:** `0.0.5`
 
 MetalORM C++ is deliberately not a C++20 ORM with a reflection adapter. Reflection is the architecture: no `entity_traits<T>`, no registration macros, no compatibility metadata layer, and no pre-C++26 fallback.
 
-For now, **SQLite is intentionally the only executor/dialect**. The project is using one database as a proving ground while the C++26 type model, SQL AST, Unit of Work and relation semantics mature.
+For now, **SQLite is intentionally the only executor/dialect**. The TypeScript MetalORM is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
 
 ## Requirements
 
@@ -53,7 +53,7 @@ A composite-key pivot satisfies `Mapped<T>` but not `Entity<T>`; tracked `Sessio
 
 ## Typed SQL AST
 
-The 0.0.4 query builder is a typed SQL AST rather than a bag of column-name strings.
+The query builder is a typed SQL AST rather than a bag of column-name strings.
 
 ```cpp
 auto query = metal::select<User>()
@@ -143,6 +143,26 @@ auto users = metal::select<User>()
 
 A scalar subquery used by `IN` must project exactly one expression. The nested parameters are merged into the outer compiled query.
 
+## Shared DML AST
+
+Like the original MetalORM, the runtime no longer has a separate hand-written SQL path for persistence. INSERT, UPDATE and DELETE go through shared DML builders:
+
+```cpp
+auto insert = metal::InsertQueryBuilder{"users"}
+    .values({
+        metal::DmlAssignment{"name", std::string{"Celso"}}
+    });
+
+auto update = metal::UpdateQueryBuilder{"users"}
+    .set({metal::DmlAssignment{"name", std::string{"Updated"}}})
+    .where_eq("id", std::int64_t{1});
+
+auto erase = metal::DeleteQueryBuilder{"users"}
+    .where_eq("id", std::int64_t{1});
+```
+
+`UnitOfWork` and relation mutation compile these ASTs through the same SQLite dialect.
+
 ## Mutable relation collections
 
 To-many relationships use `metal::collection<T>` rather than `std::vector<std::shared_ptr<T>>`.
@@ -179,6 +199,22 @@ assert(!user->roles.dirty());
 
 The Unit of Work derives added/removed relation items from this diff, so opposite mutations before a commit naturally cancel.
 
+## Cascade semantics
+
+MetalORM C++ follows the original cascade vocabulary:
+
+```cpp
+metal::mapping::cascade_mode::none
+metal::mapping::cascade_mode::all
+metal::mapping::cascade_mode::persist
+metal::mapping::cascade_mode::remove
+metal::mapping::cascade_mode::link
+```
+
+For N:N, `remove` and `all` are valid just like in MetalORM TS. Detaching deletes the pivot row first; when target removal is requested, the target is then marked Removed and deleted by a second Unit of Work flush.
+
+`link` links already-persisted entities without cascading persist or remove.
+
 ## 1:N mutation and cascades
 
 ```cpp
@@ -193,8 +229,6 @@ struct User {
 ```
 
 `cascade_mode::all` persists newly attached children and removes detached children. The reflected child FK is assigned only after generated root IDs exist.
-
-For N:N, cascade remove/all is rejected at compile time because unlinking a relation must not delete a target shared by other roots.
 
 ## Relationship loading
 
@@ -224,6 +258,39 @@ auto users = session.query<User>()
 
 `include<^^...>()` dispatches at compile time to batched `belongs_to`, `has_one`, `has_many`, or `many_to_many` loading. Every hydrated row passes through the same Identity Map.
 
+## Runtime architecture
+
+`Session` coordinates dedicated runtime components rather than implementing all responsibilities itself:
+
+```text
+Session
+  ├── IdentityMap
+  ├── UnitOfWork
+  └── RelationChangeProcessor
+          │
+          ▼
+      shared DML AST
+          │
+          ▼
+        SQLite
+```
+
+Commit order follows the MetalORM runtime model:
+
+```text
+prepare cascaded persistence
+        ↓
+UnitOfWork.flush()
+        ↓
+RelationChangeProcessor.process()
+        ↓
+UnitOfWork.flush()
+        ↓
+COMMIT
+```
+
+The second flush is important because relation processing can schedule entity removals or updates.
+
 ## Compile-time model validation
 
 MetalORM validates mappings with `consteval` reflection. Invalid programs fail to compile for cases including:
@@ -233,8 +300,7 @@ MetalORM validates mappings with `consteval` reflection. Invalid programs fail t
 - incompatible FK/key C++ types;
 - conflicting annotations;
 - duplicate mapped column names;
-- invalid generated-key declarations;
-- destructive N:N cascade remove.
+- invalid generated-key declarations.
 
 The test suite also checks typed query scope: a joined entity's fields are not accepted by a query before that reflected join enters the query type.
 
@@ -257,7 +323,7 @@ entity.[:Member:]
 
 Reflections are non-type template arguments in fields and relationship metadata; splicing is used for hydration, snapshots, key access and relationship mutation.
 
-## What 0.0.4 contains
+## What 0.0.5 contains
 
 - C++26 static reflection and annotations as the only metadata model
 - `Mapped<T>` / `Entity<T>` concepts and `consteval` model validation
@@ -267,14 +333,15 @@ Reflections are non-type template arguments in fields and relationship metadata;
 - comparisons, `IN`, null predicates and `LIKE`
 - aggregates, `GROUP BY`, `HAVING`
 - scalar subqueries
-- `DISTINCT`, multiple order terms, `LIMIT`, `OFFSET`
+- shared INSERT / UPDATE / DELETE AST builders
 - reflected SQLite DDL, including composite primary keys
 - SQLite executor
-- `Session`, Unit of Work and Identity Map
+- `Session` coordinating separate `IdentityMap`, `UnitOfWork`, and `RelationChangeProcessor`
 - reflected dirty checking and generated keys
 - batched `belongs_to`, `has_one`, `has_many`, `many_to_many`
 - `metal::collection<T>` with `attach`, `detach`, `sync`, `loaded`, `dirty`
-- relation diff flushing and cascades inside the UoW transaction
+- MetalORM-compatible cascade vocabulary including `link`
+- N:N `remove/all` semantics aligned with the TypeScript runtime
 
 ## Build
 
@@ -288,6 +355,8 @@ The CMake project intentionally fails on GCC < 16 and on non-GNU compilers today
 
 ## Direction
 
+The TypeScript MetalORM is the feature reference. The C++ port should preserve its layers and semantics while replacing runtime metadata/string configuration with C++26 reflection where possible.
+
 ```text
 C++ declarations + annotations
            │
@@ -298,17 +367,20 @@ C++ declarations + annotations
    ┌───────┼──────────────┐
    ▼       ▼              ▼
   DDL   typed SQL AST  Relations
-   │       │              │
-   └───────┴──────┬───────┘
+           │              │
+           └──────┬───────┘
                   ▼
                Session
-                  │
-        Unit of Work / Identity Map
-                  │
-        entity diff + relation diff
-                  │
-                  ▼
-                SQLite
+         ┌────────┼───────────┐
+         ▼        ▼           ▼
+   IdentityMap  UnitOfWork  RelationChangeProcessor
+                  │           │
+                  └─────┬─────┘
+                        ▼
+                  shared DML AST
+                        │
+                        ▼
+                      SQLite
 ```
 
-The next work should deepen the SQLite query/runtime model rather than add database backends: typed result rows/DTO projection, INSERT/UPDATE/DELETE ASTs, CTEs/window functions and stronger query diagnostics.
+Next work should follow missing MetalORM parity rather than invent new APIs: typed DML values/results, richer relation collections and pivot payloads, Morph relations, then the remaining query-builder features such as CTEs, set operations and window functions.
