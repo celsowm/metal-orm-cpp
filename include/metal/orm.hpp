@@ -10,6 +10,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -105,14 +106,10 @@ public:
     void remove(const std::shared_ptr<T>& entity) {
         static_assert(reflect::validate_mapping<T>());
         if (!entity) return;
-        if (auto* tracked = unit_of_work_.find(entity.get())) {
-            tracked->status = EntityStatus::Removed;
-        }
+        if (auto* tracked = unit_of_work_.find(entity.get())) tracked->status = EntityStatus::Removed;
     }
 
-    void flush() {
-        unit_of_work_.flush();
-    }
+    void flush() { unit_of_work_.flush(); }
 
     void commit() {
         executor_->execute("BEGIN;");
@@ -148,9 +145,7 @@ private:
     template <reflect::Entity T>
     static bool has_identity_key(const Value& pk) {
         if (std::holds_alternative<std::nullptr_t>(pk)) return false;
-        if constexpr (reflect::primary_key_is_generated<T>()) {
-            return !is_empty_generated_value(pk);
-        }
+        if constexpr (reflect::primary_key_is_generated<T>()) return !is_empty_generated_value(pk);
         return true;
     }
 
@@ -194,27 +189,76 @@ private:
         tracked.erase_identity = [this](const Value& pk) { identity_map_.erase<T>(pk); };
         tracked.prepare_relations = [this, weak = std::weak_ptr<T>(entity)] {
             if (auto locked = weak.lock()) {
-                relation_changes_.prepare_entity(*locked, [this](const auto& target) {
-                    this->persist(target);
-                });
+                relation_changes_.prepare_entity(*locked, [this](const auto& target) { this->persist(target); });
             }
         };
         tracked.flush_relations = [this, weak = std::weak_ptr<T>(entity)] {
             if (auto locked = weak.lock()) {
-                relation_changes_.process_entity(*locked, [this](const auto& target) {
-                    this->remove(target);
-                });
+                relation_changes_.process_entity(*locked, [this](const auto& target) { this->remove(target); });
             }
         };
         tracked.accept_relations = [weak = std::weak_ptr<T>(entity)] {
-            if (auto locked = weak.lock()) {
-                RelationChangeProcessor::accept_entity(*locked);
-            }
+            if (auto locked = weak.lock()) RelationChangeProcessor::accept_entity(*locked);
         };
         unit_of_work_.track(entity.get(), std::move(tracked));
 
+        bind_relation_collections(entity);
+
         const auto pk = reflect::primary_key_value(*entity);
         if (has_identity_key<T>(pk)) identity_map_.put<T>(pk, entity);
+    }
+
+    template <reflect::Entity Root>
+    void bind_relation_collections(const std::shared_ptr<Root>& root) {
+        template for (constexpr auto relation : reflect::data_members<Root>()) {
+            if constexpr (reflect::has_relation_annotation<relation>()) {
+                using A = reflect::relation_annotation_t<relation>;
+                using Traits = mapping::relation_annotation_traits<A>;
+                if constexpr (Traits::kind == mapping::relation_kind::has_many) {
+                    auto weak = std::weak_ptr<Root>(root);
+                    root->[:relation:]._metal_bind_loader([this, weak] {
+                        if (auto locked = weak.lock()) {
+                            std::vector<std::shared_ptr<Root>> roots{locked};
+                            load_has_many_batch<Root, relation>(roots);
+                        }
+                    });
+                } else if constexpr (Traits::kind == mapping::relation_kind::many_to_many) {
+                    using Collection = reflect::member_type_t<relation>;
+                    using Target = reflect::many_to_many_target_t<Collection>;
+                    constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
+                    constexpr auto target_pk = reflect::primary_key_member<Target>();
+                    constexpr bool target_key_is_pk = target_key == target_pk;
+
+                    auto weak = std::weak_ptr<Root>(root);
+                    auto& collection = root->[:relation:];
+                    collection._metal_bind_loader([this, weak] {
+                        if (auto locked = weak.lock()) {
+                            std::vector<std::shared_ptr<Root>> roots{locked};
+                            load_many_to_many_batch<Root, relation>(roots);
+                        }
+                    });
+                    collection._metal_bind_identity(
+                        [](const Target& target) -> std::optional<std::string> {
+                            const Value key = to_value(target.[:target_key:]);
+                            if (std::holds_alternative<std::nullptr_t>(key)) return std::nullopt;
+                            if constexpr (target_key_is_pk && reflect::primary_key_is_generated<Target>()) {
+                                if (is_empty_generated_value(key)) return std::nullopt;
+                            }
+                            return value_key(key);
+                        },
+                        [this](const Value& key) -> std::shared_ptr<Target> {
+                            if constexpr (target_key_is_pk) {
+                                if (auto existing = identity_map_.get<Target>(key)) return existing;
+                            }
+                            auto target = std::make_shared<Target>();
+                            using KeyType = reflect::member_type_t<target_key>;
+                            target->[:target_key:] = from_value<KeyType>(key);
+                            if constexpr (target_key_is_pk) track<Target>(target, EntityStatus::Managed);
+                            return target;
+                        });
+                }
+            }
+        }
     }
 
     template <reflect::Entity T>
@@ -233,6 +277,19 @@ private:
         });
         track<T>(entity, EntityStatus::Managed);
         return entity;
+    }
+
+    template <reflect::Mapped T>
+    static T hydrate_prefixed(const Row& row, std::string_view prefix) {
+        T value{};
+        reflect::for_each_column<T>([&]<std::meta::info Member>() {
+            const std::string key = std::string(prefix) + reflect::column_name<Member>();
+            auto found = row.find(key);
+            if (found == row.end()) return;
+            using M = reflect::member_type_t<Member>;
+            value.[:Member:] = from_value<M>(found->second);
+        });
+        return value;
     }
 
     template <reflect::Entity T>
@@ -255,6 +312,15 @@ private:
         });
     }
 
+    template <reflect::Mapped Pivot>
+    void append_pivot_columns(std::string& sql, std::string_view alias) const {
+        reflect::for_each_column<Pivot>([&]<std::meta::info Member>() {
+            const auto name = reflect::column_name<Member>();
+            sql += ", " + std::string(alias) + "." + dialect_->quote_identifier(name) +
+                   " AS " + dialect_->quote_identifier("__metal_pivot_" + name);
+        });
+    }
+
     void append_in_placeholders(std::string& sql, std::size_t count) const {
         for (std::size_t i = 0; i < count; ++i) {
             if (i) sql += ", ";
@@ -266,7 +332,7 @@ private:
     void load_has_many_batch(std::vector<std::shared_ptr<Root>>& roots) {
         using A = reflect::relation_annotation_t<Relation>;
         using Traits = mapping::relation_annotation_traits<A>;
-        using Target = reflect::many_target_t<reflect::member_type_t<Relation>>;
+        using Target = reflect::has_many_target_t<reflect::member_type_t<Relation>>;
         if (roots.empty()) return;
 
         constexpr auto target_fk = Traits::target_foreign_key();
@@ -299,9 +365,7 @@ private:
             loaded[root->second.get()].push_back(hydrate<Target>(row));
         }
 
-        for (auto& root : roots) {
-            (*root).[:Relation:]._metal_hydrate(std::move(loaded[root.get()]));
-        }
+        for (auto& root : roots) (*root).[:Relation:]._metal_hydrate(std::move(loaded[root.get()]));
     }
 
     template <reflect::Entity Root, std::meta::info Relation>
@@ -369,9 +433,7 @@ private:
         }
         for (auto& root : roots) {
             const auto key = value_key(to_value((*root).[:foreign_key:]));
-            if (auto target = targets_by_key.find(key); target != targets_by_key.end()) {
-                (*root).[:Relation:] = target->second;
-            }
+            if (auto target = targets_by_key.find(key); target != targets_by_key.end()) (*root).[:Relation:] = target->second;
         }
     }
 
@@ -379,17 +441,19 @@ private:
     void load_many_to_many_batch(std::vector<std::shared_ptr<Root>>& roots) {
         using A = reflect::relation_annotation_t<Relation>;
         using Traits = mapping::relation_annotation_traits<A>;
-        using Target = reflect::many_target_t<reflect::member_type_t<Relation>>;
+        using Collection = reflect::member_type_t<Relation>;
+        using Target = reflect::many_to_many_target_t<Collection>;
+        using Pivot = reflect::many_to_many_pivot_t<Collection>;
         if (roots.empty()) return;
 
-        using Pivot = [: Traits::pivot() :];
         constexpr auto pivot_root_fk = Traits::pivot_root_foreign_key();
         constexpr auto pivot_target_fk = Traits::pivot_target_foreign_key();
         constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
         constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
 
+        using LoadedValue = std::pair<std::shared_ptr<Target>, std::optional<Pivot>>;
         std::unordered_map<std::string, std::shared_ptr<Root>> roots_by_key;
-        std::unordered_map<Root*, std::vector<std::shared_ptr<Target>>> loaded;
+        std::unordered_map<Root*, std::vector<LoadedValue>> loaded;
         std::vector<Value> keys;
         for (auto& root : roots) {
             const auto key = to_value((*root).[:local_key:]);
@@ -400,6 +464,7 @@ private:
 
         std::string sql = "SELECT ";
         append_target_columns<Target>(sql, "t");
+        append_pivot_columns<Pivot>(sql, "p");
         sql += ", p." + dialect_->quote_identifier(reflect::column_name<pivot_root_fk>()) + " AS \"__metal_root_key\"";
         sql += " FROM " + dialect_->quote_identifier(reflect::table_name<Target>()) + " t";
         sql += " JOIN " + dialect_->quote_identifier(reflect::table_name<Pivot>()) + " p ON p." +
@@ -415,12 +480,13 @@ private:
             if (root_key == row.end()) continue;
             auto root = roots_by_key.find(value_key(root_key->second));
             if (root == roots_by_key.end()) continue;
-            loaded[root->second.get()].push_back(hydrate<Target>(row));
+            loaded[root->second.get()].push_back({
+                hydrate<Target>(row),
+                hydrate_prefixed<Pivot>(row, "__metal_pivot_")
+            });
         }
 
-        for (auto& root : roots) {
-            (*root).[:Relation:]._metal_hydrate(std::move(loaded[root.get()]));
-        }
+        for (auto& root : roots) (*root).[:Relation:]._metal_hydrate(std::move(loaded[root.get()]));
     }
 
     std::shared_ptr<DbExecutor> executor_;
@@ -452,21 +518,13 @@ EntityQuery<T>& EntityQuery<T>::include() {
     auto* session = &session_;
 
     if constexpr (Traits::kind == mapping::relation_kind::belongs_to) {
-        includes_.push_back([session](auto& roots) {
-            session->template load_belongs_to_batch<T, Relation>(roots);
-        });
+        includes_.push_back([session](auto& roots) { session->template load_belongs_to_batch<T, Relation>(roots); });
     } else if constexpr (Traits::kind == mapping::relation_kind::has_one) {
-        includes_.push_back([session](auto& roots) {
-            session->template load_has_one_batch<T, Relation>(roots);
-        });
+        includes_.push_back([session](auto& roots) { session->template load_has_one_batch<T, Relation>(roots); });
     } else if constexpr (Traits::kind == mapping::relation_kind::has_many) {
-        includes_.push_back([session](auto& roots) {
-            session->template load_has_many_batch<T, Relation>(roots);
-        });
+        includes_.push_back([session](auto& roots) { session->template load_has_many_batch<T, Relation>(roots); });
     } else if constexpr (Traits::kind == mapping::relation_kind::many_to_many) {
-        includes_.push_back([session](auto& roots) {
-            session->template load_many_to_many_batch<T, Relation>(roots);
-        });
+        includes_.push_back([session](auto& roots) { session->template load_many_to_many_batch<T, Relation>(roots); });
     }
     return *this;
 }
