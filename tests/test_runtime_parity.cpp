@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 struct [[=metal::mapping::table{"parity_roles"}]] ParityRole {
     [[=metal::mapping::primary_key, =metal::mapping::generated]]
@@ -14,6 +15,8 @@ struct [[=metal::mapping::table{"parity_roles"}]] ParityRole {
 struct [[=metal::mapping::table{"parity_user_roles"}]] ParityUserRole {
     [[=metal::mapping::primary_key]] std::int64_t user_id{};
     [[=metal::mapping::primary_key]] std::int64_t role_id{};
+    std::string label;
+    std::int64_t weight{};
 };
 
 struct [[=metal::mapping::table{"parity_users"}]] ParityUser {
@@ -26,7 +29,7 @@ struct [[=metal::mapping::table{"parity_users"}]] ParityUser {
         ^^ParityUserRole::user_id,
         ^^ParityUserRole::role_id,
         metal::mapping::cascade_mode::remove>{}]]
-    metal::collection<ParityRole> roles;
+    metal::many_to_many_collection<ParityRole, ParityUserRole> roles;
 };
 
 struct [[=metal::mapping::table{"parity_link_users"}]] ParityLinkUser {
@@ -39,7 +42,7 @@ struct [[=metal::mapping::table{"parity_link_users"}]] ParityLinkUser {
         ^^ParityUserRole::user_id,
         ^^ParityUserRole::role_id,
         metal::mapping::cascade_mode::link>{}]]
-    metal::collection<ParityRole> roles;
+    metal::many_to_many_collection<ParityRole, ParityUserRole> roles;
 };
 
 struct [[=metal::mapping::table{"parity_manual_keys"}]] ParityManualKey {
@@ -83,41 +86,88 @@ int main() {
 
     metal::Session session{db, dialect_ptr};
 
-    auto role = std::make_shared<ParityRole>();
-    role->name = "admin";
+    auto admin = std::make_shared<ParityRole>();
+    admin->name = "admin";
+    auto developer = std::make_shared<ParityRole>();
+    developer->name = "developer";
     auto user = std::make_shared<ParityUser>();
     user->name = "Celso";
 
-    // cascade::remove does not imply persist: mirror MetalORM and persist the
-    // target explicitly before linking it.
-    session.persist(role);
+    session.persist(admin);
+    session.persist(developer);
     session.persist(user);
-    user->roles.attach(role);
+    user->roles.attach(admin, ParityUserRole{.label = "owner", .weight = 10});
     session.commit();
 
-    assert(role->id != 0);
+    assert(admin->id != 0);
+    assert(developer->id != 0);
     assert(user->id != 0);
 
-    auto pivot_count = db->execute("SELECT COUNT(*) AS c FROM parity_user_roles;");
-    assert(metal::from_value<std::int64_t>(pivot_count.rows.at(0).at("c")) == 1);
+    auto pivot_row = db->execute(
+        "SELECT label, weight FROM parity_user_roles WHERE user_id = ? AND role_id = ?;",
+        {user->id, admin->id});
+    assert(pivot_row.rows.size() == 1);
+    assert(metal::from_value<std::string>(pivot_row.rows[0].at("label")) == "owner");
+    assert(metal::from_value<std::int64_t>(pivot_row.rows[0].at("weight")) == 10);
 
     session.clear();
-    auto loaded = session.query<ParityUser>()
-        .include<^^ParityUser::roles>()
-        .first();
+    auto loaded = session.query<ParityUser>().first();
     assert(loaded);
-    assert(loaded->roles.size() == 1);
+    assert(!loaded->roles.loaded());
+    const auto& lazy_items = loaded->roles.load();
+    assert(loaded->roles.loaded());
+    assert(lazy_items.size() == 1);
+    assert(loaded->roles.get_items().size() == 1);
 
-    auto loaded_role = loaded->roles[0];
-    loaded->roles.detach(loaded_role);
+    auto loaded_admin = loaded->roles[0];
+    const auto* hydrated_pivot = loaded->roles.pivot(loaded_admin);
+    assert(hydrated_pivot);
+    assert(hydrated_pivot->label == "owner");
+    assert(hydrated_pivot->weight == 10);
+
+    // Re-attaching an existing target with pivot data mirrors MetalORM's
+    // relation-change kind 'update' rather than creating a duplicate link.
+    loaded->roles.attach(
+        loaded_admin,
+        ParityUserRole{.label = "primary", .weight = 20});
     session.commit();
 
-    // MetalORM semantics: relation processing deletes the pivot first, marks
-    // the target Removed, then the second UoW flush deletes the target row.
-    pivot_count = db->execute("SELECT COUNT(*) AS c FROM parity_user_roles;");
-    auto role_count = db->execute("SELECT COUNT(*) AS c FROM parity_roles;");
-    assert(metal::from_value<std::int64_t>(pivot_count.rows.at(0).at("c")) == 0);
-    assert(metal::from_value<std::int64_t>(role_count.rows.at(0).at("c")) == 0);
+    pivot_row = db->execute(
+        "SELECT label, weight FROM parity_user_roles WHERE user_id = ? AND role_id = ?;",
+        {loaded->id, loaded_admin->id});
+    assert(pivot_row.rows.size() == 1);
+    assert(metal::from_value<std::string>(pivot_row.rows[0].at("label")) == "primary");
+    assert(metal::from_value<std::int64_t>(pivot_row.rows[0].at("weight")) == 20);
+
+    // Attach by ID creates a tracked target stub and writes the pivot without
+    // loading the target row again, matching DefaultManyToManyCollection.
+    loaded->roles.attach(
+        developer->id,
+        ParityUserRole{.label = "secondary", .weight = 5});
+    session.commit();
+
+    auto pivot_count = db->execute(
+        "SELECT COUNT(*) AS c FROM parity_user_roles WHERE user_id = ?;",
+        {loaded->id});
+    assert(metal::from_value<std::int64_t>(pivot_count.rows.at(0).at("c")) == 2);
+
+    // syncByIds parity: retain developer, detach admin. Because this relation
+    // uses cascade::remove, the detached admin target is deleted after pivot DML.
+    loaded->roles.sync_by_ids(std::vector<std::int64_t>{developer->id});
+    session.commit();
+
+    pivot_count = db->execute(
+        "SELECT COUNT(*) AS c FROM parity_user_roles WHERE user_id = ?;",
+        {loaded->id});
+    auto admin_count = db->execute(
+        "SELECT COUNT(*) AS c FROM parity_roles WHERE id = ?;",
+        {admin->id});
+    auto developer_count = db->execute(
+        "SELECT COUNT(*) AS c FROM parity_roles WHERE id = ?;",
+        {developer->id});
+    assert(metal::from_value<std::int64_t>(pivot_count.rows.at(0).at("c")) == 1);
+    assert(metal::from_value<std::int64_t>(admin_count.rows.at(0).at("c")) == 0);
+    assert(metal::from_value<std::int64_t>(developer_count.rows.at(0).at("c")) == 1);
 
     // A non-empty generated PK means persist() attaches as Managed rather
     // than issuing an INSERT, matching OrmSession.persist in MetalORM TS.
@@ -138,8 +188,6 @@ int main() {
     assert(managed_row.rows.size() == 1);
     assert(metal::from_value<std::string>(managed_row.rows[0].at("name")) == "managed");
 
-    // A manually assigned non-generated key of zero is a real identity, not
-    // an empty generated key. It must participate in the Identity Map.
     db->execute(
         "INSERT INTO parity_manual_keys(id, name) VALUES (?, ?);",
         {std::int64_t{0}, std::string{"zero"}});
@@ -158,8 +206,6 @@ int main() {
     assert(zero_row.rows.size() == 1);
     assert(metal::from_value<std::string>(zero_row.rows[0].at("name")) == "zero-managed");
 
-    // remove() mirrors the original runtime: an untracked detached object is
-    // not implicitly attached just to be deleted.
     session.clear();
     auto detached = std::make_shared<ParityUser>();
     detached->id = user->id;
