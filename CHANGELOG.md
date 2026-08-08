@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.10 - 2026-08-08
+
+Advanced SELECT parity release. SQLite remains the only executor/dialect intentionally.
+
+- Add `BETWEEN` / `NOT BETWEEN` as first-class expression AST nodes that compose with existing logical predicates.
+- Add `EXISTS` / `NOT EXISTS` over typed `BasicSelectQuery` subqueries.
+- Add `WITH` CTEs with optional column lists and validate CTE column-list arity against the reflected query projection.
+- Add `WITH RECURSIVE` and a typed `join_cte<^^Member>(name, column)` bridge for genuine recursive graph/tree queries without raw SQL predicates.
+- Add `UNION`, `UNION ALL`, `INTERSECT`, and `EXCEPT` set-operation AST state; reject operands with different projection arity before SQL compilation.
+- Apply compound-query `ORDER BY`, `LIMIT`, and `OFFSET` after the set-operation chain, matching the MetalORM TypeScript compiler model.
+- Add typed window projection terms for `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `NTILE`, `LAG`, `LEAD`, `FIRST_VALUE`, and `LAST_VALUE`.
+- Add composable `partition_by()` and `order_by()` window specifications with reflected fields constrained by the query scope.
+- Compile window literal arguments as normal bound SQLite parameters rather than embedding values into SQL.
+- Reuse the existing SELECT compiler, parameter vector, reflection-based field references, and projection aliases for CTEs, set operations, subqueries, and windows.
+- Add an end-to-end SQLite suite covering BETWEEN, EXISTS, all four set operations, ordinary CTEs, a genuinely recursive parent/child CTE, row numbering, partition/order windows, and LAG state.
+- Validate the generated recursive and window SQL independently against SQLite during development.
+
 ## 0.0.9 - 2026-08-08
 
 SQLite DML-parity release. SQLite remains the only executor/dialect intentionally.
