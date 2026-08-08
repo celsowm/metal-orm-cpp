@@ -96,7 +96,12 @@ int main() {
     session.persist(admin);
     session.persist(developer);
     session.persist(user);
-    user->roles.attach(admin, ParityUserRole{.label = "owner", .weight = 10});
+
+    metal::pivot_patch<ParityUserRole> owner_patch;
+    owner_patch
+        .set<^^ParityUserRole::label>(std::string{"owner"})
+        .set<^^ParityUserRole::weight>(std::int64_t{10});
+    user->roles.attach(admin, owner_patch);
     session.commit();
 
     assert(admin->id != 0);
@@ -125,11 +130,15 @@ int main() {
     assert(hydrated_pivot->label == "owner");
     assert(hydrated_pivot->weight == 10);
 
-    // Re-attaching an existing target with pivot data mirrors MetalORM's
-    // relation-change kind 'update' rather than creating a duplicate link.
-    loaded->roles.attach(
-        loaded_admin,
-        ParityUserRole{.label = "primary", .weight = 20});
+    // Partial<TPivot> parity: patch only label. Weight must remain untouched.
+    metal::pivot_patch<ParityUserRole> label_only;
+    label_only.set<^^ParityUserRole::label>(std::string{"primary"});
+    loaded->roles.attach(loaded_admin, label_only);
+
+    const auto* locally_patched = loaded->roles.pivot(loaded_admin);
+    assert(locally_patched);
+    assert(locally_patched->label == "primary");
+    assert(locally_patched->weight == 10);
     session.commit();
 
     pivot_row = db->execute(
@@ -137,13 +146,13 @@ int main() {
         {loaded->id, loaded_admin->id});
     assert(pivot_row.rows.size() == 1);
     assert(metal::from_value<std::string>(pivot_row.rows[0].at("label")) == "primary");
-    assert(metal::from_value<std::int64_t>(pivot_row.rows[0].at("weight")) == 20);
+    assert(metal::from_value<std::int64_t>(pivot_row.rows[0].at("weight")) == 10);
 
-    // Attach by ID creates a tracked target stub and writes the pivot without
-    // loading the target row again, matching DefaultManyToManyCollection.
-    loaded->roles.attach(
-        developer->id,
-        ParityUserRole{.label = "secondary", .weight = 5});
+    metal::pivot_patch<ParityUserRole> secondary_patch;
+    secondary_patch
+        .set<^^ParityUserRole::label>(std::string{"secondary"})
+        .set<^^ParityUserRole::weight>(std::int64_t{5});
+    loaded->roles.attach(developer->id, secondary_patch);
     session.commit();
 
     auto pivot_count = db->execute(
@@ -151,8 +160,6 @@ int main() {
         {loaded->id});
     assert(metal::from_value<std::int64_t>(pivot_count.rows.at(0).at("c")) == 2);
 
-    // syncByIds parity: retain developer, detach admin. Because this relation
-    // uses cascade::remove, the detached admin target is deleted after pivot DML.
     loaded->roles.sync_by_ids(std::vector<std::int64_t>{developer->id});
     session.commit();
 
@@ -169,8 +176,6 @@ int main() {
     assert(metal::from_value<std::int64_t>(admin_count.rows.at(0).at("c")) == 0);
     assert(metal::from_value<std::int64_t>(developer_count.rows.at(0).at("c")) == 1);
 
-    // A non-empty generated PK means persist() attaches as Managed rather
-    // than issuing an INSERT, matching OrmSession.persist in MetalORM TS.
     db->execute(
         "INSERT INTO parity_users(id, name) VALUES (?, ?);",
         {std::int64_t{100}, std::string{"seed"}});
