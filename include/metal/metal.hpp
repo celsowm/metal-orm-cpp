@@ -13,6 +13,7 @@
 #include "metal/reflection.hpp"
 #include "metal/reference_traits.hpp"
 #include "metal/orm.hpp"
+#include "metal/graph_persistence.hpp"
 #include "metal/query.hpp"
 #include "metal/relation_change_processor.hpp"
 #include "metal/runtime_pagination.hpp"
