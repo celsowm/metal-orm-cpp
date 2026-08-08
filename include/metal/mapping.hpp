@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <meta>
 #include <string_view>
 
 namespace metal::mapping {
@@ -44,29 +45,83 @@ inline constexpr primary_key_t primary_key{};
 inline constexpr generated_t generated{};
 inline constexpr ignore_t ignore{};
 
-struct many_to_many {
-    fixed_text<96> pivot_table;
-    fixed_text<96> pivot_root_fk;
-    fixed_text<96> pivot_target_fk;
-    fixed_text<96> root_key{"id"};
-    fixed_text<96> target_key{"id"};
-
-    template <std::size_t A, std::size_t B, std::size_t C>
-    consteval many_to_many(
-        const char (&pivot)[A],
-        const char (&root_fk)[B],
-        const char (&target_fk)[C])
-        : pivot_table(pivot), pivot_root_fk(root_fk), pivot_target_fk(target_fk) {}
-
-    template <std::size_t A, std::size_t B, std::size_t C, std::size_t D, std::size_t E>
-    consteval many_to_many(
-        const char (&pivot)[A],
-        const char (&root_fk)[B],
-        const char (&target_fk)[C],
-        const char (&root)[D],
-        const char (&target)[E])
-        : pivot_table(pivot), pivot_root_fk(root_fk), pivot_target_fk(target_fk),
-          root_key(root), target_key(target) {}
+enum class relation_kind {
+    belongs_to,
+    has_one,
+    has_many,
+    many_to_many
 };
+
+// Relationship metadata carries reflections, never column/table names.
+// A null key means "use the primary key of that side".
+template <std::meta::info ForeignKey, std::meta::info TargetKey = std::meta::info{}>
+struct belongs_to {};
+
+template <std::meta::info TargetForeignKey, std::meta::info LocalKey = std::meta::info{}>
+struct has_one {};
+
+template <std::meta::info TargetForeignKey, std::meta::info LocalKey = std::meta::info{}>
+struct has_many {};
+
+template <
+    std::meta::info Pivot,
+    std::meta::info PivotRootForeignKey,
+    std::meta::info PivotTargetForeignKey,
+    std::meta::info LocalKey = std::meta::info{},
+    std::meta::info TargetKey = std::meta::info{}>
+struct many_to_many {};
+
+template <typename T>
+struct relation_annotation_traits {
+    static constexpr bool value = false;
+};
+
+template <std::meta::info ForeignKey, std::meta::info TargetKey>
+struct relation_annotation_traits<belongs_to<ForeignKey, TargetKey>> {
+    static constexpr bool value = true;
+    static constexpr relation_kind kind = relation_kind::belongs_to;
+    static consteval std::meta::info foreign_key() { return ForeignKey; }
+    static consteval std::meta::info target_key() { return TargetKey; }
+};
+
+template <std::meta::info TargetForeignKey, std::meta::info LocalKey>
+struct relation_annotation_traits<has_one<TargetForeignKey, LocalKey>> {
+    static constexpr bool value = true;
+    static constexpr relation_kind kind = relation_kind::has_one;
+    static consteval std::meta::info target_foreign_key() { return TargetForeignKey; }
+    static consteval std::meta::info local_key() { return LocalKey; }
+};
+
+template <std::meta::info TargetForeignKey, std::meta::info LocalKey>
+struct relation_annotation_traits<has_many<TargetForeignKey, LocalKey>> {
+    static constexpr bool value = true;
+    static constexpr relation_kind kind = relation_kind::has_many;
+    static consteval std::meta::info target_foreign_key() { return TargetForeignKey; }
+    static consteval std::meta::info local_key() { return LocalKey; }
+};
+
+template <
+    std::meta::info Pivot,
+    std::meta::info PivotRootForeignKey,
+    std::meta::info PivotTargetForeignKey,
+    std::meta::info LocalKey,
+    std::meta::info TargetKey>
+struct relation_annotation_traits<many_to_many<
+    Pivot,
+    PivotRootForeignKey,
+    PivotTargetForeignKey,
+    LocalKey,
+    TargetKey>> {
+    static constexpr bool value = true;
+    static constexpr relation_kind kind = relation_kind::many_to_many;
+    static consteval std::meta::info pivot() { return Pivot; }
+    static consteval std::meta::info pivot_root_foreign_key() { return PivotRootForeignKey; }
+    static consteval std::meta::info pivot_target_foreign_key() { return PivotTargetForeignKey; }
+    static consteval std::meta::info local_key() { return LocalKey; }
+    static consteval std::meta::info target_key() { return TargetKey; }
+};
+
+template <typename T>
+inline constexpr bool is_relation_annotation_v = relation_annotation_traits<T>::value;
 
 } // namespace metal::mapping
