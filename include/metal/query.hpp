@@ -454,8 +454,9 @@ inline const std::string& alias_for(const CompileContext& ctx, std::type_index o
 }
 
 inline std::string compile_column(const ColumnRef& column, const CompileContext& ctx) {
-    return ctx.dialect.quote_identifier(alias_for(ctx, column.owner)) + "." +
-           ctx.dialect.quote_identifier(column.column);
+    const auto& alias = alias_for(ctx, column.owner);
+    if (alias.empty()) return ctx.dialect.quote_identifier(column.column);
+    return ctx.dialect.quote_identifier(alias) + "." + ctx.dialect.quote_identifier(column.column);
 }
 
 inline std::string compile_aggregate(const AggregateRef& aggregate, const CompileContext& ctx) {
@@ -712,7 +713,8 @@ private:
     CompiledQuery compile_impl(const Dialect& dialect, bool terminate) const {
         CompiledQuery out;
         CompileContext ctx{dialect, {}, out.params};
-        ctx.aliases.emplace(std::type_index(typeid(Root)), "t0");
+        const bool has_joins = !state_->joins.empty();
+        ctx.aliases.emplace(std::type_index(typeid(Root)), has_joins ? "t0" : "");
 
         std::vector<std::string> join_sql;
         std::size_t entity_alias = 1;
@@ -763,8 +765,12 @@ private:
                 if (!first) out.sql += ", ";
                 first = false;
                 const auto name = reflect::column_name<Member>();
-                out.sql += dialect.quote_identifier("t0") + "." + dialect.quote_identifier(name) +
-                           " AS " + dialect.quote_identifier(name);
+                if (has_joins) {
+                    out.sql += dialect.quote_identifier("t0") + "." + dialect.quote_identifier(name) +
+                               " AS " + dialect.quote_identifier(name);
+                } else {
+                    out.sql += dialect.quote_identifier(name);
+                }
             });
         } else {
             for (std::size_t i = 0; i < state_->projections.size(); ++i) {
@@ -781,8 +787,8 @@ private:
             }
         }
 
-        out.sql += " FROM " + dialect.quote_identifier(reflect::table_name<Root>()) +
-                   " AS " + dialect.quote_identifier("t0");
+        out.sql += " FROM " + dialect.quote_identifier(reflect::table_name<Root>());
+        if (has_joins) out.sql += " AS " + dialect.quote_identifier("t0");
         for (const auto& clause : join_sql) out.sql += clause;
 
         if (state_->where) {
