@@ -2,6 +2,7 @@
 
 #include "metal/query/select.hpp"
 
+#include <concepts>
 #include <functional>
 #include <string>
 #include <type_traits>
@@ -59,13 +60,17 @@ inline std::string qcol(const Dialect& dialect, std::string_view alias, std::str
     return dialect.quote_identifier(alias) + "." + dialect.quote_identifier(column);
 }
 
-template <std::meta::info Relation, reflect::Entity Target>
-RelationFilterSpec make_relation_filter(SelectQuery<Target> child, bool negated) {
+template <std::meta::info Relation, typename ChildQuery>
+requires requires(const ChildQuery& query, const Dialect& dialect) {
+    { query.compile_subquery(dialect) } -> std::same_as<CompiledQuery>;
+}
+RelationFilterSpec make_relation_filter(ChildQuery child, bool negated) {
     using Owner = reflect::owner_type_t<Relation>;
     using A = reflect::relation_annotation_t<Relation>;
     using Traits = mapping::relation_annotation_traits<A>;
     static_assert(Traits::kind != mapping::relation_kind::morph_to,
                   "MetalORM: morph_to does not support where_has/where_has_not because its target table is discriminator-dependent");
+    using Target = relation_filter_target_t<Relation>;
 
     return RelationFilterSpec{
         negated,
@@ -118,6 +123,28 @@ RelationFilterSpec make_relation_filter(SelectQuery<Target> child, bool negated)
         }};
 }
 
+template <std::meta::info Relation, typename Callback>
+RelationFilterSpec configured_relation_filter(Callback&& callback, bool negated) {
+    static_assert(reflect::has_relation_annotation<Relation>(),
+                  "MetalORM: relation filter requires a reflected relationship member");
+    using A = reflect::relation_annotation_t<Relation>;
+    using Traits = mapping::relation_annotation_traits<A>;
+    static_assert(Traits::kind != mapping::relation_kind::morph_to,
+                  "MetalORM: morph_to does not support where_has/where_has_not");
+    using Target = relation_filter_target_t<Relation>;
+    static_assert(reflect::Entity<Target>);
+
+    auto child = select<Target>();
+    using Result = std::invoke_result_t<Callback, SelectQuery<Target>&>;
+    if constexpr (std::is_void_v<Result>) {
+        std::invoke(std::forward<Callback>(callback), child);
+        return make_relation_filter<Relation>(std::move(child), negated);
+    } else {
+        auto configured = std::invoke(std::forward<Callback>(callback), child);
+        return make_relation_filter<Relation>(std::move(configured), negated);
+    }
+}
+
 } // namespace detail
 
 template <reflect::Entity Root, typename... Scope>
@@ -165,26 +192,10 @@ private:
 
 template <std::meta::info Relation, reflect::Entity Root, typename... Scope, typename Callback>
 auto where_has(BasicSelectQuery<Root, Scope...> base, Callback&& callback) {
-    static_assert(reflect::has_relation_annotation<Relation>(),
-                  "MetalORM: where_has<> requires a reflected relationship member");
     static_assert(std::same_as<reflect::owner_type_t<Relation>, Root>,
                   "MetalORM: where_has<> relation must belong to the query root entity");
-    using A = reflect::relation_annotation_t<Relation>;
-    using Traits = mapping::relation_annotation_traits<A>;
-    static_assert(Traits::kind != mapping::relation_kind::morph_to,
-                  "MetalORM: morph_to does not support where_has/where_has_not");
-    using Target = detail::relation_filter_target_t<Relation>;
-    static_assert(reflect::Entity<Target>);
-
-    auto child = select<Target>();
-    if constexpr (std::is_void_v<std::invoke_result_t<Callback, SelectQuery<Target>&>>) {
-        std::invoke(std::forward<Callback>(callback), child);
-    } else {
-        child = std::invoke(std::forward<Callback>(callback), child);
-    }
-
     RelationFilteredQuery<Root, Scope...> out{std::move(base)};
-    out.add_filter(detail::make_relation_filter<Relation>(std::move(child), false));
+    out.add_filter(detail::configured_relation_filter<Relation>(std::forward<Callback>(callback), false));
     return out;
 }
 
@@ -194,27 +205,24 @@ auto where_has(BasicSelectQuery<Root, Scope...> base) {
 }
 
 template <std::meta::info Relation, reflect::Entity Root, typename... Scope, typename Callback>
+auto where_has(RelationFilteredQuery<Root, Scope...> base, Callback&& callback) {
+    static_assert(std::same_as<reflect::owner_type_t<Relation>, Root>,
+                  "MetalORM: where_has<> relation must belong to the query root entity");
+    base.add_filter(detail::configured_relation_filter<Relation>(std::forward<Callback>(callback), false));
+    return base;
+}
+
+template <std::meta::info Relation, reflect::Entity Root, typename... Scope>
+auto where_has(RelationFilteredQuery<Root, Scope...> base) {
+    return where_has<Relation>(std::move(base), [](auto&) {});
+}
+
+template <std::meta::info Relation, reflect::Entity Root, typename... Scope, typename Callback>
 auto where_has_not(BasicSelectQuery<Root, Scope...> base, Callback&& callback) {
-    static_assert(reflect::has_relation_annotation<Relation>(),
-                  "MetalORM: where_has_not<> requires a reflected relationship member");
     static_assert(std::same_as<reflect::owner_type_t<Relation>, Root>,
                   "MetalORM: where_has_not<> relation must belong to the query root entity");
-    using A = reflect::relation_annotation_t<Relation>;
-    using Traits = mapping::relation_annotation_traits<A>;
-    static_assert(Traits::kind != mapping::relation_kind::morph_to,
-                  "MetalORM: morph_to does not support where_has/where_has_not");
-    using Target = detail::relation_filter_target_t<Relation>;
-    static_assert(reflect::Entity<Target>);
-
-    auto child = select<Target>();
-    if constexpr (std::is_void_v<std::invoke_result_t<Callback, SelectQuery<Target>&>>) {
-        std::invoke(std::forward<Callback>(callback), child);
-    } else {
-        child = std::invoke(std::forward<Callback>(callback), child);
-    }
-
     RelationFilteredQuery<Root, Scope...> out{std::move(base)};
-    out.add_filter(detail::make_relation_filter<Relation>(std::move(child), true));
+    out.add_filter(detail::configured_relation_filter<Relation>(std::forward<Callback>(callback), true));
     return out;
 }
 
@@ -223,8 +231,31 @@ auto where_has_not(BasicSelectQuery<Root, Scope...> base) {
     return where_has_not<Relation>(std::move(base), [](auto&) {});
 }
 
+template <std::meta::info Relation, reflect::Entity Root, typename... Scope, typename Callback>
+auto where_has_not(RelationFilteredQuery<Root, Scope...> base, Callback&& callback) {
+    static_assert(std::same_as<reflect::owner_type_t<Relation>, Root>,
+                  "MetalORM: where_has_not<> relation must belong to the query root entity");
+    base.add_filter(detail::configured_relation_filter<Relation>(std::forward<Callback>(callback), true));
+    return base;
+}
+
+template <std::meta::info Relation, reflect::Entity Root, typename... Scope>
+auto where_has_not(RelationFilteredQuery<Root, Scope...> base) {
+    return where_has_not<Relation>(std::move(base), [](auto&) {});
+}
+
 template <std::meta::info Relation, reflect::Entity Root, typename... Scope, typename... Owners>
 auto where_relation(BasicSelectQuery<Root, Scope...> base, Expression<Owners...> predicate) {
+    using Target = detail::relation_filter_target_t<Relation>;
+    static_assert((std::same_as<Owners, Target> && ...),
+                  "MetalORM: where_relation predicate must reference only the relation target type");
+    return where_has<Relation>(std::move(base), [predicate = std::move(predicate)](auto& child) mutable {
+        child.where(std::move(predicate));
+    });
+}
+
+template <std::meta::info Relation, reflect::Entity Root, typename... Scope, typename... Owners>
+auto where_relation(RelationFilteredQuery<Root, Scope...> base, Expression<Owners...> predicate) {
     using Target = detail::relation_filter_target_t<Relation>;
     static_assert((std::same_as<Owners, Target> && ...),
                   "MetalORM: where_relation predicate must reference only the relation target type");
