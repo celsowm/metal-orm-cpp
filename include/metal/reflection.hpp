@@ -162,23 +162,47 @@ using single_target_t =
     typename single_relation_traits<std::remove_cvref_t<T>>::target_type;
 
 template <typename T>
-struct many_collection_traits {
+struct has_many_collection_traits {
     static constexpr bool value = false;
 };
 
 template <typename Target>
-struct many_collection_traits<metal::collection<Target>> {
+struct has_many_collection_traits<metal::has_many_collection<Target>> {
     static constexpr bool value = true;
     using target_type = Target;
 };
 
 template <typename T>
-inline constexpr bool is_many_collection_v =
-    many_collection_traits<std::remove_cvref_t<T>>::value;
+inline constexpr bool is_has_many_collection_v =
+    has_many_collection_traits<std::remove_cvref_t<T>>::value;
 
 template <typename T>
-using many_target_t =
-    typename many_collection_traits<std::remove_cvref_t<T>>::target_type;
+using has_many_target_t =
+    typename has_many_collection_traits<std::remove_cvref_t<T>>::target_type;
+
+template <typename T>
+struct many_to_many_collection_traits {
+    static constexpr bool value = false;
+};
+
+template <typename Target, typename Pivot>
+struct many_to_many_collection_traits<metal::many_to_many_collection<Target, Pivot>> {
+    static constexpr bool value = true;
+    using target_type = Target;
+    using pivot_type = Pivot;
+};
+
+template <typename T>
+inline constexpr bool is_many_to_many_collection_v =
+    many_to_many_collection_traits<std::remove_cvref_t<T>>::value;
+
+template <typename T>
+using many_to_many_target_t =
+    typename many_to_many_collection_traits<std::remove_cvref_t<T>>::target_type;
+
+template <typename T>
+using many_to_many_pivot_t =
+    typename many_to_many_collection_traits<std::remove_cvref_t<T>>::pivot_type;
 
 template <info Left, info Right>
 consteval bool key_types_compatible() {
@@ -248,9 +272,9 @@ consteval void validate_relation() {
         static_assert(key_types_compatible<target_fk, local_key>(),
                       "MetalORM: has_one key types are incompatible");
     } else if constexpr (Traits::kind == mapping::relation_kind::has_many) {
-        static_assert(is_many_collection_v<M>,
-                      "MetalORM: has_many member must be metal::collection<T>");
-        using Target = many_target_t<M>;
+        static_assert(is_has_many_collection_v<M>,
+                      "MetalORM: has_many member must be metal::has_many_collection<T>");
+        using Target = has_many_target_t<M>;
         static_assert(Entity<Target>,
                       "MetalORM: has_many target must be a mapped entity with one primary key");
 
@@ -265,9 +289,10 @@ consteval void validate_relation() {
         static_assert(key_types_compatible<target_fk, local_key>(),
                       "MetalORM: has_many key types are incompatible");
     } else if constexpr (Traits::kind == mapping::relation_kind::many_to_many) {
-        static_assert(is_many_collection_v<M>,
-                      "MetalORM: many_to_many member must be metal::collection<T>");
-        using Target = many_target_t<M>;
+        static_assert(is_many_to_many_collection_v<M>,
+                      "MetalORM: many_to_many member must be metal::many_to_many_collection<T, Pivot>");
+        using Target = many_to_many_target_t<M>;
+        using CollectionPivot = many_to_many_pivot_t<M>;
         static_assert(Entity<Target>,
                       "MetalORM: many_to_many target must be a mapped entity with one primary key");
 
@@ -277,6 +302,8 @@ consteval void validate_relation() {
         using Pivot = [: pivot_reflection :];
         static_assert(Mapped<Pivot>,
                       "MetalORM: many_to_many pivot must have a [[=table{...}]] annotation");
+        static_assert(std::same_as<CollectionPivot, Pivot>,
+                      "MetalORM: many_to_many collection pivot type must match the reflected pivot annotation");
 
         constexpr auto pivot_root_fk = Traits::pivot_root_foreign_key();
         constexpr auto pivot_target_fk = Traits::pivot_target_foreign_key();
