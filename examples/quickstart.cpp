@@ -12,13 +12,24 @@ struct [[=metal::mapping::table{"roles"}]] Role {
     std::string name;
 };
 
+struct [[=metal::mapping::table{"user_roles"}]] UserRole {
+    [[=metal::mapping::primary_key]]
+    std::int64_t user_id{};
+
+    [[=metal::mapping::primary_key]]
+    std::int64_t role_id{};
+};
+
 struct [[=metal::mapping::table{"users"}]] User {
     [[=metal::mapping::primary_key, =metal::mapping::generated]]
     std::int64_t id{};
     std::string name;
     bool active{true};
 
-    [[=metal::mapping::many_to_many{"user_roles", "user_id", "role_id"}]]
+    [[=metal::mapping::many_to_many<
+        ^^UserRole,
+        ^^UserRole::user_id,
+        ^^UserRole::role_id>{}]]
     std::vector<std::shared_ptr<Role>> roles;
 };
 
@@ -27,8 +38,8 @@ int main() {
     auto dialect = std::make_shared<metal::SQLiteDialect>();
 
     db->execute(metal::create_table_sql<Role>(*dialect));
+    db->execute(metal::create_table_sql<UserRole>(*dialect));
     db->execute(metal::create_table_sql<User>(*dialect));
-    db->execute("CREATE TABLE user_roles (user_id INTEGER NOT NULL, role_id INTEGER NOT NULL, PRIMARY KEY(user_id, role_id));");
 
     metal::Session session{db, dialect};
 
