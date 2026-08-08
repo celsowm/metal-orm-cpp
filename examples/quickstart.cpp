@@ -4,7 +4,6 @@
 #include <iostream>
 #include <memory>
 #include <string>
-#include <vector>
 
 struct [[=metal::mapping::table{"roles"}]] Role {
     [[=metal::mapping::primary_key, =metal::mapping::generated]]
@@ -13,11 +12,8 @@ struct [[=metal::mapping::table{"roles"}]] Role {
 };
 
 struct [[=metal::mapping::table{"user_roles"}]] UserRole {
-    [[=metal::mapping::primary_key]]
-    std::int64_t user_id{};
-
-    [[=metal::mapping::primary_key]]
-    std::int64_t role_id{};
+    [[=metal::mapping::primary_key]] std::int64_t user_id{};
+    [[=metal::mapping::primary_key]] std::int64_t role_id{};
 };
 
 struct [[=metal::mapping::table{"users"}]] User {
@@ -29,8 +25,9 @@ struct [[=metal::mapping::table{"users"}]] User {
     [[=metal::mapping::many_to_many<
         ^^UserRole,
         ^^UserRole::user_id,
-        ^^UserRole::role_id>{}]]
-    std::vector<std::shared_ptr<Role>> roles;
+        ^^UserRole::role_id,
+        metal::mapping::cascade_mode::persist>{}]]
+    metal::collection<Role> roles;
 };
 
 int main() {
@@ -45,20 +42,17 @@ int main() {
 
     auto developer = std::make_shared<Role>();
     developer->name = "developer";
-    session.persist(developer);
 
     auto admin = std::make_shared<Role>();
     admin->name = "admin";
-    session.persist(admin);
 
     auto celso = std::make_shared<User>();
     celso->name = "Celso";
+    celso->roles.attach(developer);
+    celso->roles.attach(admin);
+
     session.persist(celso);
     session.commit();
-
-    db->execute("INSERT INTO user_roles(user_id, role_id) VALUES (?, ?), (?, ?);",
-                {celso->id, developer->id, celso->id, admin->id});
-
     session.clear();
 
     auto users = session.query<User>()
