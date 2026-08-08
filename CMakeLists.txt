@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(metal-orm VERSION 0.0.5 LANGUAGES CXX)
+project(metal-orm VERSION 0.0.6 LANGUAGES CXX)
 
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    message(FATAL_ERROR "MetalORM 0.0.5 is intentionally C++26-native and currently requires GCC 16+ reflection support")
+    message(FATAL_ERROR "MetalORM 0.0.6 is intentionally C++26-native and currently requires GCC 16+ reflection support")
 endif()
 
 if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
-    message(FATAL_ERROR "MetalORM 0.0.5 requires GCC 16 or newer")
+    message(FATAL_ERROR "MetalORM 0.0.6 requires GCC 16 or newer")
 endif()
 
 find_package(SQLite3 REQUIRED)
@@ -62,7 +62,7 @@ if(METAL_ORM_BUILD_TESTS)
     metal_expect_compile_failure(
         wrong-relation-shape
         tests/compile_fail/wrong_relation_shape.cpp
-        "has_many member must be metal::collection<T>"
+        "has_many member must be metal::has_many_collection<T>"
     )
 
     enable_testing()
