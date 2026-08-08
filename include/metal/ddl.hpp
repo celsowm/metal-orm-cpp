@@ -46,7 +46,9 @@ std::string create_table_sql(const Dialect& dialect) {
             sql += " AUTOINCREMENT";
         }
         if constexpr (!is_optional_v<M>) {
-            if constexpr (!reflect::has<mapping::primary_key_t>(Member)) sql += " NOT NULL";
+            if constexpr (!reflect::has<mapping::primary_key_t>(Member) || pk_count > 1) {
+                sql += " NOT NULL";
+            }
         }
     });
 
