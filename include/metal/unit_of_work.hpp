@@ -5,6 +5,7 @@
 #include "metal/runtime_types.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -31,6 +32,11 @@ public:
     }
 
     void track(void* key, TrackedEntity tracked) {
+        for (auto& checkpoint : checkpoints_) {
+            if (!checkpoint.contains(key)) {
+                checkpoint.emplace(key, capture_entry(false, tracked));
+            }
+        }
         tracked_[key] = std::move(tracked);
     }
 
@@ -43,11 +49,66 @@ public:
         return out;
     }
 
-    void clear() { tracked_.clear(); }
+    void clear() {
+        tracked_.clear();
+        checkpoints_.clear();
+    }
 
     void refresh_snapshot(void* key) {
         if (auto* tracked = find(key); tracked && tracked->snapshot) {
             tracked->original = tracked->snapshot();
+        }
+    }
+
+    void begin_checkpoint() {
+        Checkpoint checkpoint;
+        checkpoint.reserve(tracked_.size());
+        for (const auto& [key, tracked] : tracked_) {
+            checkpoint.emplace(key, capture_entry(true, tracked));
+        }
+        checkpoints_.push_back(std::move(checkpoint));
+    }
+
+    void commit_checkpoint() {
+        if (checkpoints_.empty()) {
+            throw std::logic_error("MetalORM: no UnitOfWork checkpoint to commit");
+        }
+        checkpoints_.pop_back();
+    }
+
+    void rollback_checkpoint() {
+        if (checkpoints_.empty()) {
+            throw std::logic_error("MetalORM: no UnitOfWork checkpoint to roll back");
+        }
+
+        auto checkpoint = std::move(checkpoints_.back());
+        checkpoints_.pop_back();
+
+        for (auto& [key, entry] : checkpoint) {
+            if (entry.tracked.restore_snapshot) {
+                entry.tracked.restore_snapshot(entry.current);
+            }
+            if (entry.restore_relations) entry.restore_relations();
+
+            if (entry.existed) {
+                tracked_[key] = std::move(entry.tracked);
+            } else {
+                tracked_.erase(key);
+            }
+        }
+    }
+
+    void rollback_all_checkpoints() {
+        while (!checkpoints_.empty()) rollback_checkpoint();
+    }
+
+    [[nodiscard]] bool has_checkpoint() const noexcept { return !checkpoints_.empty(); }
+    [[nodiscard]] std::size_t checkpoint_depth() const noexcept { return checkpoints_.size(); }
+
+    void register_all_identities() {
+        for (void* key : keys()) {
+            auto* tracked = find(key);
+            if (tracked && tracked->register_identity) tracked->register_identity();
         }
     }
 
@@ -72,6 +133,26 @@ public:
     }
 
 private:
+    struct CheckpointEntry {
+        bool existed{false};
+        TrackedEntity tracked;
+        std::unordered_map<std::string, Value> current;
+        std::function<void()> restore_relations;
+    };
+
+    using Checkpoint = std::unordered_map<void*, CheckpointEntry>;
+
+    static CheckpointEntry capture_entry(bool existed, const TrackedEntity& tracked) {
+        CheckpointEntry entry;
+        entry.existed = existed;
+        entry.tracked = tracked;
+        if (tracked.snapshot) entry.current = tracked.snapshot();
+        if (tracked.capture_relation_restore) {
+            entry.restore_relations = tracked.capture_relation_restore();
+        }
+        return entry;
+    }
+
     void flush_insert(TrackedEntity& tracked) {
         const auto current = tracked.snapshot();
         std::vector<std::string> names;
@@ -135,6 +216,7 @@ private:
     DbExecutor& executor_;
     const Dialect& dialect_;
     std::unordered_map<void*, TrackedEntity> tracked_;
+    std::vector<Checkpoint> checkpoints_;
 };
 
 } // namespace metal
