@@ -102,6 +102,16 @@ public:
     void reset() {}
 
 private:
+    template <reflect::Entity Owner, std::meta::info Key>
+    static bool missing_relation_key(const Value& value) {
+        if (std::holds_alternative<std::nullptr_t>(value)) return true;
+        constexpr auto pk = reflect::primary_key_member<Owner>();
+        if constexpr (Key == pk && reflect::primary_key_is_generated<Owner>()) {
+            return is_empty_generated_value(value);
+        }
+        return false;
+    }
+
     template <typename Patch>
     static std::vector<DmlAssignment> pivot_payload(
         const Patch& patch,
@@ -128,14 +138,14 @@ private:
 
         auto& values = root.[:Relation:];
         const Value root_key = to_value(root.[:local_key:]);
-        if (is_empty_generated_value(root_key) &&
+        if (missing_relation_key<Root, local_key>(root_key) &&
             (!values._metal_added().empty() || !values._metal_removed().empty())) {
             throw std::runtime_error("MetalORM: cannot flush has_many for a root without a persisted key");
         }
 
         for (const auto& target : values._metal_added()) {
             const Value target_key = to_value((*target).[:target_pk:]);
-            if (is_empty_generated_value(target_key)) {
+            if (missing_relation_key<Target, target_pk>(target_key)) {
                 throw std::runtime_error(
                     "MetalORM: attached has_many target is not persisted; enable cascade persist or persist it explicitly");
             }
@@ -178,26 +188,20 @@ private:
         constexpr auto pivot_target_fk = Traits::pivot_target_foreign_key();
         constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
         constexpr auto target_key_member = reflect::key_or_primary<Target>(Traits::target_key());
-        constexpr auto target_pk = reflect::primary_key_member<Target>();
-        constexpr bool target_key_is_pk = target_key_member == target_pk;
 
         const auto pivot_root_column = reflect::column_name<pivot_root_fk>();
         const auto pivot_target_column = reflect::column_name<pivot_target_fk>();
 
         auto& values = root.[:Relation:];
         const Value root_key = to_value(root.[:local_key:]);
-        if (is_empty_generated_value(root_key) &&
+        if (missing_relation_key<Root, local_key>(root_key) &&
             (!values._metal_added().empty() || !values._metal_removed().empty())) {
             throw std::runtime_error("MetalORM: cannot flush many_to_many for a root without a persisted key");
         }
 
         for (const auto& target : values._metal_added()) {
             const Value target_key = to_value((*target).[:target_key_member:]);
-            bool missing_target_key = std::holds_alternative<std::nullptr_t>(target_key);
-            if constexpr (target_key_is_pk && reflect::primary_key_is_generated<Target>()) {
-                missing_target_key = missing_target_key || is_empty_generated_value(target_key);
-            }
-            if (missing_target_key) {
+            if (missing_relation_key<Target, target_key_member>(target_key)) {
                 throw std::runtime_error(
                     "MetalORM: attached many_to_many target does not have a relation target key");
             }
