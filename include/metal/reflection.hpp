@@ -11,6 +11,10 @@
 #include <type_traits>
 #include <vector>
 
+#ifndef __cpp_impl_reflection
+#error "MetalORM requires C++26 static reflection (GCC 16+ with -std=c++26 -freflection)"
+#endif
+
 namespace metal::reflect {
 
 using std::meta::info;
@@ -42,10 +46,9 @@ std::string table_name() {
 
 template <typename T>
 consteval auto data_members() {
+    const auto ctx = std::meta::access_context::current();
     return std::define_static_array(
-        std::meta::nonstatic_data_members_of(
-            ^^T,
-            std::meta::access_context::unchecked()));
+        std::meta::nonstatic_data_members_of(^^T, ctx));
 }
 
 template <info Member>
