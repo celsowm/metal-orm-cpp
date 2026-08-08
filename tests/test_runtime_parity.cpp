@@ -42,8 +42,15 @@ struct [[=metal::mapping::table{"parity_link_users"}]] ParityLinkUser {
     metal::collection<ParityRole> roles;
 };
 
+struct [[=metal::mapping::table{"parity_manual_keys"}]] ParityManualKey {
+    [[=metal::mapping::primary_key]]
+    std::int64_t id{};
+    std::string name;
+};
+
 static_assert(metal::reflect::validate_mapping<ParityUser>());
 static_assert(metal::reflect::validate_mapping<ParityLinkUser>());
+static_assert(metal::reflect::validate_mapping<ParityManualKey>());
 static_assert(metal::mapping::cascades_remove(metal::mapping::cascade_mode::remove));
 static_assert(!metal::mapping::cascades_persist(metal::mapping::cascade_mode::link));
 static_assert(!metal::mapping::cascades_remove(metal::mapping::cascade_mode::link));
@@ -72,6 +79,7 @@ int main() {
     db->execute(metal::create_table_sql<ParityRole>(*dialect_ptr));
     db->execute(metal::create_table_sql<ParityUserRole>(*dialect_ptr));
     db->execute(metal::create_table_sql<ParityUser>(*dialect_ptr));
+    db->execute(metal::create_table_sql<ParityManualKey>(*dialect_ptr));
 
     metal::Session session{db, dialect_ptr};
 
@@ -129,6 +137,26 @@ int main() {
         {std::int64_t{100}});
     assert(managed_row.rows.size() == 1);
     assert(metal::from_value<std::string>(managed_row.rows[0].at("name")) == "managed");
+
+    // A manually assigned non-generated key of zero is a real identity, not
+    // an empty generated key. It must participate in the Identity Map.
+    db->execute(
+        "INSERT INTO parity_manual_keys(id, name) VALUES (?, ?);",
+        {std::int64_t{0}, std::string{"zero"}});
+    session.clear();
+    auto zero = std::make_shared<ParityManualKey>();
+    zero->id = 0;
+    zero->name = "zero";
+    session.persist(zero);
+    assert(session.find<ParityManualKey>(0) == zero);
+    zero->name = "zero-managed";
+    session.commit();
+
+    auto zero_row = db->execute(
+        "SELECT name FROM parity_manual_keys WHERE id = ?;",
+        {std::int64_t{0}});
+    assert(zero_row.rows.size() == 1);
+    assert(metal::from_value<std::string>(zero_row.rows[0].at("name")) == "zero-managed");
 
     // remove() mirrors the original runtime: an untracked detached object is
     // not implicitly attached just to be deleted.
