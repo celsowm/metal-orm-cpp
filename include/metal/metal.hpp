@@ -1,5 +1,6 @@
 #pragma once
 
+#include "metal/collection.hpp"
 #include "metal/ddl.hpp"
 #include "metal/execution.hpp"
 #include "metal/mapping.hpp"
