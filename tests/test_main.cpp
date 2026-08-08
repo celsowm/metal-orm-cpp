@@ -43,7 +43,7 @@ struct [[=metal::mapping::table{"users"}]] User {
     [[=metal::mapping::has_many<
         ^^Post::user_id,
         metal::mapping::cascade_mode::all>{}]]
-    metal::collection<Post> posts;
+    metal::has_many_collection<Post> posts;
 
     [[=metal::mapping::has_one<^^Profile::user_id>{}]]
     std::shared_ptr<Profile> profile;
@@ -53,7 +53,7 @@ struct [[=metal::mapping::table{"users"}]] User {
         ^^UserRole::user_id,
         ^^UserRole::role_id,
         metal::mapping::cascade_mode::persist>{}]]
-    metal::collection<Role> roles;
+    metal::many_to_many_collection<Role, UserRole> roles;
 };
 
 struct [[=metal::mapping::table{"comments"}]] Comment {
@@ -73,7 +73,9 @@ static_assert(metal::reflect::validate_mapping<UserRole>());
 static_assert(metal::reflect::validate_mapping<User>());
 static_assert(metal::reflect::validate_mapping<Comment>());
 static_assert(metal::reflect::primary_key_count<UserRole>() == 2);
-static_assert(std::same_as<metal::reflect::member_type_t<^^User::roles>, metal::collection<Role>>);
+static_assert(std::same_as<
+    metal::reflect::member_type_t<^^User::roles>,
+    metal::many_to_many_collection<Role, UserRole>>);
 
 int main() {
     metal::SQLiteDialect dialect;
@@ -171,10 +173,12 @@ int main() {
     assert(!users[0]->posts.dirty() && !users[0]->roles.dirty());
 
     std::shared_ptr<Role> shared_developer;
+    std::shared_ptr<Role> loaded_admin;
     for (const auto& role : users[0]->roles) {
         if (role->name == "developer") shared_developer = role;
+        if (role->name == "admin") loaded_admin = role;
     }
-    assert(shared_developer);
+    assert(shared_developer && loaded_admin);
     assert(users[1]->roles[0] == shared_developer);
 
     auto comments = session.query<Comment>()
@@ -185,13 +189,13 @@ int main() {
 
     auto auditor = std::make_shared<Role>();
     auditor->name = "auditor";
-    users[0]->roles.sync({shared_developer, auditor});
+    users[0]->roles.detach(loaded_admin);
+    users[0]->roles.attach(auditor);
 
     const auto removed_post_id = users[0]->posts[0]->id;
-    users[0]->posts.detach(users[0]->posts[0]);
-    auto p4 = std::make_shared<Post>();
+    users[0]->posts.remove(users[0]->posts[0]);
+    auto p4 = users[0]->posts.add();
     p4->title = "Collections";
-    users[0]->posts.attach(p4);
 
     assert(users[0]->roles.dirty());
     assert(users[0]->posts.dirty());
@@ -208,11 +212,13 @@ int main() {
 
     auto reloaded = session.query<User>()
         .where(metal::field<^^User::id> == celso_id)
-        .include<^^User::posts>()
-        .include<^^User::roles>()
         .first();
 
     assert(reloaded);
+    assert(!reloaded->posts.loaded() && !reloaded->roles.loaded());
+    reloaded->posts.load();
+    reloaded->roles.load();
+    assert(reloaded->posts.loaded() && reloaded->roles.loaded());
     assert(reloaded->posts.size() == 2);
     assert(reloaded->roles.size() == 2);
 
