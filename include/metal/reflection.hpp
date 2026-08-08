@@ -2,8 +2,10 @@
 
 #include "metal/collection.hpp"
 #include "metal/mapping.hpp"
+#include "metal/polymorphic.hpp"
 #include "metal/value.hpp"
 
+#include <array>
 #include <meta>
 #include <memory>
 #include <stdexcept>
@@ -143,9 +145,7 @@ template <typename T>
 concept Entity = Mapped<T> && (primary_key_count<T>() == 1);
 
 template <typename T>
-struct single_relation_traits {
-    static constexpr bool value = false;
-};
+struct single_relation_traits { static constexpr bool value = false; };
 
 template <typename Target>
 struct single_relation_traits<std::shared_ptr<Target>> {
@@ -154,17 +154,13 @@ struct single_relation_traits<std::shared_ptr<Target>> {
 };
 
 template <typename T>
-inline constexpr bool is_single_relation_v =
-    single_relation_traits<std::remove_cvref_t<T>>::value;
+inline constexpr bool is_single_relation_v = single_relation_traits<std::remove_cvref_t<T>>::value;
 
 template <typename T>
-using single_target_t =
-    typename single_relation_traits<std::remove_cvref_t<T>>::target_type;
+using single_target_t = typename single_relation_traits<std::remove_cvref_t<T>>::target_type;
 
 template <typename T>
-struct has_many_collection_traits {
-    static constexpr bool value = false;
-};
+struct has_many_collection_traits { static constexpr bool value = false; };
 
 template <typename Target>
 struct has_many_collection_traits<metal::has_many_collection<Target>> {
@@ -173,17 +169,13 @@ struct has_many_collection_traits<metal::has_many_collection<Target>> {
 };
 
 template <typename T>
-inline constexpr bool is_has_many_collection_v =
-    has_many_collection_traits<std::remove_cvref_t<T>>::value;
+inline constexpr bool is_has_many_collection_v = has_many_collection_traits<std::remove_cvref_t<T>>::value;
 
 template <typename T>
-using has_many_target_t =
-    typename has_many_collection_traits<std::remove_cvref_t<T>>::target_type;
+using has_many_target_t = typename has_many_collection_traits<std::remove_cvref_t<T>>::target_type;
 
 template <typename T>
-struct many_to_many_collection_traits {
-    static constexpr bool value = false;
-};
+struct many_to_many_collection_traits { static constexpr bool value = false; };
 
 template <typename Target, typename Pivot>
 struct many_to_many_collection_traits<metal::many_to_many_collection<Target, Pivot>> {
@@ -193,16 +185,13 @@ struct many_to_many_collection_traits<metal::many_to_many_collection<Target, Piv
 };
 
 template <typename T>
-inline constexpr bool is_many_to_many_collection_v =
-    many_to_many_collection_traits<std::remove_cvref_t<T>>::value;
+inline constexpr bool is_many_to_many_collection_v = many_to_many_collection_traits<std::remove_cvref_t<T>>::value;
 
 template <typename T>
-using many_to_many_target_t =
-    typename many_to_many_collection_traits<std::remove_cvref_t<T>>::target_type;
+using many_to_many_target_t = typename many_to_many_collection_traits<std::remove_cvref_t<T>>::target_type;
 
 template <typename T>
-using many_to_many_pivot_t =
-    typename many_to_many_collection_traits<std::remove_cvref_t<T>>::pivot_type;
+using many_to_many_pivot_t = typename many_to_many_collection_traits<std::remove_cvref_t<T>>::pivot_type;
 
 template <info Left, info Right>
 consteval bool key_types_compatible() {
@@ -216,6 +205,48 @@ consteval bool key_types_compatible() {
 template <Entity T>
 consteval info key_or_primary(info candidate) {
     return candidate == info{} ? primary_key_member<T>() : candidate;
+}
+
+template <typename... Cases>
+consteval bool unique_morph_discriminators(mapping::type_list<Cases...>) {
+    constexpr std::array<std::string_view, sizeof...(Cases)> values{
+        mapping::morph_target_traits<Cases>::type_value.view()...
+    };
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (values[i].empty()) return false;
+        for (std::size_t j = i + 1; j < values.size(); ++j) {
+            if (values[i] == values[j]) return false;
+        }
+    }
+    return true;
+}
+
+template <typename Wrapper, info IdField, typename Case>
+consteval void validate_morph_to_case() {
+    using CaseTraits = mapping::morph_target_traits<Case>;
+    constexpr auto target_reflection = CaseTraits::target();
+    static_assert(std::meta::is_type(target_reflection),
+                  "MetalORM: morph_target must reflect a mapped type");
+    using Target = [: target_reflection :];
+    static_assert(Entity<Target>,
+                  "MetalORM: morph_to targets must be mapped entities with one primary key");
+    static_assert(morph_to_reference_traits<std::remove_cvref_t<Wrapper>>::template contains<Target>,
+                  "MetalORM: every morph_to target must appear in morph_to_reference<T...>");
+    constexpr auto target_key = key_or_primary<Target>(CaseTraits::target_key());
+    static_assert(std::same_as<owner_type_t<target_key>, Target>,
+                  "MetalORM: morph_to target key must belong to its target entity");
+    static_assert(is_persistent_member<target_key>(),
+                  "MetalORM: morph_to target key must be a persistent scalar column");
+    static_assert(key_types_compatible<IdField, target_key>(),
+                  "MetalORM: morph_to id field and target-key types are incompatible");
+}
+
+template <typename Wrapper, info IdField, typename... Cases>
+consteval void validate_morph_to_cases(mapping::type_list<Cases...> cases) {
+    static_assert(sizeof...(Cases) > 0, "MetalORM: morph_to requires at least one target mapping");
+    static_assert(unique_morph_discriminators(cases),
+                  "MetalORM: morph_to discriminator values must be non-empty and unique");
+    (validate_morph_to_case<Wrapper, IdField, Cases>(), ...);
 }
 
 template <Mapped Root, info Member>
@@ -236,97 +267,94 @@ consteval void validate_relation() {
     using M = member_type_t<Member>;
 
     if constexpr (Traits::kind == mapping::relation_kind::belongs_to) {
-        static_assert(is_single_relation_v<M>,
-                      "MetalORM: belongs_to member must be std::shared_ptr<T>");
+        static_assert(is_single_relation_v<M>, "MetalORM: belongs_to member must be std::shared_ptr<T>");
         using Target = single_target_t<M>;
-        static_assert(Entity<Target>,
-                      "MetalORM: belongs_to target must be a mapped entity with one primary key");
-
+        static_assert(Entity<Target>, "MetalORM: belongs_to target must be a mapped entity with one primary key");
         constexpr auto foreign_key = Traits::foreign_key();
         constexpr auto target_key = key_or_primary<Target>(Traits::target_key());
-        static_assert(std::meta::is_nonstatic_data_member(foreign_key),
-                      "MetalORM: belongs_to foreign key must reflect a data member");
-        static_assert(std::same_as<owner_type_t<foreign_key>, Root>,
-                      "MetalORM: belongs_to foreign key must belong to the root entity");
-        static_assert(std::same_as<owner_type_t<target_key>, Target>,
-                      "MetalORM: belongs_to target key must belong to the target entity");
-        static_assert(is_persistent_member<foreign_key>() && is_persistent_member<target_key>(),
-                      "MetalORM: belongs_to keys must be persistent scalar columns");
-        static_assert(key_types_compatible<foreign_key, target_key>(),
-                      "MetalORM: belongs_to foreign-key and target-key types are incompatible");
+        static_assert(std::meta::is_nonstatic_data_member(foreign_key), "MetalORM: belongs_to foreign key must reflect a data member");
+        static_assert(std::same_as<owner_type_t<foreign_key>, Root>, "MetalORM: belongs_to foreign key must belong to the root entity");
+        static_assert(std::same_as<owner_type_t<target_key>, Target>, "MetalORM: belongs_to target key must belong to the target entity");
+        static_assert(is_persistent_member<foreign_key>() && is_persistent_member<target_key>(), "MetalORM: belongs_to keys must be persistent scalar columns");
+        static_assert(key_types_compatible<foreign_key, target_key>(), "MetalORM: belongs_to foreign-key and target-key types are incompatible");
     } else if constexpr (Traits::kind == mapping::relation_kind::has_one) {
-        static_assert(is_single_relation_v<M>,
-                      "MetalORM: has_one member must be std::shared_ptr<T>");
+        static_assert(is_single_relation_v<M>, "MetalORM: has_one member must be std::shared_ptr<T>");
         using Target = single_target_t<M>;
-        static_assert(Entity<Target>,
-                      "MetalORM: has_one target must be a mapped entity with one primary key");
-
+        static_assert(Entity<Target>, "MetalORM: has_one target must be a mapped entity with one primary key");
         constexpr auto target_fk = Traits::target_foreign_key();
         constexpr auto local_key = key_or_primary<Root>(Traits::local_key());
-        static_assert(std::same_as<owner_type_t<target_fk>, Target>,
-                      "MetalORM: has_one foreign key must belong to the target entity");
-        static_assert(std::same_as<owner_type_t<local_key>, Root>,
-                      "MetalORM: has_one local key must belong to the root entity");
-        static_assert(is_persistent_member<target_fk>() && is_persistent_member<local_key>(),
-                      "MetalORM: has_one keys must be persistent scalar columns");
-        static_assert(key_types_compatible<target_fk, local_key>(),
-                      "MetalORM: has_one key types are incompatible");
+        static_assert(std::same_as<owner_type_t<target_fk>, Target>, "MetalORM: has_one foreign key must belong to the target entity");
+        static_assert(std::same_as<owner_type_t<local_key>, Root>, "MetalORM: has_one local key must belong to the root entity");
+        static_assert(is_persistent_member<target_fk>() && is_persistent_member<local_key>(), "MetalORM: has_one keys must be persistent scalar columns");
+        static_assert(key_types_compatible<target_fk, local_key>(), "MetalORM: has_one key types are incompatible");
     } else if constexpr (Traits::kind == mapping::relation_kind::has_many) {
-        static_assert(is_has_many_collection_v<M>,
-                      "MetalORM: has_many member must be metal::has_many_collection<T>");
+        static_assert(is_has_many_collection_v<M>, "MetalORM: has_many member must be metal::has_many_collection<T>");
         using Target = has_many_target_t<M>;
-        static_assert(Entity<Target>,
-                      "MetalORM: has_many target must be a mapped entity with one primary key");
-
+        static_assert(Entity<Target>, "MetalORM: has_many target must be a mapped entity with one primary key");
         constexpr auto target_fk = Traits::target_foreign_key();
         constexpr auto local_key = key_or_primary<Root>(Traits::local_key());
-        static_assert(std::same_as<owner_type_t<target_fk>, Target>,
-                      "MetalORM: has_many foreign key must belong to the target entity");
-        static_assert(std::same_as<owner_type_t<local_key>, Root>,
-                      "MetalORM: has_many local key must belong to the root entity");
-        static_assert(is_persistent_member<target_fk>() && is_persistent_member<local_key>(),
-                      "MetalORM: has_many keys must be persistent scalar columns");
-        static_assert(key_types_compatible<target_fk, local_key>(),
-                      "MetalORM: has_many key types are incompatible");
+        static_assert(std::same_as<owner_type_t<target_fk>, Target>, "MetalORM: has_many foreign key must belong to the target entity");
+        static_assert(std::same_as<owner_type_t<local_key>, Root>, "MetalORM: has_many local key must belong to the root entity");
+        static_assert(is_persistent_member<target_fk>() && is_persistent_member<local_key>(), "MetalORM: has_many keys must be persistent scalar columns");
+        static_assert(key_types_compatible<target_fk, local_key>(), "MetalORM: has_many key types are incompatible");
     } else if constexpr (Traits::kind == mapping::relation_kind::many_to_many) {
-        static_assert(is_many_to_many_collection_v<M>,
-                      "MetalORM: many_to_many member must be metal::many_to_many_collection<T, Pivot>");
+        static_assert(is_many_to_many_collection_v<M>, "MetalORM: many_to_many member must be metal::many_to_many_collection<T, Pivot>");
         using Target = many_to_many_target_t<M>;
         using CollectionPivot = many_to_many_pivot_t<M>;
-        static_assert(Entity<Target>,
-                      "MetalORM: many_to_many target must be a mapped entity with one primary key");
-
+        static_assert(Entity<Target>, "MetalORM: many_to_many target must be a mapped entity with one primary key");
         constexpr auto pivot_reflection = Traits::pivot();
-        static_assert(std::meta::is_type(pivot_reflection),
-                      "MetalORM: many_to_many pivot must reflect a mapped type");
+        static_assert(std::meta::is_type(pivot_reflection), "MetalORM: many_to_many pivot must reflect a mapped type");
         using Pivot = [: pivot_reflection :];
-        static_assert(Mapped<Pivot>,
-                      "MetalORM: many_to_many pivot must have a [[=table{...}]] annotation");
-        static_assert(std::same_as<CollectionPivot, Pivot>,
-                      "MetalORM: many_to_many collection pivot type must match the reflected pivot annotation");
-
+        static_assert(Mapped<Pivot>, "MetalORM: many_to_many pivot must have a [[=table{...}]] annotation");
+        static_assert(std::same_as<CollectionPivot, Pivot>, "MetalORM: many_to_many collection pivot type must match the reflected pivot annotation");
         constexpr auto pivot_root_fk = Traits::pivot_root_foreign_key();
         constexpr auto pivot_target_fk = Traits::pivot_target_foreign_key();
         constexpr auto local_key = key_or_primary<Root>(Traits::local_key());
         constexpr auto target_key = key_or_primary<Target>(Traits::target_key());
-
-        static_assert(std::same_as<owner_type_t<pivot_root_fk>, Pivot>,
-                      "MetalORM: pivot root FK must belong to the pivot type");
-        static_assert(std::same_as<owner_type_t<pivot_target_fk>, Pivot>,
-                      "MetalORM: pivot target FK must belong to the pivot type");
-        static_assert(std::same_as<owner_type_t<local_key>, Root>,
-                      "MetalORM: many_to_many local key must belong to the root entity");
-        static_assert(std::same_as<owner_type_t<target_key>, Target>,
-                      "MetalORM: many_to_many target key must belong to the target entity");
-        static_assert(is_persistent_member<pivot_root_fk>() &&
-                      is_persistent_member<pivot_target_fk>() &&
-                      is_persistent_member<local_key>() &&
-                      is_persistent_member<target_key>(),
-                      "MetalORM: many_to_many keys must be persistent scalar columns");
-        static_assert(key_types_compatible<pivot_root_fk, local_key>(),
-                      "MetalORM: pivot root FK and local-key types are incompatible");
-        static_assert(key_types_compatible<pivot_target_fk, target_key>(),
-                      "MetalORM: pivot target FK and target-key types are incompatible");
+        static_assert(std::same_as<owner_type_t<pivot_root_fk>, Pivot>, "MetalORM: pivot root FK must belong to the pivot type");
+        static_assert(std::same_as<owner_type_t<pivot_target_fk>, Pivot>, "MetalORM: pivot target FK must belong to the pivot type");
+        static_assert(std::same_as<owner_type_t<local_key>, Root>, "MetalORM: many_to_many local key must belong to the root entity");
+        static_assert(std::same_as<owner_type_t<target_key>, Target>, "MetalORM: many_to_many target key must belong to the target entity");
+        static_assert(is_persistent_member<pivot_root_fk>() && is_persistent_member<pivot_target_fk>() && is_persistent_member<local_key>() && is_persistent_member<target_key>(), "MetalORM: many_to_many keys must be persistent scalar columns");
+        static_assert(key_types_compatible<pivot_root_fk, local_key>(), "MetalORM: pivot root FK and local-key types are incompatible");
+        static_assert(key_types_compatible<pivot_target_fk, target_key>(), "MetalORM: pivot target FK and target-key types are incompatible");
+    } else if constexpr (Traits::kind == mapping::relation_kind::morph_one) {
+        static_assert(is_morph_one_reference_v<M>, "MetalORM: morph_one member must be metal::morph_one_reference<T>");
+        using Target = morph_one_target_t<M>;
+        static_assert(Entity<Target>, "MetalORM: morph_one target must be a mapped entity with one primary key");
+        constexpr auto type_field = Traits::type_field();
+        constexpr auto id_field = Traits::id_field();
+        constexpr auto local_key = key_or_primary<Root>(Traits::local_key());
+        static_assert(std::same_as<owner_type_t<type_field>, Target> && std::same_as<owner_type_t<id_field>, Target>, "MetalORM: morph_one type/id fields must belong to the target entity");
+        static_assert(std::same_as<owner_type_t<local_key>, Root>, "MetalORM: morph_one local key must belong to the root entity");
+        static_assert(is_persistent_member<type_field>() && is_persistent_member<id_field>() && is_persistent_member<local_key>(), "MetalORM: morph_one fields must be persistent scalar columns");
+        static_assert(std::same_as<optional_value_t<member_type_t<type_field>>, std::string>, "MetalORM: morph_one type field must be string-like");
+        static_assert(key_types_compatible<id_field, local_key>(), "MetalORM: morph_one id/local-key types are incompatible");
+        static_assert(!Traits::type_value.view().empty(), "MetalORM: morph_one discriminator cannot be empty");
+        static_assert(mapping::cascades_remove(Traits::cascade) || (is_optional_v<member_type_t<type_field>> && is_optional_v<member_type_t<id_field>>), "MetalORM: detachable morph_one fields must be nullable unless cascade remove is enabled");
+    } else if constexpr (Traits::kind == mapping::relation_kind::morph_many) {
+        static_assert(is_morph_many_collection_v<M>, "MetalORM: morph_many member must be metal::morph_many_collection<T>");
+        using Target = morph_many_target_t<M>;
+        static_assert(Entity<Target>, "MetalORM: morph_many target must be a mapped entity with one primary key");
+        constexpr auto type_field = Traits::type_field();
+        constexpr auto id_field = Traits::id_field();
+        constexpr auto local_key = key_or_primary<Root>(Traits::local_key());
+        static_assert(std::same_as<owner_type_t<type_field>, Target> && std::same_as<owner_type_t<id_field>, Target>, "MetalORM: morph_many type/id fields must belong to the target entity");
+        static_assert(std::same_as<owner_type_t<local_key>, Root>, "MetalORM: morph_many local key must belong to the root entity");
+        static_assert(is_persistent_member<type_field>() && is_persistent_member<id_field>() && is_persistent_member<local_key>(), "MetalORM: morph_many fields must be persistent scalar columns");
+        static_assert(std::same_as<optional_value_t<member_type_t<type_field>>, std::string>, "MetalORM: morph_many type field must be string-like");
+        static_assert(key_types_compatible<id_field, local_key>(), "MetalORM: morph_many id/local-key types are incompatible");
+        static_assert(!Traits::type_value.view().empty(), "MetalORM: morph_many discriminator cannot be empty");
+        static_assert(mapping::cascades_remove(Traits::cascade) || (is_optional_v<member_type_t<type_field>> && is_optional_v<member_type_t<id_field>>), "MetalORM: detachable morph_many fields must be nullable unless cascade remove is enabled");
+    } else if constexpr (Traits::kind == mapping::relation_kind::morph_to) {
+        static_assert(is_morph_to_reference_v<M>, "MetalORM: morph_to member must be metal::morph_to_reference<T...>");
+        constexpr auto type_field = Traits::type_field();
+        constexpr auto id_field = Traits::id_field();
+        static_assert(std::same_as<owner_type_t<type_field>, Root> && std::same_as<owner_type_t<id_field>, Root>, "MetalORM: morph_to type/id fields must belong to the root entity");
+        static_assert(is_persistent_member<type_field>() && is_persistent_member<id_field>(), "MetalORM: morph_to type/id fields must be persistent scalar columns");
+        static_assert(std::same_as<optional_value_t<member_type_t<type_field>>, std::string>, "MetalORM: morph_to type field must be string-like");
+        static_assert(is_optional_v<member_type_t<type_field>> && is_optional_v<member_type_t<id_field>>, "MetalORM: morph_to type/id fields must be nullable because the reference can be cleared");
+        validate_morph_to_cases<M, id_field>(typename Traits::targets{});
     }
 }
 
@@ -340,22 +368,15 @@ consteval bool validate_mapping() {
         if constexpr (has_relation_annotation<member>()) {
             validate_relation<T, member>();
         } else if constexpr (has<mapping::ignore_t>(member)) {
-            static_assert(!has<mapping::column>(member) &&
-                          !has<mapping::primary_key_t>(member) &&
-                          !has<mapping::generated_t>(member),
-                          "MetalORM: ignored member cannot also carry column/PK/generated metadata");
+            static_assert(!has<mapping::column>(member) && !has<mapping::primary_key_t>(member) && !has<mapping::generated_t>(member), "MetalORM: ignored member cannot also carry column/PK/generated metadata");
         } else if constexpr (PersistableValue<M>) {
             if constexpr (has<mapping::generated_t>(member)) {
-                static_assert(has<mapping::primary_key_t>(member),
-                              "MetalORM: generated currently requires primary_key");
-                static_assert(std::is_integral_v<optional_value_t<M>>,
-                              "MetalORM: generated SQLite key must be integral");
-                static_assert(primary_key_count<T>() == 1,
-                              "MetalORM: generated is invalid on a composite primary key");
+                static_assert(has<mapping::primary_key_t>(member), "MetalORM: generated currently requires primary_key");
+                static_assert(std::is_integral_v<optional_value_t<M>>, "MetalORM: generated SQLite key must be integral");
+                static_assert(primary_key_count<T>() == 1, "MetalORM: generated is invalid on a composite primary key");
             }
         } else {
-            static_assert(PersistableValue<M>,
-                          "MetalORM: unsupported member must be annotated as a relation or [[=ignore]]");
+            static_assert(PersistableValue<M>, "MetalORM: unsupported member must be annotated as a relation or [[=ignore]]");
         }
     }
 
@@ -363,13 +384,11 @@ consteval bool validate_mapping() {
         if constexpr (is_persistent_member<left>()) {
             template for (constexpr auto right : data_members<T>()) {
                 if constexpr (left != right && is_persistent_member<right>()) {
-                    static_assert(column_name_view<left>() != column_name_view<right>(),
-                                  "MetalORM: duplicate mapped column name");
+                    static_assert(column_name_view<left>() != column_name_view<right>(), "MetalORM: duplicate mapped column name");
                 }
             }
         }
     }
-
     return true;
 }
 
@@ -421,9 +440,7 @@ Value value_for_column(const T& entity, std::string_view name) {
             found = true;
         }
     });
-    if (!found) {
-        throw std::runtime_error("MetalORM: relation references an unmapped column");
-    }
+    if (!found) throw std::runtime_error("MetalORM: relation references an unmapped column");
     return result;
 }
 
