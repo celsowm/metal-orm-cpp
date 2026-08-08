@@ -88,7 +88,7 @@ public:
             if (entry.tracked.restore_snapshot) {
                 entry.tracked.restore_snapshot(entry.current);
             }
-            if (entry.restore_relations) entry.restore_relations();
+            if (entry.restore_runtime) entry.restore_runtime();
 
             if (entry.existed) {
                 tracked_[key] = std::move(entry.tracked);
@@ -109,6 +109,13 @@ public:
         for (void* key : keys()) {
             auto* tracked = find(key);
             if (tracked && tracked->register_identity) tracked->register_identity();
+        }
+    }
+
+    void dispatch_domain_events() {
+        for (void* key : keys()) {
+            auto* tracked = find(key);
+            if (tracked && tracked->dispatch_domain_events) tracked->dispatch_domain_events();
         }
     }
 
@@ -137,7 +144,7 @@ private:
         bool existed{false};
         TrackedEntity tracked;
         std::unordered_map<std::string, Value> current;
-        std::function<void()> restore_relations;
+        std::function<void()> restore_runtime;
     };
 
     using Checkpoint = std::unordered_map<void*, CheckpointEntry>;
@@ -147,13 +154,15 @@ private:
         entry.existed = existed;
         entry.tracked = tracked;
         if (tracked.snapshot) entry.current = tracked.snapshot();
-        if (tracked.capture_relation_restore) {
-            entry.restore_relations = tracked.capture_relation_restore();
+        if (tracked.capture_runtime_restore) {
+            entry.restore_runtime = tracked.capture_runtime_restore();
         }
         return entry;
     }
 
     void flush_insert(TrackedEntity& tracked) {
+        if (tracked.before_insert) tracked.before_insert();
+
         const auto current = tracked.snapshot();
         std::vector<std::string> names;
         for (const auto& [name, value] : current) {
@@ -177,6 +186,8 @@ private:
         tracked.original = tracked.snapshot();
         tracked.status = EntityStatus::Managed;
         tracked.register_identity();
+
+        if (tracked.after_insert) tracked.after_insert();
     }
 
     void flush_update_if_dirty(TrackedEntity& tracked) {
@@ -190,6 +201,8 @@ private:
         if (changed.empty()) return;
         std::sort(changed.begin(), changed.end());
 
+        if (tracked.before_update) tracked.before_update();
+
         std::vector<DmlAssignment> assignments;
         assignments.reserve(changed.size());
         for (const auto& name : changed) assignments.push_back({name, current.at(name)});
@@ -199,11 +212,16 @@ private:
             .where_eq(tracked.primary_key, tracked.get_pk())
             .compile(dialect_);
         executor_.execute(compiled.sql, compiled.params);
-        tracked.original = current;
+        tracked.original = tracked.snapshot();
+
+        if (tracked.after_update) tracked.after_update();
     }
 
     void flush_delete(void* key, TrackedEntity& tracked) {
+        if (tracked.before_delete) tracked.before_delete();
+
         const Value pk = tracked.get_pk();
+        const auto after_delete = tracked.after_delete;
         const auto compiled = DeleteQueryBuilder{tracked.table}
             .where_eq(tracked.primary_key, pk)
             .compile(dialect_);
@@ -211,6 +229,8 @@ private:
         tracked.erase_identity(pk);
         tracked.status = EntityStatus::Detached;
         tracked_.erase(key);
+
+        if (after_delete) after_delete();
     }
 
     DbExecutor& executor_;
