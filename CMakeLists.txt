@@ -83,4 +83,8 @@ if(METAL_ORM_BUILD_TESTS)
     add_executable(metal-orm-runtime-parity-tests tests/test_runtime_parity.cpp)
     target_link_libraries(metal-orm-runtime-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-runtime-parity-tests COMMAND metal-orm-runtime-parity-tests)
+
+    add_executable(metal-orm-collection-parity-tests tests/test_collection_parity.cpp)
+    target_link_libraries(metal-orm-collection-parity-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-collection-parity-tests COMMAND metal-orm-collection-parity-tests)
 endif()
