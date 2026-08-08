@@ -88,26 +88,37 @@ int main() {
 
     metal::Session session{db, dialect};
 
+    // Parent and children are all new in the same commit. The first UoW flush
+    // generates the parent key; the relation processor then rebinds morph keys
+    // and the second UoW flush persists the final discriminator/id pair.
     auto post = std::make_shared<MorphPost>();
     post->title = "C++26";
-    session.persist(post);
-    session.commit();
-    assert(post->id != 0);
-
     auto cover = std::make_shared<MorphCover>();
     cover->name = "hero";
     post->cover.set(cover);
-
     auto attachment = post->attachments.add();
     attachment->name = "spec.pdf";
+    session.persist(post);
     session.commit();
 
+    assert(post->id != 0);
     assert(cover->id != 0);
     assert(cover->imageable_id == post->id);
     assert(cover->imageable_type == "post");
     assert(attachment->id != 0);
     assert(attachment->attachable_id == post->id);
     assert(attachment->attachable_type == "post");
+
+    auto cover_row = db->execute(
+        "SELECT imageable_id, imageable_type FROM morph_covers WHERE id = ?;",
+        {cover->id});
+    auto attachment_row = db->execute(
+        "SELECT attachable_id, attachable_type FROM morph_attachments WHERE id = ?;",
+        {attachment->id});
+    assert(metal::from_value<std::int64_t>(cover_row.rows[0].at("imageable_id")) == post->id);
+    assert(metal::from_value<std::string>(cover_row.rows[0].at("imageable_type")) == "post");
+    assert(metal::from_value<std::int64_t>(attachment_row.rows[0].at("attachable_id")) == post->id);
+    assert(metal::from_value<std::string>(attachment_row.rows[0].at("attachable_type")) == "post");
 
     const auto post_id = post->id;
     const auto cover_id = cover->id;
@@ -144,8 +155,6 @@ int main() {
     assert(!session.find<MorphCover>(eager_cover->id));
     assert(!session.find<MorphAttachment>(eager_attachment->id));
 
-    // MorphTo cascade-persist: the target has no generated ID at set() time.
-    // The relation processor resolves the key after the first UoW flush.
     auto activity = std::make_shared<MorphActivity>();
     activity->action = "created";
     session.persist(activity);
