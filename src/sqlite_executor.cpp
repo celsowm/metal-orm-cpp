@@ -2,7 +2,9 @@
 
 #include <sqlite3.h>
 
+#include <cctype>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace metal {
@@ -44,7 +46,7 @@ static Value column_value(sqlite3_stmt* stmt, int column) {
             return std::string(text ? text : "", static_cast<std::size_t>(bytes));
         }
         case SQLITE_BLOB:
-            throw std::runtime_error("MetalORM 0.0.1: BLOB columns are not supported yet");
+            throw std::runtime_error("MetalORM: BLOB columns are not supported yet");
         default:
             throw std::runtime_error("MetalORM: unsupported SQLite column type");
     }
@@ -103,6 +105,34 @@ QueryResult SQLiteExecutor::execute(const std::string& sql, const std::vector<Va
     result.affected_rows = sqlite3_changes64(impl_->db);
     result.last_insert_id = sqlite3_last_insert_rowid(impl_->db);
     return result;
+}
+
+void SQLiteExecutor::begin_transaction() { (void)execute("BEGIN;"); }
+void SQLiteExecutor::commit_transaction() { (void)execute("COMMIT;"); }
+void SQLiteExecutor::rollback_transaction() { (void)execute("ROLLBACK;"); }
+
+void SQLiteExecutor::validate_savepoint_name(std::string_view name) {
+    if (name.empty()) throw std::invalid_argument("MetalORM: savepoint name cannot be empty");
+    for (const unsigned char c : name) {
+        if (!std::isalnum(c) && c != '_') {
+            throw std::invalid_argument("MetalORM: savepoint name must be a simple SQL identifier");
+        }
+    }
+}
+
+void SQLiteExecutor::savepoint(std::string_view name) {
+    validate_savepoint_name(name);
+    (void)execute("SAVEPOINT " + std::string(name) + ";");
+}
+
+void SQLiteExecutor::release_savepoint(std::string_view name) {
+    validate_savepoint_name(name);
+    (void)execute("RELEASE SAVEPOINT " + std::string(name) + ";");
+}
+
+void SQLiteExecutor::rollback_to_savepoint(std::string_view name) {
+    validate_savepoint_name(name);
+    (void)execute("ROLLBACK TO SAVEPOINT " + std::string(name) + ";");
 }
 
 } // namespace metal
