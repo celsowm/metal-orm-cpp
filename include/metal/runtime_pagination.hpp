@@ -3,6 +3,7 @@
 #include "metal/orm.hpp"
 #include "metal/query/pagination.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <stdexcept>
 #include <type_traits>
