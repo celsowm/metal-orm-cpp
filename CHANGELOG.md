@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.9 - 2026-08-08
+
+SQLite DML-parity release. SQLite remains the only executor/dialect intentionally.
+
+- Expand `InsertQueryBuilder` from single-row inserts to accumulated multi-row `VALUES` sources.
+- Add `INSERT ... SELECT` using the existing typed `BasicSelectQuery` AST as the source instead of embedding raw SQL.
+- Reject mixing `VALUES` and `SELECT` insert sources, matching the TypeScript builder state model.
+- Add `RETURNING` to INSERT, UPDATE and DELETE, including returned-column aliases.
+- Reuse the existing SQLite executor result-row path for DML `RETURNING`; no second execution API is introduced.
+- Replace the minimal conflict flag with `on_conflict(columns).do_nothing()` / `.do_update(...)` conflict state.
+- Require explicit SQLite conflict-target columns, matching the TypeScript SQLite dialect contract.
+- Add `excluded(column)` as a typed DML operand for `DO UPDATE SET target = excluded.target`.
+- Restrict `excluded()` compilation to the conflict-update branch so it cannot silently produce invalid normal INSERT/UPDATE SQL.
+- Add optional predicates to `DO UPDATE`, compiled after conflict-update assignments.
+- Keep Unit of Work and relation mutation on the same shared DML builders after the AST expansion.
+- Add an end-to-end in-memory SQLite suite covering multi-row RETURNING, INSERT SELECT, DO UPDATE, DO UPDATE WHERE, DO NOTHING, UPDATE RETURNING, DELETE RETURNING and invalid mixed-source/conflict configurations.
+
 ## 0.0.8 - 2026-08-08
 
 Polymorphic-relation parity release. SQLite remains the only executor/dialect intentionally.
