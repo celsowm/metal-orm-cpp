@@ -97,15 +97,20 @@ public:
             if (tracked->status == EntityStatus::Removed) tracked->status = EntityStatus::Managed;
             return;
         }
-        track<T>(entity, EntityStatus::New);
+
+        const Value pk = reflect::primary_key_value(*entity);
+        const bool is_new = std::holds_alternative<std::nullptr_t>(pk) ||
+            (reflect::primary_key_is_generated<T>() && is_empty_generated_value(pk));
+        track<T>(entity, is_new ? EntityStatus::New : EntityStatus::Managed);
     }
 
     template <reflect::Entity T>
     void remove(const std::shared_ptr<T>& entity) {
         static_assert(reflect::validate_mapping<T>());
         if (!entity) return;
-        if (!unit_of_work_.contains(entity.get())) track<T>(entity, EntityStatus::Managed);
-        if (auto* tracked = unit_of_work_.find(entity.get())) tracked->status = EntityStatus::Removed;
+        if (auto* tracked = unit_of_work_.find(entity.get())) {
+            tracked->status = EntityStatus::Removed;
+        }
     }
 
     void flush() {
@@ -414,8 +419,7 @@ private:
                     auto& values = root.[:relation:];
                     if constexpr (mapping::cascades_persist(Traits::cascade)) {
                         for (const auto& target : values._metal_added()) {
-                            if (target && is_empty_generated_value(reflect::primary_key_value(*target)) &&
-                                !unit_of_work_.contains(target.get())) {
+                            if (target && !unit_of_work_.contains(target.get())) {
                                 persist<Target>(target);
                             }
                         }
