@@ -32,6 +32,13 @@ public:
     bool operator==(const value_type& other) const noexcept { return current_ == other; }
     bool operator!=(const value_type& other) const noexcept { return current_ != other; }
 
+    // Assignment is reserved for ORM hydration. User mutations should call set()
+    // so the reference remains dirty until the Unit of Work accepts it.
+    relation_reference& operator=(value_type value) {
+        _metal_hydrate(std::move(value));
+        return *this;
+    }
+
     void set(value_type value) {
         if (value && attach_hook_) attach_hook_(*value);
         current_ = std::move(value);
