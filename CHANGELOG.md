@@ -2,6 +2,21 @@
 
 All releases currently target GCC 16+ C++26 static reflection and intentionally use SQLite as the only executor/dialect.
 
+## 0.0.18 - 2026-08-08
+
+SQLite schema introspection/diff/synchronization release.
+
+- Added dialect-independent `DatabaseSchema`/table/column/index/view metadata plus expected-schema and schema-plan models.
+- Added `introspect_sqlite()` with include/exclude table filters, optional views, ordered primary keys, column metadata/defaults, physical FK metadata/actions, user indexes and optional `schema_comments` comments.
+- Normalize SQLite primary-key nullability and detect AUTOINCREMENT from `sqlite_master` DDL so a schema created by MetalORM does not immediately self-diff because of PRAGMA reporting quirks.
+- Added reflection-derived `expected_schema<T...>()` and typed `add_expected_index<T, ^^members...>()` so expected index columns remain compile-time entity members instead of free-form column strings.
+- Kept ORM relation metadata separate from physical DDL FK declarations, matching the TypeScript separation between relations and column `references`.
+- Added `diff_schema()` with safe CREATE TABLE / ADD COLUMN / CREATE INDEX planning and destructive DROP TABLE / DROP INDEX gating.
+- Match the SQLite TypeScript dialect policy for unsupported structural changes: ALTER COLUMN and DROP COLUMN produce explicit rebuild warnings rather than fake SQL.
+- Added `execute_schema_plan()` and `synchronize_schema()` with `allow_destructive` and `dry_run` controls.
+- Added SQLite E2E coverage for introspection of PK/FK/index/view/comments, dry-run, safe synchronization, destructive gating, alter/drop-column warnings, and convergence of `expected -> synchronize -> introspect -> diff` to an empty plan.
+- Selected the existing TypeScript bulk subsystem as the next concrete parity target rather than inventing a migration-history framework that the reference does not expose as a distinct subsystem.
+
 ## 0.0.17 - 2026-08-08
 
 Dedicated single-reference parity release.
