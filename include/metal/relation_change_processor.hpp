@@ -306,7 +306,24 @@ private:
         using Traits = mapping::relation_annotation_traits<A>;
         constexpr auto type_field = Traits::type_field();
         constexpr auto id_field = Traits::id_field();
+        constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
+        using TypeField = reflect::member_type_t<type_field>;
+        using IdField = reflect::member_type_t<id_field>;
         auto& reference = root.[:Relation:];
+        const Value root_key = to_value(root.[:local_key:]);
+
+        if (auto target = reference._metal_added()) {
+            if (missing_relation_key<Root, local_key>(root_key)) {
+                throw std::runtime_error("MetalORM: cannot flush morph_one for a root without a persisted key");
+            }
+            if (!unit_of_work_.contains(target.get())) {
+                throw std::runtime_error(
+                    "MetalORM: attached morph_one target is not persisted; enable cascade persist or persist it explicitly");
+            }
+            (*target).[:id_field:] = from_value<IdField>(root_key);
+            (*target).[:type_field:] = from_value<TypeField>(
+                Value{std::string(Traits::type_value.view())});
+        }
 
         if (auto previous = reference._metal_removed()) {
             if constexpr (mapping::cascades_remove(Traits::cascade)) {
@@ -324,7 +341,26 @@ private:
         using Traits = mapping::relation_annotation_traits<A>;
         constexpr auto type_field = Traits::type_field();
         constexpr auto id_field = Traits::id_field();
+        constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
+        using TypeField = reflect::member_type_t<type_field>;
+        using IdField = reflect::member_type_t<id_field>;
         auto& values = root.[:Relation:];
+        const Value root_key = to_value(root.[:local_key:]);
+
+        if (missing_relation_key<Root, local_key>(root_key) &&
+            (!values._metal_added().empty() || !values._metal_removed().empty())) {
+            throw std::runtime_error("MetalORM: cannot flush morph_many for a root without a persisted key");
+        }
+
+        for (const auto& target : values._metal_added()) {
+            if (!unit_of_work_.contains(target.get())) {
+                throw std::runtime_error(
+                    "MetalORM: attached morph_many target is not persisted; enable cascade persist or persist it explicitly");
+            }
+            (*target).[:id_field:] = from_value<IdField>(root_key);
+            (*target).[:type_field:] = from_value<TypeField>(
+                Value{std::string(Traits::type_value.view())});
+        }
 
         for (const auto& target : values._metal_removed()) {
             if constexpr (mapping::cascades_remove(Traits::cascade)) {
