@@ -102,10 +102,8 @@ int main() {
         .compile(dialect);
 
     assert(subquery.sql ==
-        "SELECT \"t0\".\"id\" AS \"id\", \"t0\".\"name\" AS \"name\", "
-        "\"t0\".\"nickname\" AS \"nickname\" FROM \"q_users\" AS \"t0\" "
-        "WHERE \"t0\".\"id\" IN (SELECT \"t0\".\"user_id\" FROM \"q_posts\" AS \"t0\" "
-        "WHERE \"t0\".\"title\" LIKE ?);");
+        "SELECT \"id\", \"name\", \"nickname\" FROM \"q_users\" "
+        "WHERE \"id\" IN (SELECT \"user_id\" FROM \"q_posts\" WHERE \"title\" LIKE ?);");
     assert(subquery.params.size() == 1);
 
     auto empty_in = metal::select<QueryUser>()
