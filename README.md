@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.14`
+**Version:** `0.0.15`
 
 MetalORM C++ deliberately has no compatibility metadata layer and no C++20/23 fallback. The TypeScript `metal-orm` repository is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
 
@@ -49,8 +49,11 @@ There are no registration macros or duplicated `entity_traits<T>` declarations. 
 Session
   ├── IdentityMap
   ├── UnitOfWork
+  │     ├── table lifecycle hooks
   │     └── nested rollback checkpoints
-  └── RelationChangeProcessor
+  ├── RelationChangeProcessor
+  ├── Session interceptors
+  └── DomainEventBus
           │
           ▼
       shared DML AST
@@ -79,18 +82,87 @@ session.transaction([](metal::Session& tx) {
 
 The outer scope uses `BEGIN / COMMIT`. Nested scopes use `SAVEPOINT / RELEASE SAVEPOINT`. A nested failure executes `ROLLBACK TO SAVEPOINT` and marks the outer transaction rollback-only; catching the nested exception does not make the outer transaction committable.
 
-Unlike a SQL-only wrapper, the C++ runtime checkpoints ORM state at every transaction/savepoint boundary. Rollback restores:
-
-- reflected scalar values;
-- dirty-check `original` snapshots and entity status;
-- tracked entities removed during a failed DELETE;
-- generated primary keys assigned by rolled-back INSERTs;
-- Identity Map membership;
-- reflected relation wrapper state, including collection baselines and pending pivot/morph changes.
-
-A successful inner savepoint does not destroy the outer checkpoint. Therefore a later outer rollback can still undo an inner INSERT and restore relation state even after the inner scope was successfully flushed and released.
+Unlike a SQL-only wrapper, the C++ runtime checkpoints ORM state at every transaction/savepoint boundary. Rollback restores reflected scalar values, dirty snapshots/status, generated IDs, Identity Map membership, deleted tracking and relation wrapper state. A successful inner savepoint does not destroy the outer checkpoint, so an outer rollback can still undo inner work.
 
 `Session::commit()` uses the same checkpoint mechanism. If database commit fails, ORM state is restored instead of leaving a generated ID or dirty snapshot falsely marked as committed.
+
+## Lifecycle hooks, interceptors and events — 0.0.15
+
+Table hooks are typed by entity:
+
+```cpp
+metal::TableHooks<User> hooks;
+
+hooks.before_insert = [](metal::Session&, User& user) {
+    user.name = normalize(user.name);
+};
+
+hooks.after_insert = [](metal::Session&, User& user) {
+    user.domain_events.raise(UserCreated{user.id});
+};
+
+session.register_table_hooks<User>(std::move(hooks));
+```
+
+The lifecycle matches the TypeScript Unit of Work:
+
+```text
+INSERT: beforeInsert -> INSERT/generated id -> snapshot/identity -> afterInsert
+UPDATE: dirty diff -> beforeUpdate -> UPDATE -> refreshed snapshot -> afterUpdate
+DELETE: beforeDelete -> DELETE/remove tracking -> afterDelete
+```
+
+The C++ registration surface is deliberately type-safe and Session-bound. TypeScript stores the same lifecycle callbacks on `TableDef`; this binding-scope difference is documented rather than hidden as fake 1:1 API syntax.
+
+Session-wide flush interceptors remain a separate concept:
+
+```cpp
+session.register_interceptor({
+    .before_flush = [](metal::Session&) {},
+    .after_flush = [](metal::Session&) {}
+});
+```
+
+They surround the complete commit/transaction flush pipeline. Raw `session.flush()` remains UoW-only, so table hooks run there but Session interceptors, relation processing and domain-event dispatch do not.
+
+Domain events are typed C++ values rather than string-discriminated public payloads:
+
+```cpp
+struct UserCreated {
+    std::int64_t id{};
+};
+
+struct UserRenamed {
+    std::int64_t id{};
+    std::string name;
+};
+
+using UserEvents = metal::domain_event_queue<UserCreated, UserRenamed>;
+
+struct [[=metal::mapping::table{"users"}]] User {
+    [[=metal::mapping::primary_key, =metal::mapping::generated]]
+    std::int64_t id{};
+    std::string name;
+
+    [[=metal::mapping::ignore]]
+    UserEvents domain_events;
+};
+```
+
+Raise and handle them with compile-time event types:
+
+```cpp
+user.domain_events.raise(UserCreated{user.id});
+
+session.register_domain_event_handler<UserCreated>(
+    [](const UserCreated& event, metal::Session& committed) {
+        // the outermost database COMMIT is already successful here
+    });
+```
+
+Event queues participate in transaction checkpoints. An event raised inside a failed transaction/savepoint disappears with that rollback rather than leaking into a later commit. Nested `RELEASE SAVEPOINT` never dispatches. Events dispatch only after successful outermost COMMIT.
+
+If a handler itself throws, the error is a **post-commit** failure: it propagates, but MetalORM does not issue a fake rollback for database work that is already committed. Matching the TypeScript bus, the queue is cleared only after all handlers complete, so a failing handler leaves it available for caller-defined recovery or retry policy.
 
 ## Relation collections
 
@@ -137,17 +209,7 @@ auto query = metal::select<User>()
 
 `Post` fields do not satisfy the query constraints until a reflected join introduces `Post` into the typed query scope.
 
-The SELECT AST includes:
-
-- reflected INNER/LEFT joins, including N:N pivot expansion;
-- predicates, NULL/LIKE/IN/BETWEEN and subqueries;
-- aggregates, GROUP BY and HAVING;
-- CTEs and recursive CTEs;
-- UNION / UNION ALL / INTERSECT / EXCEPT;
-- window functions;
-- derived tables / `from_subquery`;
-- searched CASE;
-- recursive typed SQL function expressions.
+The SELECT AST includes reflected joins, predicates/subqueries, aggregates/GROUP BY/HAVING, CTEs/recursive CTEs, set operations, window functions, derived tables, searched CASE and recursive typed SQL function expressions.
 
 ## Computed expressions
 
@@ -202,7 +264,7 @@ auto admins = metal::where_relation<^^User::roles>(
 
 `belongs_to`, `has_one`, `has_many`, N:N, `morph_one`, and `morph_many` correlations derive their keys from relation metadata. `morph_to` is rejected for `where_has` because one relation can resolve to different physical target tables, matching the TypeScript restriction.
 
-0.0.13 moved relation correlation into the SELECT compiler's `WHERE` position. Callback-local `ORDER BY / LIMIT / OFFSET` therefore runs after correlation, while root relation predicates run before root pagination. Nested correlated scopes use internal aliases such as `t0`, `t0_rel`, `t0_rel_rel`, preventing child subqueries from shadowing outer aliases.
+0.0.13 moved relation correlation into the SELECT compiler's `WHERE` position. Callback-local `ORDER BY / LIMIT / OFFSET` runs after correlation, while root relation predicates run before root pagination. Nested correlated scopes use internal aliases such as `t0`, `t0_rel`, `t0_rel_rel`, preventing child subqueries from shadowing outer aliases.
 
 `match_relation<^^Relation>(...)` shares the same typed correlation engine. TypeScript renders `match()` as INNER JOIN + DISTINCT; C++ uses EXISTS to keep relation correlation in one implementation while preserving root-filtering behavior.
 
