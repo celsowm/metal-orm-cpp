@@ -29,7 +29,7 @@ SQLite is intentionally the only backend while semantic parity is being built.
 | belongsTo | ✅ | Reflected metadata + eager load |
 | hasOne | ✅ | Reflected metadata + eager load |
 | hasMany | ✅/🟡 | Dedicated collection, lazy/eager load and mutation; broader edge-case parity still evolving |
-| belongsToMany | ✅/🟡 | Dedicated collection, lazy/eager load, IDs, sync and typed pivots |
+| belongsToMany | ✅ | Dedicated collection, lazy/eager load, IDs, sync, partial typed pivots and alternate `targetKey` behavior |
 | morphTo | ❌ | Next major relation family |
 | morphOne | ❌ | Next major relation family |
 | morphMany | ❌ | Next major relation family |
@@ -61,15 +61,19 @@ Implemented:
 - `detach(id)`
 - `sync_by_ids()`
 - typed pivot hydration
-- typed pivot INSERT
-- pivot UPDATE when an existing target is reattached with new pivot data
-- Identity Map integration when the relation target key is the primary key
+- typed partial `pivot_patch<Pivot>` INSERT/UPDATE semantics
+- compile-time pivot member ownership and patch-value compatibility
+- relation-FK filtering from pivot DML payloads
+- alternate non-primary `targetKey` for attach/detach/sync/pivot DML/cascade
+- normal primary-key Identity Map integration after hydrated targets are materialized
 
-Remaining collection parity:
+`pivot_patch<Pivot>` is the C++ adaptation of TypeScript `Partial<TPivot>`: only explicitly reflected members become DML assignments, and repeated patches merge without resetting omitted fields.
 
-1. partial pivot patch semantics equivalent to TS `Partial<TPivot>`;
-2. complete alternate non-primary `targetKey` identity/cascade behavior;
-3. JSON/runtime conveniences that are specific to the JS object model need an explicit C++ adaptation decision.
+### `targetKey` consistency note
+
+The TypeScript schema and `DefaultManyToManyCollection` explicitly use `relation.targetKey` for ID-based relation identity. The current TypeScript `RelationChangeProcessor`, however, still resolves the target table primary key during N:N flush. The C++ port follows the declared relation contract end-to-end: when a custom `targetKey` is configured, that reflected member is used consistently by collection identity, pivot DML and cascade removal.
+
+Remaining collection adaptation work is limited to JS-object-model conveniences such as `toJSON()`; these require an explicit C++ serialization design rather than literal API copying.
 
 ## Query builder
 
@@ -117,10 +121,9 @@ Remaining collection parity:
 
 The next releases should close reference gaps rather than add unrelated capabilities:
 
-1. **0.0.7:** partial typed pivot patches + alternate `targetKey` relation identity edge cases.
-2. **0.0.8:** `morphTo` / `morphOne` / `morphMany`.
-3. **0.0.9:** richer DML parity (`RETURNING`, multi-row insert, insert-select, SQLite conflict API).
-4. **0.0.10:** CTEs, set operations, EXISTS/BETWEEN and window functions.
-5. Then: saveGraph/runtime hooks/events/transactions and the remaining ecosystem modules.
+1. **0.0.8:** `morphTo` / `morphOne` / `morphMany`.
+2. **0.0.9:** richer DML parity (`RETURNING`, multi-row insert, insert-select, SQLite conflict API).
+3. **0.0.10:** CTEs, set operations, EXISTS/BETWEEN and window functions.
+4. Then: saveGraph/runtime hooks/events/transactions and the remaining ecosystem modules.
 
 This ordering may change when comparison with the TypeScript reference exposes a more fundamental dependency.
