@@ -70,7 +70,9 @@ public:
                         for (const auto& target : values._metal_added()) {
                             if (target && !unit_of_work_.contains(target.get())) persist(target);
                         }
-                    } else if constexpr (Traits::kind == mapping::relation_kind::morph_one) {
+                    } else if constexpr (Traits::kind == mapping::relation_kind::belongs_to ||
+                                         Traits::kind == mapping::relation_kind::has_one ||
+                                         Traits::kind == mapping::relation_kind::morph_one) {
                         if (auto target = values._metal_added();
                             target && !unit_of_work_.contains(target.get())) {
                             persist(target);
@@ -94,7 +96,11 @@ public:
             if constexpr (reflect::has_relation_annotation<relation>()) {
                 using A = reflect::relation_annotation_t<relation>;
                 using Traits = mapping::relation_annotation_traits<A>;
-                if constexpr (Traits::kind == mapping::relation_kind::has_many) {
+                if constexpr (Traits::kind == mapping::relation_kind::belongs_to) {
+                    flush_belongs_to<Root, relation>(root);
+                } else if constexpr (Traits::kind == mapping::relation_kind::has_one) {
+                    flush_has_one<Root, relation>(root, remove);
+                } else if constexpr (Traits::kind == mapping::relation_kind::has_many) {
                     flush_has_many<Root, relation>(root, remove);
                 } else if constexpr (Traits::kind == mapping::relation_kind::many_to_many) {
                     flush_many_to_many<Root, relation>(root, remove);
@@ -115,7 +121,9 @@ public:
             if constexpr (reflect::has_relation_annotation<relation>()) {
                 using A = reflect::relation_annotation_t<relation>;
                 using Traits = mapping::relation_annotation_traits<A>;
-                if constexpr (Traits::kind == mapping::relation_kind::has_many ||
+                if constexpr (Traits::kind == mapping::relation_kind::belongs_to ||
+                              Traits::kind == mapping::relation_kind::has_one ||
+                              Traits::kind == mapping::relation_kind::has_many ||
                               Traits::kind == mapping::relation_kind::many_to_many ||
                               Traits::kind == mapping::relation_kind::morph_one ||
                               Traits::kind == mapping::relation_kind::morph_many ||
@@ -161,7 +169,88 @@ private:
         } else {
             throw std::runtime_error(
                 "MetalORM: detaching " + std::string(relation_name) +
-                " requires nullable morph id/type fields or cascade remove");
+                " requires nullable relation fields or cascade remove");
+        }
+    }
+
+    template <reflect::Entity Root, std::meta::info Relation>
+    void flush_belongs_to(Root& root) {
+        using A = reflect::relation_annotation_t<Relation>;
+        using Traits = mapping::relation_annotation_traits<A>;
+        using Target = reflect::single_target_t<reflect::member_type_t<Relation>>;
+        constexpr auto foreign_key = Traits::foreign_key();
+        constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
+        using ForeignKey = reflect::member_type_t<foreign_key>;
+
+        auto& reference = root.[:Relation:];
+        if (!reference.dirty()) return;
+
+        if (auto target = reference._metal_added()) {
+            const Value key = to_value((*target).[:target_key:]);
+            if (missing_relation_key<Target, target_key>(key)) {
+                throw std::runtime_error(
+                    "MetalORM: belongs_to target does not have a persisted relation key");
+            }
+            root.[:foreign_key:] = from_value<ForeignKey>(key);
+            return;
+        }
+
+        if (reference._metal_removed()) {
+            clear_nullable_member<foreign_key>(root, "belongs_to");
+        }
+    }
+
+    template <reflect::Entity Root, std::meta::info Relation, typename RemoveFn>
+    void flush_has_one(Root& root, RemoveFn&& remove) {
+        using A = reflect::relation_annotation_t<Relation>;
+        using Traits = mapping::relation_annotation_traits<A>;
+        using Target = reflect::single_target_t<reflect::member_type_t<Relation>>;
+        constexpr auto target_fk = Traits::target_foreign_key();
+        constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
+        constexpr auto target_pk = reflect::primary_key_member<Target>();
+        using ForeignKey = reflect::member_type_t<target_fk>;
+
+        auto& reference = root.[:Relation:];
+        if (!reference.dirty()) return;
+        const Value root_key = to_value(root.[:local_key:]);
+
+        if (auto target = reference._metal_added()) {
+            if (missing_relation_key<Root, local_key>(root_key)) {
+                throw std::runtime_error("MetalORM: cannot flush has_one for a root without a persisted key");
+            }
+            if (!unit_of_work_.contains(target.get())) {
+                throw std::runtime_error(
+                    "MetalORM: attached has_one target is not persisted; enable cascade persist or persist it explicitly");
+            }
+            const Value target_key = to_value((*target).[:target_pk:]);
+            if (missing_relation_key<Target, target_pk>(target_key)) {
+                throw std::runtime_error("MetalORM: attached has_one target does not have a persisted primary key");
+            }
+            (*target).[:target_fk:] = from_value<ForeignKey>(root_key);
+            const auto compiled = UpdateQueryBuilder{reflect::table_name<Target>()}
+                .set({DmlAssignment{reflect::column_name<target_fk>(), root_key}})
+                .where_eq(reflect::column_name<target_pk>(), target_key)
+                .compile(dialect_);
+            executor_.execute(compiled.sql, compiled.params);
+            unit_of_work_.refresh_snapshot(target.get());
+        }
+
+        if (auto previous = reference._metal_removed()) {
+            if constexpr (mapping::cascades_remove(Traits::cascade)) {
+                remove(previous);
+            } else if constexpr (is_optional_v<ForeignKey>) {
+                const Value target_key = to_value((*previous).[:target_pk:]);
+                (*previous).[:target_fk:] = std::nullopt;
+                const auto compiled = UpdateQueryBuilder{reflect::table_name<Target>()}
+                    .set({DmlAssignment{reflect::column_name<target_fk>(), Value{nullptr}}})
+                    .where_eq(reflect::column_name<target_pk>(), target_key)
+                    .compile(dialect_);
+                executor_.execute(compiled.sql, compiled.params);
+                unit_of_work_.refresh_snapshot(previous.get());
+            } else {
+                throw std::runtime_error(
+                    "MetalORM: detaching from a non-nullable has_one requires cascade remove");
+            }
         }
     }
 
