@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace metal {
 
@@ -18,8 +19,6 @@ public:
     RelationChangeProcessor(UnitOfWork& unit_of_work, DbExecutor& executor, const Dialect& dialect)
         : unit_of_work_(unit_of_work), executor_(executor), dialect_(dialect) {}
 
-    // Cascaded persist must happen before the first UoW flush so generated
-    // keys exist before relation DML is compiled.
     void prepare() {
         std::unordered_set<void*> prepared;
         while (prepared.size() < unit_of_work_.keys().size()) {
@@ -37,8 +36,6 @@ public:
         }
     }
 
-    // Mirrors MetalORM TS flush order: entity UoW first, relation changes,
-    // then another UoW flush for removals/updates scheduled by relations.
     void process() {
         for (void* key : unit_of_work_.keys()) {
             auto* tracked = unit_of_work_.find(key);
@@ -64,9 +61,7 @@ public:
                     auto& values = root.[:relation:];
                     if constexpr (mapping::cascades_persist(Traits::cascade)) {
                         for (const auto& target : values._metal_added()) {
-                            if (target && !unit_of_work_.contains(target.get())) {
-                                persist(target);
-                            }
+                            if (target && !unit_of_work_.contains(target.get())) persist(target);
                         }
                     }
                 }
@@ -106,11 +101,25 @@ public:
     void reset() {}
 
 private:
+    template <reflect::Mapped Pivot, std::meta::info RootFk, std::meta::info TargetFk>
+    static std::vector<DmlAssignment> pivot_payload(const Pivot& pivot) {
+        std::vector<DmlAssignment> assignments;
+        reflect::for_each_column<Pivot>([&]<std::meta::info Member>() {
+            if constexpr (Member != RootFk && Member != TargetFk) {
+                assignments.push_back({
+                    reflect::column_name<Member>(),
+                    to_value(pivot.[:Member:])
+                });
+            }
+        });
+        return assignments;
+    }
+
     template <reflect::Entity Root, std::meta::info Relation, typename RemoveFn>
     void flush_has_many(Root& root, RemoveFn&& remove) {
         using A = reflect::relation_annotation_t<Relation>;
         using Traits = mapping::relation_annotation_traits<A>;
-        using Target = reflect::many_target_t<reflect::member_type_t<Relation>>;
+        using Target = reflect::has_many_target_t<reflect::member_type_t<Relation>>;
         constexpr auto target_fk = Traits::target_foreign_key();
         constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
         constexpr auto target_pk = reflect::primary_key_member<Target>();
@@ -161,8 +170,9 @@ private:
     void flush_many_to_many(Root& root, RemoveFn&& remove) {
         using A = reflect::relation_annotation_t<Relation>;
         using Traits = mapping::relation_annotation_traits<A>;
-        using Target = reflect::many_target_t<reflect::member_type_t<Relation>>;
-        using Pivot = [: Traits::pivot() :];
+        using Collection = reflect::member_type_t<Relation>;
+        using Target = reflect::many_to_many_target_t<Collection>;
+        using Pivot = reflect::many_to_many_pivot_t<Collection>;
         constexpr auto pivot_root_fk = Traits::pivot_root_foreign_key();
         constexpr auto pivot_target_fk = Traits::pivot_target_foreign_key();
         constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
@@ -181,12 +191,36 @@ private:
                 throw std::runtime_error(
                     "MetalORM: attached many_to_many target is not persisted; enable cascade persist or persist it explicitly");
             }
+
+            std::vector<DmlAssignment> assignments{
+                {reflect::column_name<pivot_root_fk>(), root_key},
+                {reflect::column_name<pivot_target_fk>(), target_key}
+            };
+            if (const auto* pivot = values._metal_pivot(target)) {
+                auto extra = pivot_payload<Pivot, pivot_root_fk, pivot_target_fk>(*pivot);
+                assignments.insert(assignments.end(), extra.begin(), extra.end());
+            }
+
             const auto compiled = InsertQueryBuilder{reflect::table_name<Pivot>()}
-                .values({
-                    DmlAssignment{reflect::column_name<pivot_root_fk>(), root_key},
-                    DmlAssignment{reflect::column_name<pivot_target_fk>(), target_key}
-                })
+                .values(std::move(assignments))
                 .on_conflict_do_nothing()
+                .compile(dialect_);
+            executor_.execute(compiled.sql, compiled.params);
+        }
+
+        for (const auto& target : values._metal_pivot_updates()) {
+            const auto* pivot = values._metal_pivot(target);
+            if (!pivot) continue;
+            auto assignments = pivot_payload<Pivot, pivot_root_fk, pivot_target_fk>(*pivot);
+            if (assignments.empty()) continue;
+
+            const Value target_key = to_value((*target).[:target_key_member:]);
+            const auto compiled = UpdateQueryBuilder{reflect::table_name<Pivot>()}
+                .set(std::move(assignments))
+                .where({
+                    DmlPredicate{reflect::column_name<pivot_root_fk>(), CompareOp::Eq, root_key},
+                    DmlPredicate{reflect::column_name<pivot_target_fk>(), CompareOp::Eq, target_key}
+                })
                 .compile(dialect_);
             executor_.execute(compiled.sql, compiled.params);
         }
@@ -201,9 +235,7 @@ private:
                 .compile(dialect_);
             executor_.execute(compiled.sql, compiled.params);
 
-            if constexpr (mapping::cascades_remove(Traits::cascade)) {
-                remove(target);
-            }
+            if constexpr (mapping::cascades_remove(Traits::cascade)) remove(target);
         }
     }
 
