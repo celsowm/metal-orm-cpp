@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.0.4 - 2026-08-08
+
+Typed SQL AST release. SQLite remains the only executor/dialect intentionally.
+
+- Replace the value-only predicate representation with a real SQL expression AST.
+- Track query scope in the C++ query type, so fields from joined entities become valid only after their reflected relation is joined.
+- Add reflected `INNER JOIN` and `LEFT JOIN` generation for `belongs_to`, `has_one`, `has_many`, and `many_to_many` relations.
+- Generate N:N pivot joins from reflected pivot/table/key metadata with no string relation configuration.
+- Add field-to-field comparisons with compile-time compatible-type checking.
+- Add `IN` / `NOT IN` for typed ranges, including empty-range semantics.
+- Add `IS NULL`, `IS NOT NULL`, `LIKE`, and `NOT LIKE` predicates.
+- Add typed projections and projection aliases.
+- Add `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, and `COUNT(*)` aggregate terms.
+- Add `GROUP BY` and aggregate-aware `HAVING`.
+- Add scalar `IN (subquery)` / `NOT IN (subquery)` with exactly-one-projection validation.
+- Add multiple `ORDER BY` terms, `DISTINCT`, `LIMIT`, and `OFFSET` support in the AST.
+- Qualify columns only when joins require aliases, keeping simple SQLite queries compact.
+- Add a dedicated typed-query test executable covering joins, N:N pivots, aggregates, grouping, nulls, LIKE, IN, subqueries and compile-time query-scope constraints.
+
 ## 0.0.3 - 2026-08-08
 
 Mutable reflected relation collections. SQLite remains the only executor/dialect intentionally.
