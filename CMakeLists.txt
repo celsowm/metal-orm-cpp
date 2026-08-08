@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(metal-orm VERSION 0.0.8 LANGUAGES CXX)
+project(metal-orm VERSION 0.0.9 LANGUAGES CXX)
 
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    message(FATAL_ERROR "MetalORM 0.0.8 is intentionally C++26-native and currently requires GCC 16+ reflection support")
+    message(FATAL_ERROR "MetalORM 0.0.9 is intentionally C++26-native and currently requires GCC 16+ reflection support")
 endif()
 
 if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
-    message(FATAL_ERROR "MetalORM 0.0.8 requires GCC 16 or newer")
+    message(FATAL_ERROR "MetalORM 0.0.9 requires GCC 16 or newer")
 endif()
 
 find_package(SQLite3 REQUIRED)
@@ -115,4 +115,8 @@ if(METAL_ORM_BUILD_TESTS)
     add_executable(metal-orm-morph-parity-tests tests/test_morph_parity.cpp)
     target_link_libraries(metal-orm-morph-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-morph-parity-tests COMMAND metal-orm-morph-parity-tests)
+
+    add_executable(metal-orm-dml-parity-tests tests/test_dml_parity.cpp)
+    target_link_libraries(metal-orm-dml-parity-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-dml-parity-tests COMMAND metal-orm-dml-parity-tests)
 endif()
