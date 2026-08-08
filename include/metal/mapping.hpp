@@ -47,7 +47,7 @@ inline constexpr generated_t generated{};
 inline constexpr ignore_t ignore{};
 
 enum class relation_kind { belongs_to, has_one, has_many, many_to_many };
-enum class cascade_mode { none, persist, remove, all };
+enum class cascade_mode { none, all, persist, remove, link };
 
 constexpr bool cascades_persist(cascade_mode mode) noexcept {
     return mode == cascade_mode::persist || mode == cascade_mode::all;
@@ -55,6 +55,10 @@ constexpr bool cascades_persist(cascade_mode mode) noexcept {
 
 constexpr bool cascades_remove(cascade_mode mode) noexcept {
     return mode == cascade_mode::remove || mode == cascade_mode::all;
+}
+
+constexpr bool links_only(cascade_mode mode) noexcept {
+    return mode == cascade_mode::link;
 }
 
 // Reflections are the relation metadata. Optional keys default to the PK.
