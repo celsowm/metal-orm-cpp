@@ -343,24 +343,26 @@ public:
     }
 
     CompiledQuery compile(const Dialect& dialect) const {
-        return compile_impl(dialect, true, {});
+        return compile_impl(dialect, true, {}, {});
     }
 
     CompiledQuery compile_subquery(const Dialect& dialect) const {
-        return compile_impl(dialect, false, {});
+        return compile_impl(dialect, false, {}, {});
     }
 
     CompiledQuery compile_subquery_with_extra_where(
         const Dialect& dialect,
-        ExtraWhereCompiler extra_where) const {
-        return compile_impl(dialect, false, std::move(extra_where));
+        ExtraWhereCompiler extra_where,
+        std::string root_alias_override = {}) const {
+        return compile_impl(
+            dialect, false, std::move(extra_where), root_alias_override);
     }
 
     CompiledQuery compile_scalar_subquery(const Dialect& dialect) const {
         if (projection_arity() != 1) {
             throw std::logic_error("MetalORM: scalar subquery must project exactly one expression");
         }
-        return compile_impl(dialect, false, {});
+        return compile_impl(dialect, false, {}, {});
     }
 
 private:
@@ -455,7 +457,8 @@ private:
             const auto& derived = *state_->derived_source;
             auto source = derived.compile_query(dialect);
             out.params.insert(out.params.end(), source.params.begin(), source.params.end());
-            return "(" + source.sql + ") AS " + dialect.quote_identifier(derived.alias);
+            const std::string alias = root_alias.empty() ? derived.alias : std::string(root_alias);
+            return "(" + source.sql + ") AS " + dialect.quote_identifier(alias);
         }
 
         std::string sql = dialect.quote_identifier(
@@ -467,7 +470,8 @@ private:
     CompiledQuery compile_impl(
         const Dialect& dialect,
         bool terminate,
-        const ExtraWhereCompiler& extra_where) const {
+        const ExtraWhereCompiler& extra_where,
+        std::string_view root_alias_override) const {
         CompiledQuery out;
 
         if (!state_->ctes.empty()) {
@@ -495,9 +499,11 @@ private:
 
         const bool has_joins = !state_->joins.empty() || !state_->cte_joins.empty();
         const bool needs_root_alias = has_joins || static_cast<bool>(extra_where);
-        const std::string root_alias = state_->derived_source
-            ? state_->derived_source->alias
-            : (needs_root_alias ? "t0" : "");
+        const std::string root_alias = !root_alias_override.empty()
+            ? std::string(root_alias_override)
+            : (state_->derived_source
+                ? state_->derived_source->alias
+                : (needs_root_alias ? "t0" : ""));
 
         CompileContext ctx{dialect, {}, out.params};
         ctx.aliases.emplace(std::type_index(typeid(Root)), root_alias);
@@ -511,12 +517,12 @@ private:
                 throw std::logic_error("MetalORM: join owner was not introduced before its relation");
             }
             const std::string owner_alias = owner_it->second;
-            const std::string target_alias = "t" + std::to_string(entity_alias++);
+            const std::string target_alias = root_alias + "_j" + std::to_string(entity_alias++);
             ctx.aliases.emplace(join.target_type, target_alias);
             const std::string keyword = join.kind == JoinKind::Left ? " LEFT JOIN " : " INNER JOIN ";
 
             if (join.relation_kind == mapping::relation_kind::many_to_many) {
-                const std::string pivot_alias_name = "p" + std::to_string(pivot_alias++);
+                const std::string pivot_alias_name = root_alias + "_p" + std::to_string(pivot_alias++);
                 join_sql.push_back(
                     keyword + dialect.quote_identifier(*join.pivot_table) + " AS " +
                     dialect.quote_identifier(pivot_alias_name) + " ON " +
