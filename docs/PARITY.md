@@ -24,9 +24,10 @@ Legend:
 | Dirty snapshots | ✅ | Reflection-generated |
 | Persist/remove lifecycle | ✅ | Aligned with TS semantics |
 | Nested transactions/savepoints | ❌ | Next runtime family |
-| Interceptors/hooks | ❌ | Next runtime family |
-| Domain events | ❌ | Next runtime family |
-| saveGraph/updateGraph/patchGraph | ❌ | Next runtime family |
+| rollback-safe in-memory UoW state | ❌ | Next runtime family |
+| Interceptors/hooks | ❌ | Follows transactions |
+| Domain events | ❌ | Follows interceptors/hooks |
+| saveGraph/updateGraph/patchGraph | ❌ | Later runtime family |
 
 ## Relations
 
@@ -89,14 +90,14 @@ The discriminator set and target-key compatibility are `consteval` validated. `M
 | RETURNING | ✅ | INSERT/UPDATE/DELETE |
 | SQLite UPSERT | ✅ | conflict target, DO NOTHING/UPDATE, `excluded()` |
 
-## Relation-query parity — 0.0.12
+## Relation-query parity — 0.0.13
 
 | Capability | Status | Notes |
 | --- | --- | --- |
-| whereHas | ✅/🟡 | reflected correlated EXISTS; normal child filtering/joins supported |
-| whereHasNot | ✅/🟡 | reflected NOT EXISTS |
+| whereHas | ✅ | reflected correlated EXISTS injected before child/root pagination |
+| whereHasNot | ✅ | reflected NOT EXISTS with the same correlation pipeline |
 | relation conditions | ✅ | `where_relation<^^Relation>(..., targetPredicate)` |
-| relation match | ✅/🟡 | same root-filtering behavior through the shared EXISTS correlation engine |
+| relation match | ✅ behavioral | shared correlation engine; SQL shape intentionally differs from TS `INNER JOIN + DISTINCT` |
 | N:N relation predicates | ✅ | reflected pivot and target keys |
 | MorphOne/MorphMany relation predicates | ✅ | reflected id/type correlation |
 | MorphTo whereHas | intentionally unsupported | same physical-target ambiguity as TS |
@@ -119,22 +120,28 @@ auto admins = metal::where_relation<^^User::roles>(
     metal::field<^^Role::name> == "admin");
 ```
 
-Relations can be filtered repeatedly by composing the free helpers.
+0.0.13 moves correlation into the SELECT `WHERE` compilation point instead of wrapping an already-compiled child query. Therefore callback-local `ORDER BY / LIMIT / OFFSET` runs **after** correlation, matching the TypeScript `applyRelationCorrelation()` ordering. A relation filter attached to a root query that already contains `LIMIT/OFFSET` is likewise applied before those clauses.
 
-**Remaining relation-query edge:** callback-local `LIMIT/OFFSET` is not claimed as complete parity yet. The current C++ correlation engine wraps the configured child query, so ordinary child predicates/joins are correct but pagination inside the child callback can differ from the TS correlation-before-pagination order. This is deliberately marked rather than hidden.
+Nested relation scopes use generated alias namespaces (`t0`, `t0_rel`, `t0_rel_rel`, ...) so inner subqueries cannot shadow an outer correlation alias. Outside correlated scopes the stable historic SQL aliases (`t0`, `t1`, `p0`) are preserved.
 
-`match_relation` uses the same correlation engine. TypeScript currently renders `match()` as `INNER JOIN + DISTINCT`; C++ renders EXISTS because keeping one reflected correlation compiler avoids two semantically overlapping implementations. Observable root filtering is equivalent for the supported predicates, but SQL shape parity is not claimed.
+For N:N correlation, the child target receives an `EXISTS` over the reflected pivot table. This keeps relation-key metadata in one correlation engine without injecting an unrelated JOIN into the child callback query.
 
-## Pagination parity — 0.0.12
+`match_relation` uses the same correlation engine. TypeScript currently renders `match()` as `INNER JOIN + DISTINCT`; C++ renders EXISTS because keeping one reflected correlation compiler avoids two semantically overlapping implementations. Root-filtering behavior is equivalent for the supported predicates; byte-for-byte SQL-shape parity is not a project requirement.
+
+## Pagination parity — 0.0.13
 
 ### Offset pagination
 
 Two execution levels mirror the TypeScript architecture:
 
-- `execute_paged(query, executor, dialect, options)` returns raw `Row` results and counts rows;
-- `execute_paged(query, session, options)` returns tracked root entities and counts `DISTINCT` reflected root primary keys.
+- `execute_paged(query, executor, dialect, options)` returns raw `Row` results and counts physical result rows;
+- `execute_paged(query, session, options)` returns tracked unique root entities.
 
-The Session overload refuses partial root projections rather than creating incomplete managed entities. Hydrated pages reuse the Identity Map.
+Pagination helpers first remove any previous query `LIMIT/OFFSET`, because `executePaged` owns the requested page just as the TypeScript builder overwrites those clauses.
+
+The Session overload is root-aware even for an explicit 1:N/N:N JOIN that physically multiplies rows: it deduplicates by the reflected root PK while preserving the query result order, counts unique roots, then slices the requested page. It refuses partial root projections rather than creating incomplete managed entities, and hydrated pages reuse the Identity Map.
+
+The current implementation chooses semantic correctness over a premature SQL-only optimization: tracked root pagination materializes the unpaged matching row stream before deduplication. This is a performance optimization opportunity, not a behavioral parity gap.
 
 ### Cursor pagination
 
@@ -142,17 +149,19 @@ Implemented:
 
 - `first` / `after` forward pagination;
 - `last` / `before` backward pagination;
+- mode-driven keyset direction (`first` => after semantics, `last` => before semantics), matching TS even for unusual `first + before` / `last + after` combinations;
 - `limit + 1` next/previous-page detection;
 - reflected `cursor_order(field<^^T::member>, direction)` terms;
 - lexicographic multi-column keyset predicates;
 - ASC/DESC-aware break operators;
 - non-null cursor keys;
 - order signature validation so cursors cannot be reused with a different ordering;
-- Session overload returning Identity-Map-managed entities.
+- Session overload returning Identity-Map-managed entities;
+- root-PK deduplication for row-multiplying explicit joins before page-size/has-extra evaluation.
 
 Cursor payloads are opaque. The C++ encoder preserves the same semantic payload — version, ordered values and ordering signature — but does not promise TypeScript/C++ wire-format interchange.
 
-**Remaining pagination edge:** the Session count is distinct-root aware, but an explicitly joined query that physically duplicates root rows can still require root-aware page extraction as well as root-aware counting. Session `.include()` remains batch-loaded and does not create that duplication. This explicit-join edge is tracked for the next pagination hardening pass.
+As with tracked offset pagination, the root-deduplicating cursor path may inspect more candidate rows than an eventual optimized SQL plan. The observable pagination semantics are closed; SQL-plan optimization can evolve independently.
 
 ## Query architecture
 
@@ -171,7 +180,7 @@ query.hpp
   └── pagination.hpp
 ```
 
-Session-specific tracked pagination is isolated in `runtime_pagination.hpp` rather than growing the SELECT builder into a runtime monolith.
+`select.hpp` exposes an internal extra-predicate compilation hook used by relation correlation and `without_pagination()` snapshots used by execution helpers. Session-specific tracked pagination remains isolated in `runtime_pagination.hpp` rather than growing the SELECT builder into a runtime monolith.
 
 ## Schema/tooling/ecosystem
 
@@ -192,12 +201,11 @@ Session-specific tracked pagination is isolated in `runtime_pagination.hpp` rath
 
 ## Ordered parity roadmap
 
-The next releases should close reference gaps rather than add unrelated capabilities:
+The two semantic edges tracked after 0.0.12 are closed in 0.0.13. The next releases should return to runtime parity:
 
-1. Harden the two explicit 0.0.12 edges: callback-local relation pagination and distinct-root page extraction for explicit row-multiplying joins.
-2. Port nested transactions/savepoints and rollback-safe in-memory Unit of Work state.
-3. Port interceptors/hooks and domain events.
-4. Port saveGraph/updateGraph/patchGraph.
-5. Then move into schema/tooling/ecosystem modules: introspection/diff, bulk operations, DTO/OpenAPI, cache, Tree/MPTT, pooling and code generation.
+1. **0.0.14:** nested transactions/savepoints plus rollback-safe in-memory Unit of Work / relation state.
+2. Then: interceptors/hooks and domain events.
+3. Then: `saveGraph` / `updateGraph` / `patchGraph`.
+4. Then: schema/tooling/ecosystem modules such as introspection/diff, bulk operations, DTO/OpenAPI, cache, Tree/MPTT, pooling and code generation.
 
-This ordering may change when comparison with the TypeScript reference exposes a more fundamental dependency.
+A later query-performance pass may replace in-memory root deduplication with a root-aware SQL page plan, provided it preserves the now-tested 0.0.13 semantics.
