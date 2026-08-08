@@ -49,6 +49,13 @@ static std::vector<std::int64_t> row_ids(const std::vector<metal::Row>& rows) {
     return out;
 }
 
+template <typename T>
+static std::vector<std::int64_t> entity_ids(const std::vector<std::shared_ptr<T>>& rows) {
+    std::vector<std::int64_t> out;
+    for (const auto& row : rows) out.push_back(row->id);
+    return out;
+}
+
 int main() {
     auto db = std::make_shared<metal::SQLiteExecutor>(":memory:");
     metal::SQLiteDialect dialect;
@@ -91,6 +98,15 @@ int main() {
     assert((row_ids(db->execute(admins_sql.sql, admins_sql.params).rows) ==
             std::vector<std::int64_t>{1, 4}));
 
+    auto admin_with_cpp = metal::where_has<^^RpUser::posts>(
+        admins,
+        [](auto& posts) {
+            posts.where(metal::like(metal::field<^^RpPost::title>, "C++%"));
+        });
+    const auto chained_sql = admin_with_cpp.compile(dialect);
+    assert((row_ids(db->execute(chained_sql.sql, chained_sql.params).rows) ==
+            std::vector<std::int64_t>{1}));
+
     auto base = metal::select<RpUser>()
         .where(metal::field<^^RpUser::score> >= 20)
         .order_by(metal::field<^^RpUser::id>);
@@ -101,6 +117,13 @@ int main() {
     assert(page.page == 2);
     assert(page.page_size == 2);
     assert((row_ids(page.items) == std::vector<std::int64_t>{4, 5}));
+
+    metal::Session session{db};
+    const auto entity_page = metal::execute_paged(
+        admins, session, metal::PageOptions{.page = 1, .page_size = 1});
+    assert(entity_page.total_items == 2);
+    assert((entity_ids(entity_page.items) == std::vector<std::int64_t>{1}));
+    assert(session.find<RpUser>(1) == entity_page.items.front());
 
     const std::vector<metal::CursorOrderTerm> id_order{
         metal::cursor_order(metal::field<^^RpUser::id>)};
@@ -135,6 +158,14 @@ int main() {
         metal::CursorPageOptions{.last = 2, .before = second.page_info.start_cursor});
     assert((row_ids(backwards.items) == std::vector<std::int64_t>{1, 2}));
     assert(backwards.page_info.has_next_page);
+
+    auto tracked_cursor = metal::execute_cursor(
+        metal::select<RpUser>(),
+        session,
+        id_order,
+        metal::CursorPageOptions{.first = 2});
+    assert((entity_ids(tracked_cursor.items) == std::vector<std::int64_t>{1, 2}));
+    assert(tracked_cursor.items.front() == session.find<RpUser>(1));
 
     const std::vector<metal::CursorOrderTerm> score_order{
         metal::cursor_order(metal::field<^^RpUser::score>, false),
