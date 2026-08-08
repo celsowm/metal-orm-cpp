@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.7`
+**Version:** `0.0.8`
 
 MetalORM C++ is deliberately not a C++20 ORM with a reflection adapter. Reflection is the architecture: no `entity_traits<T>`, no registration macros, no compatibility metadata layer, and no pre-C++26 fallback.
 
@@ -50,8 +50,6 @@ struct [[=metal::mapping::table{"users"}]] User {
 ```
 
 There is no duplicated relation schema. The pivot type and pivot keys are reflections, and root/target keys default to the reflected primary keys. A composite-key pivot satisfies `Mapped<T>` but not `Entity<T>`; tracked `Session` entities intentionally require exactly one primary key.
-
-The N:N wrapper is checked at compile time: its `Pivot` template parameter must be exactly the same type referenced by the relation annotation.
 
 ## Relation collections
 
@@ -113,61 +111,22 @@ user->roles.attach(role, patch);
 session.commit();
 ```
 
-The patch is checked at compile time: `^^Member` must belong to `UserRole`, and the supplied value type must be compatible with that reflected member.
-
-Reattaching an existing target with a partial patch updates only those columns:
-
-```cpp
-metal::pivot_patch<UserRole> patch;
-patch.set<^^UserRole::label>(std::string{"reviewer"});
-
-user->roles.attach(role, patch);
-session.commit();
-```
-
-If the existing pivot has `weight = 10`, the UPDATE changes only `label`; `weight` remains `10`. Repeated patches merge by column instead of reconstructing the pivot from C++ default values.
-
-Pivot rows are hydrated back into the real reflected type:
-
-```cpp
-user->roles.load();
-
-if (const auto* pivot = user->roles.pivot(role)) {
-    std::cout << pivot->label;
-}
-```
-
-The two relation FK columns are excluded from pivot DML payloads, matching MetalORM's pivot-payload filtering.
+The patch is checked at compile time: `^^Member` must belong to `UserRole`, and the supplied value type must be compatible with that reflected member. Reattaching an existing target with a partial patch updates only the supplied columns and preserves the others.
 
 ### Alternate target keys
 
-A N:N relation is not required to use the target primary key. For example, the pivot can refer to a stable role code while the target still has a generated numeric PK:
+A N:N relation is not required to use the target primary key. Relation identity can use a reflected alternate member while hydrated entities continue to use their real primary key in the Session Identity Map.
 
 ```cpp
-struct Role {
-    [[=metal::mapping::primary_key, =metal::mapping::generated]]
-    std::int64_t id{};
-    std::string code;
-};
-
-struct UserRoleByCode {
-    std::int64_t user_id{};
-    std::string role_code;
-};
-
-struct User {
-    [[=metal::mapping::many_to_many<
-        ^^UserRoleByCode,
-        ^^UserRoleByCode::user_id,
-        ^^UserRoleByCode::role_code,
-        metal::mapping::cascade_mode::remove,
-        std::meta::info{},
-        ^^Role::code>{}]]
-    metal::many_to_many_collection<Role, UserRoleByCode> roles;
-};
+[[=metal::mapping::many_to_many<
+    ^^UserRoleByCode,
+    ^^UserRoleByCode::user_id,
+    ^^UserRoleByCode::role_code,
+    metal::mapping::cascade_mode::remove,
+    std::meta::info{},
+    ^^Role::code>{}]]
+metal::many_to_many_collection<Role, UserRoleByCode> roles;
 ```
-
-Now these values are role codes, not role PKs:
 
 ```cpp
 user->roles.attach(std::string{"DEV"});
@@ -175,11 +134,106 @@ user->roles.sync_by_ids(std::vector<std::string>{"DEV", "ADMIN"});
 user->roles.detach(std::string{"ADMIN"});
 ```
 
-Hydrated `Role` objects still enter the Session Identity Map under their real primary key. Relation identity and entity identity remain separate concepts.
+## Polymorphic relations
+
+`0.0.8` ports the MetalORM `morphTo`, `morphOne`, and `morphMany` family without introducing a runtime metadata registry.
+
+### Morph one
+
+The parent owns a typed reference while the target stores the polymorphic id/type pair:
+
+```cpp
+struct Cover {
+    std::optional<std::int64_t> imageable_id;
+    std::optional<std::string> imageable_type;
+};
+
+struct Post {
+    [[=metal::mapping::morph_one<
+        ^^Cover::imageable_type,
+        ^^Cover::imageable_id,
+        "post",
+        metal::mapping::cascade_mode::all>{}]]
+    metal::morph_one_reference<Cover> cover;
+};
+```
+
+```cpp
+post->cover.set(cover);
+session.commit();
+
+assert(cover->imageable_id == post->id);
+assert(cover->imageable_type == "post");
+```
+
+`load()` is lazy and `.include<^^Post::cover>()` eagerly hydrates the relation through the same Identity Map.
+
+### Morph many
+
+```cpp
+struct Post {
+    [[=metal::mapping::morph_many<
+        ^^Attachment::attachable_type,
+        ^^Attachment::attachable_id,
+        "post",
+        metal::mapping::cascade_mode::all>{}]]
+    metal::morph_many_collection<Attachment> attachments;
+};
+```
+
+The collection keeps the has-many-style surface:
+
+```cpp
+auto attachment = post->attachments.add();
+attachment->name = "spec.pdf";
+
+post->attachments.attach(existing);
+post->attachments.remove(existing);
+post->attachments.clear();
+```
+
+When parent and child are both new, the first Unit of Work flush generates the parent PK, the relation processor reapplies the final id/type pair, and the second flush persists those final values.
+
+### Morph to
+
+The inverse side keeps the discriminator and polymorphic key on the root entity. Instead of the TypeScript runtime `targets` object, C++26 encodes the target map into the relation type itself:
+
+```cpp
+struct Activity {
+    std::optional<std::int64_t> subject_id;
+    std::optional<std::string> subject_type;
+
+    [[=metal::mapping::morph_to<
+        ^^Activity::subject_type,
+        ^^Activity::subject_id,
+        metal::mapping::cascade_mode::persist,
+        metal::mapping::morph_target<"post", ^^Post>,
+        metal::mapping::morph_target<"video", ^^Video>>{}]]
+    metal::morph_to_reference<Post, Video> subject;
+};
+```
+
+```cpp
+activity->subject.set(post);
+session.commit();
+
+activity->subject.load();
+auto loaded_post = activity->subject.get_as<Post>();
+
+activity->subject.set(video);
+session.commit();
+
+activity->subject.reset();
+session.commit();
+```
+
+The target set and discriminator values are compile-time data. Validation rejects duplicate/empty discriminator values, incompatible id/target-key types, targets missing from the typed reference, fields belonging to the wrong owner, and wrong relation wrappers.
+
+MorphTo lazy loading groups roots by discriminator and performs one query per concrete target type, then hydrates targets through the normal Identity Map. MetalORM TS explicitly has no JOIN-based MorphTo include; the typed SQL model likewise does not pretend a polymorphic target is one physical table. `subject.load()` is the parity path.
 
 ## Lazy and eager relation loading
 
-To-many wrappers are bound to the `Session` when their root entity becomes tracked. That makes lazy loading possible without building a separate runtime metadata registry:
+Relation wrappers are bound to the `Session` when their root entity becomes tracked. Lazy and eager hydration reuse the same Identity Map.
 
 ```cpp
 auto user = session.query<User>()
@@ -191,8 +245,6 @@ user->roles.load();
 assert(user->roles.loaded());
 ```
 
-Eager loading remains available:
-
 ```cpp
 auto users = session.query<User>()
     .include<^^User::posts>()
@@ -200,7 +252,7 @@ auto users = session.query<User>()
     .all();
 ```
 
-Both paths hydrate through the same Identity Map. The current SQLite executor is synchronous, so `load()` is synchronous; this is an execution-model adaptation, not a different relation semantic.
+The current SQLite executor is synchronous, so `load()` is synchronous; this is an execution-model adaptation, not a different relation semantic.
 
 ## Typed SQL AST
 
@@ -249,7 +301,7 @@ auto erase = metal::DeleteQueryBuilder{"users"}
     .where_eq("id", std::int64_t{1});
 ```
 
-`UnitOfWork` and `RelationChangeProcessor` compile these ASTs through the same SQLite dialect. N:N attach emits a normal pivot INSERT, matching MetalORM rather than silently using `ON CONFLICT DO NOTHING`.
+`UnitOfWork` and `RelationChangeProcessor` compile these ASTs through the same SQLite dialect.
 
 ## Cascade semantics
 
@@ -263,7 +315,21 @@ metal::mapping::cascade_mode::remove
 metal::mapping::cascade_mode::link
 ```
 
-For N:N, `remove` and `all` are valid. Detaching deletes the pivot row first; when target removal is requested, the target is deleted afterward. For normal hydrated/tracked targets this is scheduled through the second Unit of Work flush. Alternate-target-key stubs that are not tracked are deleted through shared DML using that declared target key. `link` links already-persisted entities without cascading persist or remove.
+The same two-phase commit architecture handles normal and polymorphic relation mutations:
+
+```text
+prepare cascaded persistence
+        ↓
+UnitOfWork.flush()
+        ↓
+RelationChangeProcessor.process()
+        ↓
+UnitOfWork.flush()
+        ↓
+COMMIT
+```
+
+That ordering is particularly important for Morph relations because a parent or target can receive a generated key in the first flush before the polymorphic id field is finalized.
 
 ## Runtime architecture
 
@@ -280,30 +346,18 @@ Session
         SQLite
 ```
 
-Commit order mirrors the MetalORM runtime model:
-
-```text
-prepare cascaded persistence
-        ↓
-UnitOfWork.flush()
-        ↓
-RelationChangeProcessor.process()
-        ↓
-UnitOfWork.flush()
-        ↓
-COMMIT
-```
-
 ## Compile-time model validation
 
-Mappings and typed pivot patches fail at compile time for cases including:
+Mappings and typed relation payloads fail at compile time for cases including:
 
 - wrong relation member wrapper;
 - N:N collection/pivot type mismatch;
 - pivot patch member from the wrong pivot type;
 - pivot patch value incompatible with its reflected member;
-- FK reflected from the wrong owner type;
 - incompatible FK/key C++ types;
+- invalid Morph field ownership or key types;
+- duplicate/empty MorphTo discriminators;
+- MorphTo target not represented by the typed reference;
 - conflicting annotations;
 - duplicate mapped column names;
 - invalid generated-key declarations.
@@ -325,9 +379,9 @@ template for (...)
 entity.[:Member:]
 ```
 
-Reflections are non-type template arguments in fields, relationship metadata and pivot patches; splicing is used for hydration, snapshots, key access, relationship mutation and application of typed partial pivot values.
+Reflections are non-type template arguments throughout mapping, queries, relation metadata and mutation. Structural class NTTPs carry Morph discriminator values at compile time.
 
-## What 0.0.7 contains
+## What 0.0.8 contains
 
 - C++26 static reflection and annotations as the only metadata model
 - `Mapped<T>` / `Entity<T>` concepts and `consteval` validation
@@ -338,12 +392,14 @@ Reflections are non-type template arguments in fields, relationship metadata and
 - SQLite executor
 - `Session` coordinating `IdentityMap`, `UnitOfWork`, and `RelationChangeProcessor`
 - reflected dirty checking and generated keys
-- batched eager relations plus Session-bound lazy to-many loading
-- `has_many_collection<T>` with `load`, `get_items`, `add`, `attach`, `remove`, `clear`
-- `many_to_many_collection<T, Pivot>` with entity/ID attach and detach, `sync_by_ids`, typed pivot hydration and partial pivot updates
+- `has_many_collection<T>` and `many_to_many_collection<T, Pivot>`
+- typed partial `pivot_patch<Pivot>` mutations
 - alternate non-primary N:N `targetKey` behavior
+- `morph_one_reference<T>` / `morph_many_collection<T>` / `morph_to_reference<T...>`
+- compile-time Morph target/discriminator metadata and validation
+- lazy polymorphic loading and eager MorphOne/MorphMany loading
+- polymorphic cascade persist/remove behavior through the shared UoW flow
 - MetalORM-compatible cascade vocabulary including `link`
-- N:N `remove/all` semantics aligned with the relation contract
 
 See `docs/PARITY.md` for the explicit reference matrix and ordered parity roadmap.
 
@@ -359,6 +415,4 @@ The CMake project intentionally fails on GCC < 16 and on non-GNU compilers today
 
 ## Direction
 
-The TypeScript MetalORM is the feature reference. The C++ port should preserve its layers and semantics while replacing runtime metadata/string configuration with C++26 reflection where possible.
-
-With the core N:N collection gaps closed in 0.0.7, the next parity family is `morphTo`, `morphOne`, and `morphMany`, followed by richer DML and the remaining query-builder surface such as CTEs, set operations and window functions.
+The TypeScript MetalORM remains the feature and behavior reference. With the Morph family closed in 0.0.8, the next parity gap is richer DML (`RETURNING`, multi-row INSERT, INSERT ... SELECT and the SQLite conflict/upsert surface), followed by the remaining query-builder features such as CTEs, set operations and window functions.
