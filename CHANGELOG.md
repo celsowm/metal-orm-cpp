@@ -2,6 +2,23 @@
 
 All releases currently target GCC 16+ C++26 static reflection and intentionally use SQLite as the only executor/dialect.
 
+## 0.0.16 - 2026-08-08
+
+Typed graph-persistence release.
+
+- Added reflection-driven `graph<T>()` payloads as the C++ binding of the TypeScript DTO graph contract.
+- Added compile-time checked scalar assignment through `.set<^^T::member>(value)`; foreign members, relation members and incompatible scalar types are rejected before SQL generation.
+- Added nested graph payloads for single references and callback-configured collection payloads.
+- Added graph collection inputs for nested entities, existing `shared_ptr` targets and relation IDs.
+- Reused typed `pivot_patch<Pivot>` for N:N graph entries instead of introducing a second pivot payload representation.
+- Added `save_graph`, `update_graph` and `patch_graph`; update/patch require a reflected root PK and return an empty pointer when the root does not exist.
+- Added `GraphOptions::prune_missing` for has-many/morph-many removal and N:N detach semantics.
+- Made graph operations transactional by default through the existing Session transaction/checkpoint pipeline, preserving rollback of generated IDs, relation state and domain-event queues.
+- Added dedicated `belongs_to_reference<T>` and `has_one_reference<T>` wrappers as the future canonical single-reference shapes; the remaining generic lazy/mutation integration and removal of raw `shared_ptr` relation compatibility is scoped to 0.0.17.
+- Added SQLite E2E coverage for root + has-one + has-many + N:N/pivot creation, generated keys, hooks/events, pruning, partial patch behavior, nested belongs-to creation and missing-root updates.
+- Added compile-fail coverage for incompatible reflected graph scalar values.
+- Updated lifecycle parity after the TypeScript reference moved table hooks to Session-bound registration as well; the old TableDef-vs-Session divergence no longer exists.
+
 ## 0.0.15 - 2026-08-08
 
 Lifecycle hooks, Session interceptors and domain-event parity release.
@@ -17,7 +34,7 @@ Lifecycle hooks, Session interceptors and domain-event parity release.
 - Treat event-handler exceptions as post-commit failures: the exception propagates, but MetalORM does not pretend an already successful database COMMIT was rolled back.
 - Match the TS bus clearing rule: an entity event queue is cleared only after all handlers complete; a handler failure leaves the queue intact for caller-defined recovery/retry policy.
 - Added E2E coverage for hook/interceptor ordering, raw flush boundaries, nested event timing, rollback of events, hook failure, `afterFlush` failure, DELETE lifecycle, and post-commit handler failure.
-- The C++ hook registration surface is deliberately typed and Session-bound (`register_table_hooks<T>`), whereas TypeScript stores hooks on `TableDef`; lifecycle and transactional semantics are aligned, while this binding-scope difference is documented rather than hidden.
+- Hook registration is Session-bound in C++; the TypeScript reference was subsequently aligned to the same ownership model on 2026-08-08.
 
 ## 0.0.14 - 2026-08-08
 
