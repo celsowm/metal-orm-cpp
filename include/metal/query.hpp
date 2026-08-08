@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <ranges>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -144,6 +145,12 @@ public:
 
     const ExprPtr& node() const noexcept { return node_; }
 
+    template <typename Owner>
+    requires (sizeof...(Owners) > 1 && (std::same_as<Owner, Owners> && ...))
+    operator Expression<Owner>() const {
+        return Expression<Owner>{node_};
+    }
+
 private:
     ExprPtr node_;
 };
@@ -192,7 +199,7 @@ auto compare(Field<Member> f, CompareOp op, V&& value) {
 }
 
 template <std::meta::info Left, std::meta::info Right>
-requires reflect::key_types_compatible<Left, Right>()
+requires (reflect::key_types_compatible<Left, Right>())
 auto compare(Field<Left> left, CompareOp op, Field<Right> right) {
     using L = typename Field<Left>::owner_type;
     using R = typename Field<Right>::owner_type;
@@ -224,11 +231,11 @@ requires FieldComparable<typename Field<Member>::value_type, V>
 auto operator<=(Field<Member> f, V&& value) { return compare(f, CompareOp::Le, std::forward<V>(value)); }
 
 template <std::meta::info Left, std::meta::info Right>
-requires reflect::key_types_compatible<Left, Right>()
+requires (reflect::key_types_compatible<Left, Right>())
 auto operator==(Field<Left> left, Field<Right> right) { return compare(left, CompareOp::Eq, right); }
 
 template <std::meta::info Left, std::meta::info Right>
-requires reflect::key_types_compatible<Left, Right>()
+requires (reflect::key_types_compatible<Left, Right>())
 auto operator!=(Field<Left> left, Field<Right> right) { return compare(left, CompareOp::Ne, right); }
 
 template <typename... Left, typename... Right>
