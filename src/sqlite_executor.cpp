@@ -113,7 +113,11 @@ void SQLiteExecutor::rollback_transaction() { (void)execute("ROLLBACK;"); }
 
 void SQLiteExecutor::validate_savepoint_name(std::string_view name) {
     if (name.empty()) throw std::invalid_argument("MetalORM: savepoint name cannot be empty");
-    for (const unsigned char c : name) {
+    const auto first = static_cast<unsigned char>(name.front());
+    if (!std::isalpha(first) && first != '_') {
+        throw std::invalid_argument("MetalORM: savepoint name must be a simple SQL identifier");
+    }
+    for (const unsigned char c : name.substr(1)) {
         if (!std::isalnum(c) && c != '_') {
             throw std::invalid_argument("MetalORM: savepoint name must be a simple SQL identifier");
         }
