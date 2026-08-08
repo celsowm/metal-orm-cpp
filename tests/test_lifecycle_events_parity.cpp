@@ -193,7 +193,7 @@ int main() {
     assert(scalar_i64(*db, "SELECT COUNT(*) AS value FROM lifecycle_users;") == 0);
 
     // A hook failure participates in the transaction and restores both DB and
-    // object/UoW state through the 0.0.14 checkpoint mechanism.
+    // object/UoW state through the checkpoint mechanism.
     auto failing = std::make_shared<LifecycleUser>();
     failing->name = "hook-failure";
     session.persist(failing);
@@ -217,6 +217,68 @@ int main() {
     assert(session.unit_of_work().contains(failing.get()));
     assert(session.unit_of_work().find(failing.get())->status == metal::EntityStatus::New);
     assert(scalar_i64(*db, "SELECT COUNT(*) AS value FROM lifecycle_users;") == 0);
+
+    // afterFlush is still inside the database transaction. If it fails after an
+    // INSERT, both SQLite and the in-memory generated ID/status must roll back.
+    auto interceptor_db = std::make_shared<metal::SQLiteExecutor>(":memory:");
+    interceptor_db->execute(metal::create_table_sql<LifecycleUser>(dialect));
+    metal::Session interceptor_session{interceptor_db};
+    interceptor_session.register_interceptor(metal::SessionInterceptor{
+        .after_flush = [](metal::Session&) {
+            throw std::runtime_error("afterFlush failed");
+        }
+    });
+    auto interceptor_candidate = std::make_shared<LifecycleUser>();
+    interceptor_candidate->name = "interceptor-failure";
+    interceptor_session.persist(interceptor_candidate);
+
+    bool interceptor_failed = false;
+    try {
+        interceptor_session.commit();
+    } catch (const std::runtime_error&) {
+        interceptor_failed = true;
+    }
+    assert(interceptor_failed);
+    assert(interceptor_candidate->id == 0);
+    assert(interceptor_session.unit_of_work().contains(interceptor_candidate.get()));
+    assert(interceptor_session.unit_of_work().find(interceptor_candidate.get())->status == metal::EntityStatus::New);
+    assert(scalar_i64(*interceptor_db, "SELECT COUNT(*) AS value FROM lifecycle_users;") == 0);
+
+    // Event handlers run after the database commit. A handler failure propagates,
+    // but it cannot pretend to roll back a commit that has already succeeded.
+    auto event_db = std::make_shared<metal::SQLiteExecutor>(":memory:");
+    event_db->execute(metal::create_table_sql<LifecycleUser>(dialect));
+    metal::Session event_session{event_db};
+    metal::TableHooks<LifecycleUser> event_hooks;
+    event_hooks.after_insert = [](metal::Session&, LifecycleUser& entity) {
+        entity.domain_events.raise(UserCreated{entity.id, entity.name});
+    };
+    event_session.register_table_hooks<LifecycleUser>(std::move(event_hooks));
+    event_session.register_domain_event_handler<UserCreated>(
+        [](const UserCreated& event, metal::Session& committed) {
+            assert(scalar_i64(
+                committed.executor(),
+                "SELECT COUNT(*) AS value FROM lifecycle_users WHERE id = " +
+                    std::to_string(event.id) + ";") == 1);
+            throw std::runtime_error("post-commit handler failed");
+        });
+
+    auto event_candidate = std::make_shared<LifecycleUser>();
+    event_candidate->name = "already-committed";
+    event_session.persist(event_candidate);
+    bool handler_failed = false;
+    try {
+        event_session.commit();
+    } catch (const std::runtime_error&) {
+        handler_failed = true;
+    }
+    assert(handler_failed);
+    assert(event_candidate->id != 0);
+    assert(event_session.unit_of_work().contains(event_candidate.get()));
+    assert(event_session.unit_of_work().find(event_candidate.get())->status == metal::EntityStatus::Managed);
+    assert(scalar_i64(*event_db, "SELECT COUNT(*) AS value FROM lifecycle_users;") == 1);
+    // Matching the TS bus, a queue is cleared only after all handlers complete.
+    assert(event_candidate->domain_events.size() == 1);
 
     return 0;
 }
