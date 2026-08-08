@@ -9,7 +9,7 @@ SQLite is intentionally the only backend while semantic parity is being built.
 Legend:
 
 - ✅ parity for the supported SQLite execution model
-- 🟡 implemented with an explicit remaining edge/sub-gap
+- 🟡 implemented with an explicit remaining edge/sub-gap or deliberate binding adaptation
 - ❌ not ported yet
 
 ## Runtime and mapping
@@ -29,13 +29,14 @@ Legend:
 | rollback-safe in-memory UoW state | ✅ | status/original/current scalar snapshot checkpoints |
 | rollback-safe generated IDs | ✅ | generated PK returns to checkpoint value |
 | rollback-safe relation state | ✅ | reflected relation-wrapper snapshots |
-| Interceptors/hooks | ❌ | next runtime family |
-| Domain events | ❌ | next runtime family |
-| saveGraph/updateGraph/patchGraph | ❌ | later runtime family |
+| Table lifecycle hooks | ✅/🟡 | lifecycle/timing parity; C++ registration is typed and Session-bound rather than stored in a runtime TableDef |
+| Session interceptors | ✅ | `before_flush` / `after_flush` wrap the full flush pipeline |
+| Domain events | ✅ | typed queues + handlers; dispatch only after successful outermost commit |
+| saveGraph/updateGraph/patchGraph | ❌ | next runtime family |
 
 ## Transaction parity — 0.0.14
 
-The executor now exposes transaction capabilities explicitly:
+The executor exposes transaction capabilities explicitly:
 
 ```cpp
 struct ExecutorCapabilities {
@@ -44,43 +45,97 @@ struct ExecutorCapabilities {
 };
 ```
 
-SQLite advertises both capabilities and implements `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE SAVEPOINT`, and `ROLLBACK TO SAVEPOINT`. Savepoint identifiers are validated before being interpolated into control SQL.
+SQLite implements `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE SAVEPOINT`, and `ROLLBACK TO SAVEPOINT`. Savepoint identifiers are validated before they are interpolated into control SQL.
 
-The scoped runtime API mirrors TypeScript semantics:
+`Session::transaction()` mirrors the TypeScript nested-transaction contract. A successful nested scope flushes and releases its savepoint. If a nested scope throws, MetalORM rolls back to that savepoint and marks the Session rollback-only. Catching the inner exception does not make the outer transaction committable.
+
+Every transaction/savepoint checkpoint records whether an entity existed in tracking, `EntityStatus`, the dirty-check snapshot, reflected persistent scalar values and rollback-sensitive runtime members. Rollback therefore restores generated IDs, updates, deletes, Identity Map membership and relation wrapper state as well as database rows.
+
+The outer checkpoint survives successful nested releases, so a later outer rollback can still undo work performed by a successfully released inner scope. A failed database `COMMIT` likewise restores the pre-commit ORM state.
+
+## Lifecycle and domain events — 0.0.15
+
+The TypeScript runtime has two distinct lifecycle surfaces and the C++ port keeps them distinct:
+
+1. table/entity hooks execute inside the Unit of Work for INSERT/UPDATE/DELETE;
+2. Session interceptors wrap the complete flush pipeline.
+
+Typed table hooks are registered for an entity type:
 
 ```cpp
-session.transaction([](metal::Session& tx) {
-    // mutations
+metal::TableHooks<User> hooks;
+hooks.before_insert = [](metal::Session&, User& user) {
+    user.name = normalize(user.name);
+};
+hooks.after_insert = [](metal::Session&, User& user) {
+    user.domain_events.raise(UserCreated{user.id});
+};
 
-    tx.transaction([](metal::Session& nested) {
-        // nested scope => SAVEPOINT metalorm_sp_1
-    });
+session.register_table_hooks<User>(std::move(hooks));
+```
+
+The current C++ binding stores that hook set on the Session. The TypeScript binding stores hooks on `TableDef`. This is intentionally recorded as a surface-level adaptation: INSERT/UPDATE/DELETE timing and transactional behavior are aligned, but hook registration lifetime is not claimed to be byte/API-identical.
+
+Table-hook ordering follows the reference UoW:
+
+```text
+INSERT: beforeInsert -> INSERT/generated id -> snapshot/identity -> afterInsert
+UPDATE: dirty diff -> beforeUpdate -> UPDATE -> refreshed snapshot -> afterUpdate
+DELETE: beforeDelete -> DELETE/remove tracking -> afterDelete
+```
+
+`afterDelete` retains a live strong reference through the callback even though the entity has already been removed from UoW tracking, matching the observable TypeScript lifecycle.
+
+Session interceptors use:
+
+```cpp
+session.register_interceptor({
+    .before_flush = [](metal::Session&) {},
+    .after_flush = [](metal::Session&) {}
 });
 ```
 
-A successful nested scope flushes and releases its savepoint. If a nested scope throws, MetalORM rolls back to the savepoint and marks the session rollback-only. Catching that inner exception does **not** make the outer transaction committable; the outer scope subsequently rolls back.
+and the commit/transaction pipeline is:
 
-C++ additionally checkpoints the synchronous in-memory state mutated by its Unit of Work. Every transaction/savepoint checkpoint records:
+```text
+beforeFlush interceptors
+  -> relation prepare
+  -> UoW flush
+  -> relation process
+  -> second UoW flush
+  -> afterFlush interceptors
+  -> accept relation baselines
+  -> COMMIT / RELEASE SAVEPOINT
+```
 
-- whether each entity was already tracked;
-- `EntityStatus` and dirty-check `original` snapshot;
-- current persistent scalar values through reflection;
-- reflected relation-wrapper state, including collection baselines/pivot patches/morph references.
+A raw `Session::flush()` remains a UoW-only operation, like the reference runtime: table hooks execute, but Session interceptors, relation processing and domain-event dispatch do not.
 
-That means rollback restores more than the SQLite rows. It also:
+Domain events use a C++-typed queue rather than a string discriminator API:
 
-- restores an updated object's scalar values to the transaction-entry state;
-- resurrects a tracked entity removed and flushed inside the failed transaction;
-- removes objects that became tracked only inside the failed scope;
-- removes rolled-back identities from the Identity Map and rebuilds valid identities;
-- resets a generated primary key assigned by an INSERT that did not commit;
-- restores relation collection/baseline state even when an inner savepoint had already successfully flushed and accepted the relation before the outer transaction failed.
+```cpp
+using Events = metal::domain_event_queue<UserCreated, UserRenamed>;
 
-The outer checkpoint survives successful nested savepoint releases, so outer rollback remains capable of undoing all work performed by successful inner scopes.
+[[=metal::mapping::ignore]]
+Events domain_events;
 
-`commit()` uses the same checkpoint mechanism. If the database `COMMIT` fails, SQLite is rolled back and the pre-commit UoW/entity state is restored rather than leaving snapshots or generated keys falsely marked as committed.
+session.register_domain_event_handler<UserCreated>(
+    [](const UserCreated& event, metal::Session& session) {
+        // database commit is already visible here
+    });
+```
 
-Nested transactions on an executor that reports `savepoints == false` fail deterministically instead of attempting a second `BEGIN`.
+The event queue is a non-persistent runtime member and is therefore explicitly `[[=ignore]]`. Event membership and handler signatures are checked by the C++ type system. Runtime type erasure is internal to `DomainEventBus`; users do not register string event names.
+
+Dispatch timing follows the TypeScript contract:
+
+- no dispatch at `flush()`;
+- no dispatch at an inner `RELEASE SAVEPOINT`;
+- dispatch only after the successful outermost database COMMIT;
+- events raised inside a rolled-back transaction/savepoint are restored with the checkpoint and are not leaked to a later commit;
+- if an event handler throws after COMMIT, the exception propagates as a post-commit failure and MetalORM does not pretend the already-committed database work was rolled back;
+- as in the TS bus, an entity queue is cleared only after all its handlers complete, so a handler failure leaves the queue available for caller-defined recovery/retry policy.
+
+The dedicated 0.0.15 E2E test covers INSERT/UPDATE/DELETE hook order, raw-flush boundaries, nested-savepoint dispatch timing, rollback of queued events, hook failure, `afterFlush` rollback and handler failure after COMMIT.
 
 ## Relations
 
@@ -95,27 +150,11 @@ Nested transactions on an executor that reports `savepoints == false` fail deter
 | morphMany | ✅ | dedicated collection, lazy/eager loading, mutation/cascade |
 | cascade none/all/persist/remove/link | ✅ | aligned vocabulary and runtime semantics |
 
-### Collection parity
-
 `has_many_collection<T>` supports `load`, `get_items`, `add`, `attach`, `remove`, `clear`, Session-bound lazy loading and reflected FK assignment.
 
 `many_to_many_collection<T, Pivot>` supports entity/ID attach and detach, `sync_by_ids`, typed pivot hydration, partial `pivot_patch<Pivot>`, alternate non-primary target keys and Identity Map integration after hydration.
 
-### Polymorphic relations
-
-`morph_to` encodes discriminator targets at compile time:
-
-```cpp
-[[=metal::mapping::morph_to<
-    ^^Activity::subject_type,
-    ^^Activity::subject_id,
-    metal::mapping::cascade_mode::persist,
-    metal::mapping::morph_target<"post", ^^Post>,
-    metal::mapping::morph_target<"video", ^^Video>>{}]]
-metal::morph_to_reference<Post, Video> subject;
-```
-
-The discriminator set and target-key compatibility are `consteval` validated. `MorphTo` intentionally has no single-table JOIN representation; lazy polymorphic resolution is the parity path, matching the TypeScript restriction.
+`morph_to` encodes discriminator targets at compile time. The discriminator set and target-key compatibility are `consteval` validated. MorphTo intentionally has no single-table JOIN representation; lazy polymorphic resolution is the parity path, matching the TypeScript restriction.
 
 ## Query builder and DML
 
@@ -155,7 +194,7 @@ The discriminator set and target-key compatibility are `consteval` validated. `M
 | MorphOne/MorphMany relation predicates | ✅ | reflected id/type correlation |
 | MorphTo whereHas | intentionally unsupported | same physical-target ambiguity as TS |
 
-0.0.13 moved correlation into the SELECT `WHERE` compilation point. Callback-local `ORDER BY / LIMIT / OFFSET` therefore runs after correlation, and root relation predicates are applied before root pagination. Nested correlation aliases (`t0`, `t0_rel`, ...) prevent alias shadowing while ordinary queries retain stable `t0/t1/p0` aliases.
+0.0.13 moved correlation into the SELECT `WHERE` compilation point. Callback-local `ORDER BY / LIMIT / OFFSET` runs after correlation, and root relation predicates run before root pagination. Nested correlation aliases (`t0`, `t0_rel`, ...) prevent alias shadowing while ordinary queries retain stable `t0/t1/p0` aliases.
 
 ## Pagination parity — 0.0.13
 
@@ -201,10 +240,9 @@ Session-specific tracked pagination remains isolated in `runtime_pagination.hpp`
 
 ## Ordered parity roadmap
 
-With transaction/savepoint semantics and rollback-safe runtime state closed in 0.0.14, the next reference gaps are:
+With lifecycle hooks, interceptors and transaction-aware domain-event timing closed in 0.0.15, the next reference gaps are:
 
-1. **0.0.15:** table hooks / Session interceptors and domain events, with dispatch timing tied to successful outermost commit.
-2. Then: `saveGraph` / `updateGraph` / `patchGraph`.
-3. Then: schema/tooling/ecosystem modules such as introspection/diff, bulk operations, DTO/OpenAPI, cache, Tree/MPTT, pooling and code generation.
+1. **0.0.16:** `saveGraph` / `updateGraph` / `patchGraph` and their typed nested relation payload semantics.
+2. Then: schema/tooling/ecosystem modules such as introspection/diff, bulk operations, DTO/OpenAPI, cache, Tree/MPTT, pooling and code generation.
 
 A later query-performance pass may replace in-memory root deduplication with a root-aware SQL page plan, provided it preserves the tested 0.0.13 semantics.
