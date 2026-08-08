@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.0.8 - 2026-08-08
+
+Polymorphic-relation parity release. SQLite remains the only executor/dialect intentionally.
+
+- Add C++26-native `morph_to`, `morph_one`, and `morph_many` relation annotations.
+- Represent MorphTo discriminator maps at compile time with `morph_target<"type", ^^Target, ^^OptionalKey>` instead of a runtime string-to-table registry.
+- Add dedicated `morph_to_reference<T...>`, `morph_one_reference<T>`, and `morph_many_collection<T>` wrappers mirroring the distinct TypeScript runtime contracts.
+- Add lazy MorphTo resolution and lazy/eager MorphOne/MorphMany hydration through the normal Session Identity Map.
+- Batch MorphOne/MorphMany loading by reflected id/type columns and batch MorphTo loading by discriminator, issuing one query per concrete target type instead of one query per root.
+- Add MorphTo target switching and reset semantics, including nullable discriminator/id clearing on the root entity.
+- Add MorphOne/MorphMany mutation semantics: attach writes the reflected discriminator/id pair, detach clears it or cascades removal according to the configured mode.
+- Integrate polymorphic cascade persist/remove with the existing two-phase Unit of Work / RelationChangeProcessor commit sequence.
+- Rebind MorphOne/MorphMany id/type fields after the first UoW flush so a newly generated parent key is persisted correctly when parent and children are all new in the same commit.
+- Resolve MorphTo target keys only after cascaded target persistence, so generated target IDs are available before the root discriminator/id pair is written.
+- Add `consteval` validation for wrapper shape, field ownership, discriminator uniqueness, target membership, target-key compatibility and mapped target types.
+- Add compile-fail coverage for wrong Morph wrappers and duplicate MorphTo discriminators.
+- Add an end-to-end SQLite suite covering generated parent keys, lazy/eager MorphOne/MorphMany, cascade removal, MorphTo cascade persist, concrete-target switching, lazy resolution, Identity Map reuse and reset.
+- Confirm the TypeScript relation-change processor now honors declared belongs-to-many `targetKey`, closing the temporary cross-repository consistency note introduced during 0.0.7.
+- Preserve the TypeScript rule that MorphTo has no single-table JOIN representation; lazy polymorphic resolution remains the parity path for the typed SQL model.
+
 ## 0.0.7 - 2026-08-08
 
 Typed pivot-patch and alternate-target-key parity release. SQLite remains the only executor/dialect intentionally.
@@ -16,7 +36,7 @@ Typed pivot-patch and alternate-target-key parity release. SQLite remains the on
 - Preserve integral zero as a valid relation key unless the key is specifically a generated primary key.
 - Add an end-to-end alternate-target-key suite using `Role::code` while `Role::id` remains the real primary key.
 - Add compile-fail coverage for foreign pivot members and incompatible pivot-patch value types.
-- Follow the declared `targetKey` relation contract end-to-end even though the current TypeScript relation-change processor still resolves the target primary key during N:N flush; the TypeScript collection and schema contracts already use `targetKey`.
+- Follow the declared `targetKey` relation contract end-to-end; at the time of this release the TypeScript collection/schema already used `targetKey` while its mutation processor still fell back to the target primary key. That TypeScript processor was corrected before 0.0.8.
 
 ## 0.0.6 - 2026-08-08
 
