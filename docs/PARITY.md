@@ -30,10 +30,10 @@ SQLite is intentionally the only backend while semantic parity is being built.
 | hasOne | ✅ | Reflected metadata + eager load |
 | hasMany | ✅/🟡 | Dedicated collection, lazy/eager load and mutation; broader edge-case parity still evolving |
 | belongsToMany | ✅ | Dedicated collection, lazy/eager load, IDs, sync, partial typed pivots and alternate `targetKey` behavior |
-| morphTo | ❌ | Next major relation family |
-| morphOne | ❌ | Next major relation family |
-| morphMany | ❌ | Next major relation family |
-| cascade none/all/persist/remove/link | ✅ | Vocabulary and N:N remove semantics aligned |
+| morphTo | ✅ | Typed target set, lazy resolution, target switching, reset and cascade persist |
+| morphOne | ✅ | Dedicated reference, lazy/eager loading, mutation and cascade behavior |
+| morphMany | ✅ | Dedicated collection, lazy/eager loading, mutation and cascade behavior |
+| cascade none/all/persist/remove/link | ✅ | Vocabulary and relation remove/persist semantics aligned |
 
 ### Has-many collection
 
@@ -69,11 +69,29 @@ Implemented:
 
 `pivot_patch<Pivot>` is the C++ adaptation of TypeScript `Partial<TPivot>`: only explicitly reflected members become DML assignments, and repeated patches merge without resetting omitted fields.
 
-### `targetKey` consistency note
+The TypeScript `RelationChangeProcessor` now also resolves belongs-to-many mutation keys through the declared `targetKey`, so the previous implementation mismatch is closed in both repositories.
 
-The TypeScript schema and `DefaultManyToManyCollection` explicitly use `relation.targetKey` for ID-based relation identity. The current TypeScript `RelationChangeProcessor`, however, still resolves the target table primary key during N:N flush. The C++ port follows the declared relation contract end-to-end: when a custom `targetKey` is configured, that reflected member is used consistently by collection identity, pivot DML and cascade removal.
+### Polymorphic relations
 
-Remaining collection adaptation work is limited to JS-object-model conveniences such as `toJSON()`; these require an explicit C++ serialization design rather than literal API copying.
+`morph_one` and `morph_many` keep the MetalORM parent-side semantics: the target row stores the reflected id/type pair, `set()` / `attach()` writes the pair in memory, lazy/eager hydration filters by both fields, and removal either clears them or cascades according to the relation mode.
+
+`morph_to` keeps the child-side semantics with a compile-time target registry:
+
+```cpp
+[[=metal::mapping::morph_to<
+    ^^Activity::subject_type,
+    ^^Activity::subject_id,
+    metal::mapping::cascade_mode::persist,
+    metal::mapping::morph_target<"post", ^^Post>,
+    metal::mapping::morph_target<"video", ^^Video>>{}]]
+metal::morph_to_reference<Post, Video> subject;
+```
+
+The discriminator set is `consteval` validated for uniqueness. Every declared target/key must be compatible with the reflected id field. Lazy loading groups roots by discriminator and performs one query per concrete target type, then hydrates through the normal Identity Map.
+
+The TypeScript query builder explicitly does not support JOIN-based `MorphTo` include and directs callers to lazy loading. The C++ typed SQL AST likewise does not model a polymorphic single-table JOIN; the parity path is `subject.load()`. `MorphOne` and `MorphMany` remain eager-loadable.
+
+Remaining relation adaptation work is limited to JS-object-model conveniences such as `toJSON()` and broader has-many edge cases; those require explicit C++ serialization/API decisions rather than literal copying.
 
 ## Query builder
 
@@ -82,7 +100,7 @@ Remaining collection adaptation work is limited to JS-object-model conveniences 
 | Typed SELECT AST | ✅ |
 | WHERE/comparisons/logical expressions | ✅ partial catalog |
 | IN / NULL / LIKE | ✅ |
-| Reflected JOINs | ✅ |
+| Reflected JOINs | ✅ non-polymorphic + runtime MorphOne/MorphMany include |
 | Projections/aliases | ✅ |
 | Aggregates/GROUP BY/HAVING | ✅ |
 | Scalar IN subqueries | ✅ |
@@ -121,9 +139,8 @@ Remaining collection adaptation work is limited to JS-object-model conveniences 
 
 The next releases should close reference gaps rather than add unrelated capabilities:
 
-1. **0.0.8:** `morphTo` / `morphOne` / `morphMany`.
-2. **0.0.9:** richer DML parity (`RETURNING`, multi-row insert, insert-select, SQLite conflict API).
-3. **0.0.10:** CTEs, set operations, EXISTS/BETWEEN and window functions.
-4. Then: saveGraph/runtime hooks/events/transactions and the remaining ecosystem modules.
+1. **0.0.9:** richer DML parity (`RETURNING`, multi-row insert, insert-select, SQLite conflict API).
+2. **0.0.10:** CTEs, set operations, EXISTS/BETWEEN and window functions.
+3. Then: saveGraph/runtime hooks/events/transactions and the remaining ecosystem modules.
 
 This ordering may change when comparison with the TypeScript reference exposes a more fundamental dependency.
