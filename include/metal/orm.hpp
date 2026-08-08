@@ -1,7 +1,9 @@
 #pragma once
 
+#include "metal/domain_events.hpp"
 #include "metal/execution.hpp"
 #include "metal/identity_map.hpp"
+#include "metal/lifecycle.hpp"
 #include "metal/polymorphic.hpp"
 #include "metal/query.hpp"
 #include "metal/reflection.hpp"
@@ -111,6 +113,33 @@ public:
         if (auto* tracked = unit_of_work_.find(entity.get())) tracked->status = EntityStatus::Removed;
     }
 
+    template <reflect::Entity T>
+    void register_table_hooks(TableHooks<T> hooks) {
+        ErasedTableHooks erased;
+        erased.before_insert = erase_table_hook<T>(std::move(hooks.before_insert));
+        erased.after_insert = erase_table_hook<T>(std::move(hooks.after_insert));
+        erased.before_update = erase_table_hook<T>(std::move(hooks.before_update));
+        erased.after_update = erase_table_hook<T>(std::move(hooks.after_update));
+        erased.before_delete = erase_table_hook<T>(std::move(hooks.before_delete));
+        erased.after_delete = erase_table_hook<T>(std::move(hooks.after_delete));
+        table_hooks_[std::type_index(typeid(T))] = std::move(erased);
+    }
+
+    void register_interceptor(SessionInterceptor interceptor) {
+        interceptors_.push_back(std::move(interceptor));
+    }
+
+    template <typename Event, typename Handler>
+    void register_domain_event_handler(Handler&& handler) {
+        domain_events_.template on<Event>(std::forward<Handler>(handler));
+    }
+
+    DomainEventBus& domain_events() noexcept { return domain_events_; }
+    const DomainEventBus& domain_events() const noexcept { return domain_events_; }
+
+    // Like the TypeScript runtime, raw flush only executes the UoW. Session
+    // interceptors, relation processing and domain-event dispatch belong to
+    // commit()/transaction(). Table hooks still run because they are UoW hooks.
     void flush() { unit_of_work_.flush(); }
 
     void commit() {
@@ -122,6 +151,7 @@ public:
         if (!executor_->capabilities().transactions) {
             flush_pipeline();
             relation_changes_.accept();
+            unit_of_work_.dispatch_domain_events();
             return;
         }
 
@@ -141,11 +171,17 @@ public:
             relation_changes_.reset();
             throw;
         }
+
+        // Database commit is already final here. Handler failures propagate as
+        // post-commit failures; they never trigger a misleading database rollback.
+        unit_of_work_.dispatch_domain_events();
     }
 
     template <typename Fn>
     auto transaction(Fn&& fn) -> std::invoke_result_t<Fn, Session&> {
         using Result = std::invoke_result_t<Fn, Session&>;
+        static_assert(!std::is_reference_v<Result>,
+                      "MetalORM: Session::transaction callbacks must return void or a value type");
 
         if (!executor_->capabilities().transactions) {
             if constexpr (std::is_void_v<Result>) {
@@ -173,8 +209,8 @@ public:
         unit_of_work_.begin_checkpoint();
         ++transaction_depth_;
 
-        try {
-            if constexpr (std::is_void_v<Result>) {
+        if constexpr (std::is_void_v<Result>) {
+            try {
                 std::invoke(std::forward<Fn>(fn), *this);
                 throw_if_rollback_only();
                 flush_pipeline();
@@ -183,10 +219,18 @@ public:
                 if (outermost) executor_->commit_transaction();
                 else executor_->release_savepoint(savepoint_name);
                 unit_of_work_.commit_checkpoint();
-                finish_transaction_scope();
-                return;
-            } else {
-                Result result = std::invoke(std::forward<Fn>(fn), *this);
+            } catch (...) {
+                rollback_transaction_scope(outermost, savepoint_name);
+                throw;
+            }
+
+            finish_transaction_scope();
+            if (outermost) unit_of_work_.dispatch_domain_events();
+            return;
+        } else {
+            std::optional<Result> result;
+            try {
+                result.emplace(std::invoke(std::forward<Fn>(fn), *this));
                 throw_if_rollback_only();
                 flush_pipeline();
                 throw_if_rollback_only();
@@ -194,23 +238,14 @@ public:
                 if (outermost) executor_->commit_transaction();
                 else executor_->release_savepoint(savepoint_name);
                 unit_of_work_.commit_checkpoint();
-                finish_transaction_scope();
-                return result;
+            } catch (...) {
+                rollback_transaction_scope(outermost, savepoint_name);
+                throw;
             }
-        } catch (...) {
-            if (outermost) {
-                try { executor_->rollback_transaction(); } catch (...) {}
-            } else {
-                rollback_only_ = true;
-                try { executor_->rollback_to_savepoint(savepoint_name); } catch (...) {}
-            }
-            if (unit_of_work_.has_checkpoint()) {
-                try { unit_of_work_.rollback_checkpoint(); } catch (...) {}
-            }
-            rebuild_identity_map();
-            relation_changes_.reset();
+
             finish_transaction_scope();
-            throw;
+            if (outermost) unit_of_work_.dispatch_domain_events();
+            return std::move(*result);
         }
     }
 
@@ -250,8 +285,52 @@ public:
     [[nodiscard]] bool rollback_only() const noexcept { return rollback_only_; }
 
 private:
+    enum class TableHookPhase {
+        BeforeInsert,
+        AfterInsert,
+        BeforeUpdate,
+        AfterUpdate,
+        BeforeDelete,
+        AfterDelete
+    };
+
+    struct ErasedTableHooks {
+        std::function<void(Session&, void*)> before_insert;
+        std::function<void(Session&, void*)> after_insert;
+        std::function<void(Session&, void*)> before_update;
+        std::function<void(Session&, void*)> after_update;
+        std::function<void(Session&, void*)> before_delete;
+        std::function<void(Session&, void*)> after_delete;
+    };
+
     template <reflect::Entity T>
     friend class EntityQuery;
+
+    template <typename T>
+    static std::function<void(Session&, void*)> erase_table_hook(
+        std::function<void(Session&, T&)> hook) {
+        if (!hook) return {};
+        return [hook = std::move(hook)](Session& session, void* object) {
+            hook(session, *static_cast<T*>(object));
+        };
+    }
+
+    template <typename T>
+    void run_table_hook(TableHookPhase phase, T& entity) {
+        auto found = table_hooks_.find(std::type_index(typeid(T)));
+        if (found == table_hooks_.end()) return;
+
+        std::function<void(Session&, void*)>* hook = nullptr;
+        switch (phase) {
+            case TableHookPhase::BeforeInsert: hook = &found->second.before_insert; break;
+            case TableHookPhase::AfterInsert: hook = &found->second.after_insert; break;
+            case TableHookPhase::BeforeUpdate: hook = &found->second.before_update; break;
+            case TableHookPhase::AfterUpdate: hook = &found->second.after_update; break;
+            case TableHookPhase::BeforeDelete: hook = &found->second.before_delete; break;
+            case TableHookPhase::AfterDelete: hook = &found->second.after_delete; break;
+        }
+        if (hook && *hook) (*hook)(*this, &entity);
+    }
 
     template <reflect::Entity T>
     static bool has_identity_key(const Value& pk) {
@@ -261,10 +340,18 @@ private:
     }
 
     void flush_pipeline() {
+        for (auto& interceptor : interceptors_) {
+            if (interceptor.before_flush) interceptor.before_flush(*this);
+        }
+
         relation_changes_.prepare();
         unit_of_work_.flush();
         relation_changes_.process();
         unit_of_work_.flush();
+
+        for (auto& interceptor : interceptors_) {
+            if (interceptor.after_flush) interceptor.after_flush(*this);
+        }
     }
 
     void rebuild_identity_map() {
@@ -289,6 +376,21 @@ private:
             throw std::logic_error(
                 "MetalORM: cannot commit transaction because an inner transaction failed");
         }
+    }
+
+    void rollback_transaction_scope(bool outermost, const std::string& savepoint_name) {
+        if (outermost) {
+            try { executor_->rollback_transaction(); } catch (...) {}
+        } else {
+            rollback_only_ = true;
+            try { executor_->rollback_to_savepoint(savepoint_name); } catch (...) {}
+        }
+        if (unit_of_work_.has_checkpoint()) {
+            try { unit_of_work_.rollback_checkpoint(); } catch (...) {}
+        }
+        rebuild_identity_map();
+        relation_changes_.reset();
+        finish_transaction_scope();
     }
 
     void finish_transaction_scope() noexcept {
@@ -333,18 +435,20 @@ private:
                 });
             }
         };
-        tracked.capture_relation_restore = [weak = std::weak_ptr<T>(entity)]() -> std::function<void()> {
+        tracked.capture_runtime_restore = [weak = std::weak_ptr<T>(entity)]() -> std::function<void()> {
             std::vector<std::function<void()>> restores;
             if (auto locked = weak.lock()) {
-                template for (constexpr auto relation : reflect::data_members<T>()) {
-                    if constexpr (reflect::has_relation_annotation<relation>()) {
-                        using Relation = reflect::member_type_t<relation>;
-                        static_assert(std::is_copy_constructible_v<Relation> && std::is_copy_assignable_v<Relation>,
-                                      "MetalORM: rollback-safe relation members must be copyable");
-                        Relation saved = (*locked).[:relation:];
+                template for (constexpr auto member : reflect::data_members<T>()) {
+                    using MemberType = reflect::member_type_t<member>;
+                    if constexpr (reflect::has_relation_annotation<member>() ||
+                                  is_domain_event_queue_v<MemberType>) {
+                        static_assert(std::is_copy_constructible_v<MemberType> &&
+                                      std::is_copy_assignable_v<MemberType>,
+                                      "MetalORM: rollback-safe runtime members must be copyable");
+                        MemberType saved = (*locked).[:member:];
                         restores.push_back(
                             [weak, saved = std::move(saved)]() mutable {
-                                if (auto current = weak.lock()) (*current).[:relation:] = saved;
+                                if (auto current = weak.lock()) (*current).[:member:] = saved;
                             });
                     }
                 }
@@ -368,6 +472,24 @@ private:
             }
         };
         tracked.erase_identity = [this](const Value& pk) { identity_map_.erase<T>(pk); };
+        tracked.before_insert = [this, weak = std::weak_ptr<T>(entity)] {
+            if (auto locked = weak.lock()) run_table_hook(TableHookPhase::BeforeInsert, *locked);
+        };
+        tracked.after_insert = [this, weak = std::weak_ptr<T>(entity)] {
+            if (auto locked = weak.lock()) run_table_hook(TableHookPhase::AfterInsert, *locked);
+        };
+        tracked.before_update = [this, weak = std::weak_ptr<T>(entity)] {
+            if (auto locked = weak.lock()) run_table_hook(TableHookPhase::BeforeUpdate, *locked);
+        };
+        tracked.after_update = [this, weak = std::weak_ptr<T>(entity)] {
+            if (auto locked = weak.lock()) run_table_hook(TableHookPhase::AfterUpdate, *locked);
+        };
+        tracked.before_delete = [this, weak = std::weak_ptr<T>(entity)] {
+            if (auto locked = weak.lock()) run_table_hook(TableHookPhase::BeforeDelete, *locked);
+        };
+        tracked.after_delete = [this, weak = std::weak_ptr<T>(entity)] {
+            if (auto locked = weak.lock()) run_table_hook(TableHookPhase::AfterDelete, *locked);
+        };
         tracked.prepare_relations = [this, weak = std::weak_ptr<T>(entity)] {
             if (auto locked = weak.lock()) {
                 relation_changes_.prepare_entity(*locked, [this](const auto& target) { this->persist(target); });
@@ -380,6 +502,16 @@ private:
         };
         tracked.accept_relations = [weak = std::weak_ptr<T>(entity)] {
             if (auto locked = weak.lock()) RelationChangeProcessor::accept_entity(*locked);
+        };
+        tracked.dispatch_domain_events = [this, weak = std::weak_ptr<T>(entity)] {
+            if (auto locked = weak.lock()) {
+                template for (constexpr auto member : reflect::data_members<T>()) {
+                    using MemberType = reflect::member_type_t<member>;
+                    if constexpr (is_domain_event_queue_v<MemberType>) {
+                        domain_events_.dispatch_queue((*locked).[:member:], *this);
+                    }
+                }
+            }
         };
         unit_of_work_.track(entity.get(), std::move(tracked));
 
@@ -870,6 +1002,9 @@ private:
     IdentityMap identity_map_;
     UnitOfWork unit_of_work_;
     RelationChangeProcessor relation_changes_;
+    std::unordered_map<std::type_index, ErasedTableHooks> table_hooks_;
+    std::vector<SessionInterceptor> interceptors_;
+    DomainEventBus domain_events_;
     std::size_t transaction_depth_{0};
     std::size_t savepoint_counter_{0};
     bool rollback_only_{false};
