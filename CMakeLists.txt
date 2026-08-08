@@ -64,6 +64,11 @@ if(METAL_ORM_BUILD_TESTS)
         tests/compile_fail/wrong_relation_shape.cpp
         "has_many member must be metal::has_many_collection<T>"
     )
+    metal_expect_compile_failure(
+        wrong-pivot-collection
+        tests/compile_fail/wrong_pivot_collection.cpp
+        "many_to_many collection pivot type must match the reflected pivot annotation"
+    )
 
     enable_testing()
 
