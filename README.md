@@ -4,11 +4,11 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.11`
+**Version:** `0.0.12`
 
-MetalORM C++ is deliberately not a C++20 ORM with a reflection adapter. Reflection is the architecture: no `entity_traits<T>`, no registration macros, no compatibility metadata layer, and no pre-C++26 fallback.
+MetalORM C++ deliberately has no compatibility metadata layer and no C++20/23 fallback. The TypeScript `metal-orm` repository is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
 
-For now, **SQLite is intentionally the only executor/dialect**. The TypeScript MetalORM is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
+For now, **SQLite is intentionally the only executor/dialect**.
 
 ## Requirements
 
@@ -17,522 +17,31 @@ For now, **SQLite is intentionally the only executor/dialect**. The TypeScript M
 - CMake 3.20+
 - SQLite 3 development headers
 
-## Model once, reflect everywhere
+## Reflection-native models
 
 ```cpp
 #include <metal/metal.hpp>
 
-struct [[=metal::mapping::table{"roles"}]] Role {
+struct [[=metal::mapping::table{"posts"}]] Post {
     [[=metal::mapping::primary_key, =metal::mapping::generated]]
     std::int64_t id{};
-    std::string name;
-};
 
-struct [[=metal::mapping::table{"user_roles"}]] UserRole {
-    [[=metal::mapping::primary_key]] std::int64_t user_id{};
-    [[=metal::mapping::primary_key]] std::int64_t role_id{};
-    std::string label;
-    std::int64_t weight{};
+    std::int64_t user_id{};
+    std::string title;
 };
 
 struct [[=metal::mapping::table{"users"}]] User {
     [[=metal::mapping::primary_key, =metal::mapping::generated]]
     std::int64_t id{};
+
     std::string name;
 
-    [[=metal::mapping::many_to_many<
-        ^^UserRole,
-        ^^UserRole::user_id,
-        ^^UserRole::role_id,
-        metal::mapping::cascade_mode::persist>{}]]
-    metal::many_to_many_collection<Role, UserRole> roles;
-};
-```
-
-There is no duplicated relation schema. The pivot type and pivot keys are reflections, and root/target keys default to the reflected primary keys. A composite-key pivot satisfies `Mapped<T>` but not `Entity<T>`; tracked `Session` entities intentionally require exactly one primary key.
-
-## Relation collections
-
-MetalORM TS has distinct has-many and many-to-many collection contracts. MetalORM C++ mirrors those roles instead of exposing one generic collection for both jobs.
-
-### Has many
-
-```cpp
-struct User {
-    [[=metal::mapping::has_many<
-        ^^Post::user_id,
-        metal::mapping::cascade_mode::all>{}]]
+    [[=metal::mapping::has_many<^^Post::user_id>{}]]
     metal::has_many_collection<Post> posts;
 };
 ```
 
-```cpp
-auto post = user->posts.add();
-post->title = "C++26 reflection";
-
-user->posts.attach(existing_post);
-user->posts.remove(existing_post);
-user->posts.clear();
-
-const auto& posts = user->posts.load();
-const auto& same_posts = user->posts.get_items();
-```
-
-When the root is already tracked, `attach()` applies the reflected foreign key immediately. Cascades and persistence still flow through the Unit of Work during `commit()`.
-
-### Many to many
-
-```cpp
-user->roles.load();
-
-user->roles.attach(role);
-user->roles.attach(role_id);
-
-user->roles.detach(role);
-user->roles.detach(role_id);
-
-user->roles.sync_by_ids(
-    std::vector<std::int64_t>{1, 2, 3});
-```
-
-ID-based operations use the relation's reflected target key. When that key is the target primary key they integrate directly with the Session Identity Map. When a different `targetKey` is declared, collection identity, pivot DML and cascade removal consistently use that alternate reflected member.
-
-### Partial typed pivot patches
-
-The TypeScript collection accepts `Partial<TPivot>`. The C++26-native equivalent is `pivot_patch<Pivot>`: only explicitly reflected members become mutation payloads.
-
-```cpp
-metal::pivot_patch<UserRole> patch;
-patch
-    .set<^^UserRole::label>(std::string{"owner"})
-    .set<^^UserRole::weight>(std::int64_t{10});
-
-user->roles.attach(role, patch);
-session.commit();
-```
-
-The patch is checked at compile time: `^^Member` must belong to `UserRole`, and the supplied value type must be compatible with that reflected member. Reattaching an existing target with a partial patch updates only the supplied columns and preserves the others.
-
-### Alternate target keys
-
-A N:N relation is not required to use the target primary key. Relation identity can use a reflected alternate member while hydrated entities continue to use their real primary key in the Session Identity Map.
-
-```cpp
-[[=metal::mapping::many_to_many<
-    ^^UserRoleByCode,
-    ^^UserRoleByCode::user_id,
-    ^^UserRoleByCode::role_code,
-    metal::mapping::cascade_mode::remove,
-    std::meta::info{},
-    ^^Role::code>{}]]
-metal::many_to_many_collection<Role, UserRoleByCode> roles;
-```
-
-```cpp
-user->roles.attach(std::string{"DEV"});
-user->roles.sync_by_ids(std::vector<std::string>{"DEV", "ADMIN"});
-user->roles.detach(std::string{"ADMIN"});
-```
-
-## Polymorphic relations
-
-`0.0.8` ports the MetalORM `morphTo`, `morphOne`, and `morphMany` family without introducing a runtime metadata registry.
-
-### Morph one
-
-```cpp
-struct Cover {
-    std::optional<std::int64_t> imageable_id;
-    std::optional<std::string> imageable_type;
-};
-
-struct Post {
-    [[=metal::mapping::morph_one<
-        ^^Cover::imageable_type,
-        ^^Cover::imageable_id,
-        "post",
-        metal::mapping::cascade_mode::all>{}]]
-    metal::morph_one_reference<Cover> cover;
-};
-```
-
-```cpp
-post->cover.set(cover);
-session.commit();
-
-assert(cover->imageable_id == post->id);
-assert(cover->imageable_type == "post");
-```
-
-`load()` is lazy and `.include<^^Post::cover>()` eagerly hydrates the relation through the same Identity Map.
-
-### Morph many
-
-```cpp
-struct Post {
-    [[=metal::mapping::morph_many<
-        ^^Attachment::attachable_type,
-        ^^Attachment::attachable_id,
-        "post",
-        metal::mapping::cascade_mode::all>{}]]
-    metal::morph_many_collection<Attachment> attachments;
-};
-```
-
-```cpp
-auto attachment = post->attachments.add();
-attachment->name = "spec.pdf";
-
-post->attachments.attach(existing);
-post->attachments.remove(existing);
-post->attachments.clear();
-```
-
-When parent and child are both new, the first Unit of Work flush generates the parent PK, the relation processor reapplies the final id/type pair, and the second flush persists those final values.
-
-### Morph to
-
-```cpp
-struct Activity {
-    std::optional<std::int64_t> subject_id;
-    std::optional<std::string> subject_type;
-
-    [[=metal::mapping::morph_to<
-        ^^Activity::subject_type,
-        ^^Activity::subject_id,
-        metal::mapping::cascade_mode::persist,
-        metal::mapping::morph_target<"post", ^^Post>,
-        metal::mapping::morph_target<"video", ^^Video>>{}]]
-    metal::morph_to_reference<Post, Video> subject;
-};
-```
-
-```cpp
-activity->subject.set(post);
-session.commit();
-
-activity->subject.load();
-auto loaded_post = activity->subject.get_as<Post>();
-
-activity->subject.set(video);
-session.commit();
-
-activity->subject.reset();
-session.commit();
-```
-
-The target set and discriminator values are compile-time data. MorphTo lazy loading groups roots by discriminator and performs one query per concrete target type, then hydrates targets through the normal Identity Map. MetalORM TS explicitly has no JOIN-based MorphTo include; `subject.load()` is the parity path.
-
-## Lazy and eager relation loading
-
-Relation wrappers are bound to the `Session` when their root entity becomes tracked. Lazy and eager hydration reuse the same Identity Map.
-
-```cpp
-auto user = session.query<User>()
-    .where(metal::field<^^User::id> == id)
-    .first();
-
-assert(!user->roles.loaded());
-user->roles.load();
-assert(user->roles.loaded());
-```
-
-```cpp
-auto users = session.query<User>()
-    .include<^^User::posts>()
-    .include<^^User::roles>()
-    .all();
-```
-
-The current SQLite executor is synchronous, so `load()` is synchronous; this is an execution-model adaptation, not a different relation semantic.
-
-## Typed SQL AST
-
-The query builder is a typed SQL AST rather than a bag of column-name strings.
-
-```cpp
-auto query = metal::select<User>()
-    .join<^^User::posts>()
-    .project(metal::field<^^User::name>)
-    .project(
-        metal::count(metal::field<^^Post::id>)
-            .as("post_count"))
-    .where(
-        metal::like(metal::field<^^User::name>, "C%") &&
-        metal::in(
-            metal::field<^^Post::id>,
-            std::vector<std::int64_t>{1, 2, 3}))
-    .group_by(metal::field<^^User::name>)
-    .having(metal::count(metal::field<^^Post::id>) > 1)
-    .order_by(metal::field<^^User::name>, false)
-    .limit(5);
-```
-
-`select<User>()` initially has only `User` in its C++ query scope. A predicate using `Post` does not satisfy the query constraints until `join<^^User::posts>()` introduces `Post` through reflected relationship metadata.
-
-For N:N, one reflected relation expands into both joins:
-
-```text
-User -> UserRole pivot -> Role
-```
-
-## Advanced SELECT AST
-
-`0.0.10` ports the advanced MetalORM SELECT family without creating a raw-SQL side channel.
-
-### BETWEEN and EXISTS
-
-```cpp
-auto subquery = metal::select<User>()
-    .clear_projection()
-    .project(metal::field<^^User::id>)
-    .where(metal::field<^^User::active> == true);
-
-auto query = metal::select<User>()
-    .where(
-        metal::between(metal::field<^^User::score>, 10, 100) &&
-        metal::exists(subquery));
-```
-
-`not_between(...)` and `not_exists(...)` use the same expression AST and compose with `&&`, `||`, and `!`.
-
-### CTEs and recursive CTEs
-
-```cpp
-auto active = metal::select<User>()
-    .where(metal::field<^^User::active> == true);
-
-auto query = metal::select<User>()
-    .with("active_users", active)
-    .from("active_users");
-```
-
-A real recursive traversal keeps table members reflected while the CTE name remains a SQL identifier:
-
-```cpp
-auto tree = metal::select<Node>()
-    .where(metal::is_null(metal::field<^^Node::parent_id>));
-
-auto step = metal::select<Node>();
-step.join_cte<^^Node::parent_id>("tree", "id");
-tree.union_all(step);
-
-auto query = metal::select<Node>()
-    .with_recursive(
-        "tree",
-        tree,
-        {"id", "parent_id", "name"})
-    .from("tree");
-```
-
-CTE column lists are checked against projection arity before compilation.
-
-### Set operations
-
-```cpp
-auto current = metal::select<User>()
-    .clear_projection()
-    .project(metal::field<^^User::id>);
-
-auto archived = metal::select<ArchivedUser>()
-    .clear_projection()
-    .project(metal::field<^^ArchivedUser::id>);
-
-current.union_all(archived);
-```
-
-The AST supports `union_with`, `union_all`, `intersect`, and `except_with`. Both sides must project the same number of expressions. Compound `ORDER BY`, `LIMIT`, and `OFFSET` are emitted after the set-operation chain.
-
-### Window functions
-
-```cpp
-auto query = metal::select<Employee>()
-    .clear_projection()
-    .project(metal::field<^^Employee::id>)
-    .project(
-        metal::row_number()
-            .partition_by(metal::field<^^Employee::department>)
-            .order_by(metal::field<^^Employee::salary>, false)
-            .as("rank_in_department"))
-    .project(
-        metal::lag(metal::field<^^Employee::salary>, 1, 0)
-            .partition_by(metal::field<^^Employee::department>)
-            .order_by(metal::field<^^Employee::id>)
-            .as("previous_salary"));
-```
-
-The current catalog includes `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `NTILE`, `LAG`, `LEAD`, `FIRST_VALUE`, and `LAST_VALUE`. Partition/order fields remain constrained by the typed query scope and literal arguments are bound as parameters.
-
-## Computed expressions and derived tables
-
-`0.0.11` unifies computed query values under one recursive typed scalar AST:
-
-```text
-ScalarTerm<Result, Owners...>
-  ├── reflected column
-  ├── literal parameter
-  ├── aggregate
-  ├── SQL function
-  ├── CASE
-  └── window function
-```
-
-This means computed expressions preserve the same compile-time owner scope as direct fields.
-
-### Derived tables / fromSubquery
-
-```cpp
-auto source = metal::select<User>()
-    .clear_projection()
-    .project(metal::field<^^User::id>)
-    .project(metal::field<^^User::name>)
-    .project(metal::field<^^User::score>)
-    .where(metal::field<^^User::score> >= 10);
-
-auto query = metal::select<User>()
-    .from_subquery(source, "high_scores")
-    .clear_projection()
-    .project(metal::field<^^User::id>)
-    .project(
-        metal::concat(
-            metal::field<^^User::name>,
-            std::string{"!"})
-            .as("display_name"))
-    .where(metal::field<^^User::score> <= 20);
-```
-
-The source is still a typed `BasicSelectQuery`, and parameters are preserved in SQL lexical order across outer projections, the derived subquery, and outer predicates.
-
-SQLite does not support derived-table column alias-list syntax such as `AS d(a, b)`. Because SQLite is intentionally the only backend today, passing a non-empty `column_aliases` list is rejected explicitly; alias the source projections instead.
-
-### CASE expressions
-
-```cpp
-auto band = metal::case_when(
-        metal::field<^^User::score> > 20,
-        std::string{"high"})
-    .when(
-        metal::field<^^User::score> > 10,
-        std::string{"medium"})
-    .otherwise(std::string{"low"});
-
-auto query = metal::select<User>()
-    .clear_projection()
-    .project(band.as("band"))
-    .where(band == std::string{"high"});
-```
-
-CASE branch result compatibility and all referenced entity owners are carried by the C++ type.
-
-### Typed SQL functions
-
-Functions can be nested without dropping field ownership or turning columns into strings:
-
-```cpp
-auto query = metal::select<User>()
-    .clear_projection()
-    .project(
-        metal::lower(
-            metal::trim(metal::field<^^User::name>))
-            .as("normalized"))
-    .project(
-        metal::year(metal::field<^^User::created_at>)
-            .as("year"))
-    .where(
-        metal::lower(
-            metal::trim(metal::field<^^User::name>)) == "alice");
-```
-
-Representative helper families include text operations, numeric functions, control flow (`coalesce`, `if_null`, `nullif`, `greatest`, `least`), date/time helpers, and JSON path/length/aggregation helpers. The C++ port also exposes:
-
-```cpp
-metal::sql_function<Result>("CUSTOM_FUNCTION", args...)
-```
-
-for SQLite functions not yet wrapped. The function name must be a simple identifier and literal arguments remain parameterized. Some optional math/extension functions depend on how SQLite itself was built, so `docs/PARITY.md` distinguishes AST/API coverage from guaranteed runtime availability.
-
-## Shared DML AST
-
-Like the original MetalORM, persistence and relation mutation share DML builders instead of maintaining a second hand-written SQL path. `0.0.9` expanded that shared layer to the richer SQLite DML surface.
-
-### Multi-row INSERT + RETURNING
-
-```cpp
-auto query = metal::InsertQueryBuilder{"users"}
-    .values({
-        {{"name", std::string{"Alice"}}, {"score", std::int64_t{10}}},
-        {{"name", std::string{"Bob"}},   {"score", std::int64_t{20}}}
-    })
-    .returning({"id", "name"})
-    .compile(dialect);
-
-auto result = db->execute(query.sql, query.params);
-```
-
-`RETURNING` is supported on INSERT, UPDATE and DELETE and flows through the normal `QueryResult.rows` path.
-
-### INSERT ... SELECT
-
-```cpp
-auto source = metal::select<Source>();
-source
-    .clear_projection()
-    .project(metal::field<^^Source::name>)
-    .project(metal::field<^^Source::score>)
-    .where(metal::field<^^Source::score> >= 10);
-
-metal::insert_into<Target>()
-    .from_select(source, {"name", "score"})
-    .returning({"id"});
-```
-
-`VALUES` and `SELECT` are mutually exclusive sources, matching the MetalORM TypeScript insert-state model.
-
-### SQLite UPSERT / ON CONFLICT
-
-```cpp
-auto query = metal::InsertQueryBuilder{"users"}
-    .values({
-        {"email", std::string{"alice@example.com"}},
-        {"name", std::string{"Alice"}}
-    })
-    .on_conflict({"email"})
-    .do_update({
-        {"name", metal::excluded("name")}
-    })
-    .returning({"id", "name"})
-    .compile(dialect);
-```
-
-`on_conflict(columns)` requires explicit SQLite conflict-target columns. Both `do_nothing()` and `do_update(...)` are supported. `excluded(column)` is accepted only in the conflict-update assignment branch.
-
-Normal UoW persistence and relation mutation continue compiling through these same builders.
-
-## Cascade semantics
-
-The cascade vocabulary follows the original runtime:
-
-```cpp
-metal::mapping::cascade_mode::none
-metal::mapping::cascade_mode::all
-metal::mapping::cascade_mode::persist
-metal::mapping::cascade_mode::remove
-metal::mapping::cascade_mode::link
-```
-
-The same two-phase commit architecture handles normal and polymorphic relation mutations:
-
-```text
-prepare cascaded persistence
-        ↓
-UnitOfWork.flush()
-        ↓
-RelationChangeProcessor.process()
-        ↓
-UnitOfWork.flush()
-        ↓
-COMMIT
-```
+There are no registration macros or duplicated `entity_traits<T>` declarations. Columns, keys and relations are discovered from the C++ type itself.
 
 ## Runtime architecture
 
@@ -549,39 +58,253 @@ Session
         SQLite
 ```
 
-## Query-module architecture
+The Unit of Work and relation mutation use the same INSERT/UPDATE/DELETE AST instead of maintaining a second hand-written SQL path.
 
-The public include remains small:
+## Relation collections
+
+MetalORM C++ mirrors the distinct TypeScript relation roles:
+
+```cpp
+metal::has_many_collection<Post>
+metal::many_to_many_collection<Role, UserRole>
+metal::morph_one_reference<Cover>
+metal::morph_many_collection<Attachment>
+metal::morph_to_reference<Post, Video>
+```
+
+Many-to-many relations support entity or target-key attach/detach, `sync_by_ids()`, typed pivot hydration, alternate `targetKey`, and partial C++26 pivot patches:
+
+```cpp
+metal::pivot_patch<UserRole> patch;
+patch
+    .set<^^UserRole::label>(std::string{"owner"})
+    .set<^^UserRole::weight>(std::int64_t{10});
+
+user->roles.attach(role, patch);
+```
+
+The patch accepts only reflected members of the declared pivot type and validates value compatibility at compile time.
+
+## Typed SELECT AST
+
+Fields carry their entity owner in the C++ type:
+
+```cpp
+auto query = metal::select<User>()
+    .join<^^User::posts>()
+    .project(metal::field<^^User::name>)
+    .project(
+        metal::count(metal::field<^^Post::id>)
+            .as("post_count"))
+    .where(
+        metal::like(metal::field<^^User::name>, "C%") &&
+        metal::between(metal::field<^^Post::id>, 1, 100))
+    .group_by(metal::field<^^User::name>)
+    .having(metal::count(metal::field<^^Post::id>) > 1);
+```
+
+`Post` fields do not satisfy the query constraints until a reflected join introduces `Post` into the typed query scope.
+
+The SELECT AST includes:
+
+- reflected INNER/LEFT joins, including N:N pivot expansion;
+- predicates, NULL/LIKE/IN/BETWEEN and subqueries;
+- aggregates, GROUP BY and HAVING;
+- CTEs and recursive CTEs;
+- UNION / UNION ALL / INTERSECT / EXCEPT;
+- window functions;
+- derived tables / `from_subquery`;
+- searched CASE;
+- recursive typed SQL function expressions.
+
+## Computed expressions
+
+Computed values share one recursive type:
+
+```text
+ScalarTerm<Result, Owners...>
+  ├── reflected column
+  ├── literal parameter
+  ├── aggregate
+  ├── SQL function
+  ├── CASE
+  └── window function
+```
+
+This preserves query ownership through nesting:
+
+```cpp
+auto normalized = metal::lower(
+    metal::trim(metal::field<^^User::name>));
+
+auto band = metal::case_when(
+        metal::field<^^User::score> > 20,
+        std::string{"high"})
+    .otherwise(std::string{"normal"});
+```
+
+The SQLite function catalog includes broad text, numeric, control-flow, date/time and JSON families. Optional SQLite math/extension functions remain dependent on the linked SQLite build.
+
+## Relation query predicates — 0.0.12
+
+Relation filtering is reflection-driven; relation names and correlation keys are not supplied as strings.
+
+```cpp
+auto users = metal::where_has<^^User::posts>(
+    metal::select<User>(),
+    [](auto& posts) {
+        posts.where(
+            metal::like(
+                metal::field<^^Post::title>,
+                "C++%"));
+    });
+```
+
+`where_has_not` produces the inverse relation condition:
+
+```cpp
+auto users_without_posts =
+    metal::where_has_not<^^User::posts>(
+        metal::select<User>());
+```
+
+For a direct target predicate:
+
+```cpp
+auto admins = metal::where_relation<^^User::roles>(
+    metal::select<User>(),
+    metal::field<^^Role::name> == "admin");
+```
+
+Relation filters can be composed:
+
+```cpp
+auto admins_with_cpp_posts =
+    metal::where_has<^^User::posts>(
+        admins,
+        [](auto& posts) {
+            posts.where(
+                metal::like(
+                    metal::field<^^Post::title>,
+                    "C++%"));
+        });
+```
+
+`belongs_to`, `has_one`, `has_many`, N:N, `morph_one`, and `morph_many` correlations derive their keys from relation metadata. `morph_to` is rejected for `where_has` because one relation can resolve to different physical target tables, matching the TypeScript restriction.
+
+`match_relation<^^Relation>(...)` exposes the relation-matching contract with the same typed correlation engine. The TypeScript implementation renders `match()` as INNER JOIN + DISTINCT; the C++ implementation uses EXISTS to avoid maintaining two independent correlation compilers while preserving root-filtering behavior.
+
+Normal relation predicates and child-query filters are supported. Callback-local pagination (`LIMIT/OFFSET` inside the relation child query) remains an explicitly tracked edge case because the current C++ correlation wrapper is applied around the configured child query.
+
+## Offset pagination — 0.0.12
+
+Level 1 / row pagination stays independent of Session:
+
+```cpp
+auto result = metal::execute_paged(
+    query,
+    executor,
+    dialect,
+    metal::PageOptions{
+        .page = 2,
+        .page_size = 25
+    });
+```
+
+It returns `Row` values and counts result rows.
+
+For tracked root entities, use the Session overload:
+
+```cpp
+auto result = metal::execute_paged(
+    query,
+    session,
+    metal::PageOptions{
+        .page = 1,
+        .page_size = 25
+    });
+```
+
+The Session path counts `DISTINCT` reflected root primary keys, reuses the Identity Map and requires a complete root-entity projection. DTO/partial projections should use the row overload instead of creating partially tracked entities.
+
+## Cursor pagination — 0.0.12
+
+Cursor ordering is expressed using reflected fields:
+
+```cpp
+std::vector order{
+    metal::cursor_order(
+        metal::field<^^User::score>,
+        false),
+    metal::cursor_order(
+        metal::field<^^User::id>)
+};
+```
+
+Forward page:
+
+```cpp
+auto page = metal::execute_cursor(
+    metal::select<User>(),
+    session,
+    order,
+    metal::CursorPageOptions{.first = 25});
+```
+
+Next page:
+
+```cpp
+auto next = metal::execute_cursor(
+    metal::select<User>(),
+    session,
+    order,
+    metal::CursorPageOptions{
+        .first = 25,
+        .after = page.page_info.end_cursor
+    });
+```
+
+Backward pagination uses `last` / `before`. The implementation follows the TypeScript keyset semantics:
+
+- lexicographic predicates for multiple ORDER BY columns;
+- direction-aware ASC/DESC comparisons;
+- `limit + 1` page detection;
+- forward and backward pagination;
+- non-null cursor values;
+- an ORDER BY signature embedded in the opaque cursor so a cursor cannot be silently reused with a different ordering.
+
+The cursor encoding is intentionally opaque and internal to the C++ API; semantic compatibility does not imply a cross-language TypeScript/C++ wire-format guarantee.
+
+## Shared DML AST
+
+```cpp
+auto insert = metal::InsertQueryBuilder{"users"}
+    .values({
+        {{"name", std::string{"Alice"}}},
+        {{"name", std::string{"Bob"}}}
+    })
+    .returning({"id", "name"});
+```
+
+Supported DML includes multi-row INSERT, typed INSERT ... SELECT, RETURNING on INSERT/UPDATE/DELETE, and SQLite ON CONFLICT DO NOTHING / DO UPDATE with `excluded(column)`.
+
+## Query module structure
 
 ```text
 metal/query.hpp
-  └── query/core.hpp
-      ├── core_types.hpp
-      └── compiler.hpp -> sqlite_compiler.hpp
+  ├── query/core.hpp
+  │    ├── core_types.hpp
+  │    └── compiler.hpp -> sqlite_compiler.hpp
   ├── query/expressions.hpp
   ├── query/functions.hpp
-  └── query/select.hpp
+  ├── query/select.hpp
+  ├── query/relation_queries.hpp
+  ├── query/relation_match.hpp
+  └── query/pagination.hpp
+
+metal/runtime_pagination.hpp
+  └── Session / IdentityMap integration
 ```
-
-The split keeps AST types, SQLite rendering, typed expression construction, function helpers, and SELECT state/building in separate responsibilities instead of letting `query.hpp` grow indefinitely.
-
-## Compile-time model validation
-
-Mappings and typed relation payloads fail at compile time for cases including:
-
-- wrong relation member wrapper;
-- N:N collection/pivot type mismatch;
-- pivot patch member from the wrong pivot type;
-- pivot patch value incompatible with its reflected member;
-- incompatible FK/key C++ types;
-- invalid Morph field ownership or key types;
-- duplicate/empty MorphTo discriminators;
-- MorphTo target not represented by the typed reference;
-- conflicting annotations;
-- duplicate mapped column names;
-- invalid generated-key declarations.
-
-Query AST validation additionally constrains reflected fields — including fields nested inside functions and CASE branches — to the current query scope and rejects scalar-subquery, CTE-column-list, and set-operation projection arity mismatches before emitting SQL.
 
 ## C++26 machinery used directly
 
@@ -600,33 +323,6 @@ template for (...)
 entity.[:Member:]
 ```
 
-Reflections are non-type template arguments throughout mapping, queries, relation metadata and mutation. Structural class NTTPs carry Morph discriminator values at compile time.
-
-## What 0.0.11 contains
-
-- C++26 static reflection and annotations as the only metadata model
-- `Mapped<T>` / `Entity<T>` concepts and `consteval` validation
-- typed SELECT SQL AST with compile-time query scope
-- modular query AST/compiler/expression/function/select headers behind `metal/query.hpp`
-- recursive `ScalarTerm<Result, Owners...>` computed expressions
-- reflected joins, projections, predicates, aggregates, grouping and scalar subqueries
-- BETWEEN / EXISTS, CTEs, recursive CTEs, set operations, and window functions
-- typed derived-table / `from_subquery` sources
-- typed searched CASE expressions usable in projection and predicates
-- broad SQLite text/numeric/control/date/JSON function helper surface
-- validated generic `sql_function<Result>` extensibility
-- shared INSERT / UPDATE / DELETE AST builders
-- multi-row INSERT and typed INSERT ... SELECT
-- INSERT/UPDATE/DELETE RETURNING and SQLite ON CONFLICT
-- reflected SQLite DDL and SQLite executor
-- `Session` coordinating `IdentityMap`, `UnitOfWork`, and `RelationChangeProcessor`
-- dedicated has-many / N:N relation collections and partial typed pivots
-- alternate non-primary N:N `targetKey` behavior
-- MorphTo/MorphOne/MorphMany runtime parity
-- MetalORM-compatible cascade vocabulary including `link`
-
-See `docs/PARITY.md` for the explicit reference matrix and ordered parity roadmap.
-
 ## Build
 
 ```bash
@@ -635,8 +331,6 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The CMake project intentionally fails on GCC < 16 and on non-GNU compilers today. That restriction should disappear only when another mainstream compiler implements the same C++26 reflection model, not through a compatibility metadata implementation.
+The project intentionally rejects GCC < 16 and non-GNU compilers today. Another compiler should be supported when it implements the same C++26 reflection model, not through a legacy metadata fallback.
 
-## Direction
-
-The TypeScript MetalORM remains the feature and behavior reference. With derived tables, CASE, and the computed/function AST family closed in 0.0.11, the next parity target is relation-query helpers (`whereHas`, `whereHasNot`, relation conditions) plus pagination and cursor-pagination helpers.
+See [`docs/PARITY.md`](docs/PARITY.md) for the explicit TypeScript parity matrix and ordered remaining gaps, and [`CHANGELOG.md`](CHANGELOG.md) for release history.
