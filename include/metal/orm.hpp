@@ -114,24 +114,131 @@ public:
     void flush() { unit_of_work_.flush(); }
 
     void commit() {
-        executor_->execute("BEGIN;");
-        try {
-            relation_changes_.prepare();
-            unit_of_work_.flush();
-            relation_changes_.process();
-            unit_of_work_.flush();
-            executor_->execute("COMMIT;");
+        if (transaction_depth_ != 0) {
+            throw std::logic_error(
+                "MetalORM: commit() cannot be called inside Session::transaction(); the transaction scope flushes automatically");
+        }
+
+        if (!executor_->capabilities().transactions) {
+            flush_pipeline();
             relation_changes_.accept();
+            return;
+        }
+
+        unit_of_work_.begin_checkpoint();
+        try {
+            executor_->begin_transaction();
+            flush_pipeline();
+            relation_changes_.accept();
+            executor_->commit_transaction();
+            unit_of_work_.commit_checkpoint();
         } catch (...) {
-            try { executor_->execute("ROLLBACK;"); } catch (...) {}
+            try { executor_->rollback_transaction(); } catch (...) {}
+            if (unit_of_work_.has_checkpoint()) {
+                try { unit_of_work_.rollback_checkpoint(); } catch (...) {}
+            }
+            rebuild_identity_map();
+            relation_changes_.reset();
             throw;
         }
+    }
+
+    template <typename Fn>
+    auto transaction(Fn&& fn) -> std::invoke_result_t<Fn, Session&> {
+        using Result = std::invoke_result_t<Fn, Session&>;
+
+        if (!executor_->capabilities().transactions) {
+            if constexpr (std::is_void_v<Result>) {
+                std::invoke(std::forward<Fn>(fn), *this);
+                commit();
+                return;
+            } else {
+                Result result = std::invoke(std::forward<Fn>(fn), *this);
+                commit();
+                return result;
+            }
+        }
+
+        const bool outermost = transaction_depth_ == 0;
+        std::string savepoint_name;
+        if (outermost) {
+            rollback_only_ = false;
+            executor_->begin_transaction();
+        } else {
+            assert_savepoint_support();
+            savepoint_name = next_savepoint_name();
+            executor_->savepoint(savepoint_name);
+        }
+
+        unit_of_work_.begin_checkpoint();
+        ++transaction_depth_;
+
+        try {
+            if constexpr (std::is_void_v<Result>) {
+                std::invoke(std::forward<Fn>(fn), *this);
+                throw_if_rollback_only();
+                flush_pipeline();
+                throw_if_rollback_only();
+                relation_changes_.accept();
+                if (outermost) executor_->commit_transaction();
+                else executor_->release_savepoint(savepoint_name);
+                unit_of_work_.commit_checkpoint();
+                finish_transaction_scope();
+                return;
+            } else {
+                Result result = std::invoke(std::forward<Fn>(fn), *this);
+                throw_if_rollback_only();
+                flush_pipeline();
+                throw_if_rollback_only();
+                relation_changes_.accept();
+                if (outermost) executor_->commit_transaction();
+                else executor_->release_savepoint(savepoint_name);
+                unit_of_work_.commit_checkpoint();
+                finish_transaction_scope();
+                return result;
+            }
+        } catch (...) {
+            if (outermost) {
+                try { executor_->rollback_transaction(); } catch (...) {}
+            } else {
+                rollback_only_ = true;
+                try { executor_->rollback_to_savepoint(savepoint_name); } catch (...) {}
+            }
+            if (unit_of_work_.has_checkpoint()) {
+                try { unit_of_work_.rollback_checkpoint(); } catch (...) {}
+            }
+            rebuild_identity_map();
+            relation_changes_.reset();
+            finish_transaction_scope();
+            throw;
+        }
+    }
+
+    void rollback() {
+        if (executor_->capabilities().transactions && transaction_depth_ != 0) {
+            try { executor_->rollback_transaction(); } catch (...) {}
+        }
+
+        if (unit_of_work_.has_checkpoint()) {
+            unit_of_work_.rollback_all_checkpoints();
+            rebuild_identity_map();
+        } else {
+            unit_of_work_.clear();
+            identity_map_.clear();
+        }
+        relation_changes_.reset();
+        transaction_depth_ = 0;
+        savepoint_counter_ = 0;
+        rollback_only_ = false;
     }
 
     void clear() {
         unit_of_work_.clear();
         identity_map_.clear();
         relation_changes_.reset();
+        transaction_depth_ = 0;
+        savepoint_counter_ = 0;
+        rollback_only_ = false;
     }
 
     DbExecutor& executor() noexcept { return *executor_; }
@@ -139,6 +246,8 @@ public:
     IdentityMap& identity_map() noexcept { return identity_map_; }
     UnitOfWork& unit_of_work() noexcept { return unit_of_work_; }
     RelationChangeProcessor& relation_changes() noexcept { return relation_changes_; }
+    [[nodiscard]] std::size_t transaction_depth() const noexcept { return transaction_depth_; }
+    [[nodiscard]] bool rollback_only() const noexcept { return rollback_only_; }
 
 private:
     template <reflect::Entity T>
@@ -149,6 +258,45 @@ private:
         if (std::holds_alternative<std::nullptr_t>(pk)) return false;
         if constexpr (reflect::primary_key_is_generated<T>()) return !is_empty_generated_value(pk);
         return true;
+    }
+
+    void flush_pipeline() {
+        relation_changes_.prepare();
+        unit_of_work_.flush();
+        relation_changes_.process();
+        unit_of_work_.flush();
+    }
+
+    void rebuild_identity_map() {
+        identity_map_.clear();
+        unit_of_work_.register_all_identities();
+    }
+
+    void assert_savepoint_support() const {
+        if (!executor_->capabilities().savepoints) {
+            throw std::logic_error(
+                "MetalORM: nested Session::transaction() calls require savepoint support in this executor");
+        }
+    }
+
+    std::string next_savepoint_name() {
+        ++savepoint_counter_;
+        return "metalorm_sp_" + std::to_string(savepoint_counter_);
+    }
+
+    void throw_if_rollback_only() const {
+        if (rollback_only_) {
+            throw std::logic_error(
+                "MetalORM: cannot commit transaction because an inner transaction failed");
+        }
+    }
+
+    void finish_transaction_scope() noexcept {
+        if (transaction_depth_ != 0) --transaction_depth_;
+        if (transaction_depth_ == 0) {
+            rollback_only_ = false;
+            savepoint_counter_ = 0;
+        }
     }
 
     template <reflect::Entity T>
@@ -173,6 +321,37 @@ private:
         tracked.snapshot = [this, weak = std::weak_ptr<T>(entity)] {
             if (auto locked = weak.lock()) return snapshot_of(*locked);
             return std::unordered_map<std::string, Value>{};
+        };
+        tracked.restore_snapshot = [weak = std::weak_ptr<T>(entity)](
+            const std::unordered_map<std::string, Value>& values) {
+            if (auto locked = weak.lock()) {
+                reflect::for_each_column<T>([&]<std::meta::info Member>() {
+                    const auto found = values.find(reflect::column_name<Member>());
+                    if (found == values.end()) return;
+                    using M = reflect::member_type_t<Member>;
+                    (*locked).[:Member:] = from_value<M>(found->second);
+                });
+            }
+        };
+        tracked.capture_relation_restore = [weak = std::weak_ptr<T>(entity)]() -> std::function<void()> {
+            std::vector<std::function<void()>> restores;
+            if (auto locked = weak.lock()) {
+                template for (constexpr auto relation : reflect::data_members<T>()) {
+                    if constexpr (reflect::has_relation_annotation<relation>()) {
+                        using Relation = reflect::member_type_t<relation>;
+                        static_assert(std::is_copy_constructible_v<Relation> && std::is_copy_assignable_v<Relation>,
+                                      "MetalORM: rollback-safe relation members must be copyable");
+                        Relation saved = (*locked).[:relation:];
+                        restores.push_back(
+                            [weak, saved = std::move(saved)]() mutable {
+                                if (auto current = weak.lock()) (*current).[:relation:] = saved;
+                            });
+                    }
+                }
+            }
+            return [restores = std::move(restores)]() mutable {
+                for (auto& restore : restores) restore();
+            };
         };
         tracked.get_pk = [weak = std::weak_ptr<T>(entity)] {
             if (auto locked = weak.lock()) return reflect::primary_key_value(*locked);
@@ -691,6 +870,9 @@ private:
     IdentityMap identity_map_;
     UnitOfWork unit_of_work_;
     RelationChangeProcessor relation_changes_;
+    std::size_t transaction_depth_{0};
+    std::size_t savepoint_counter_{0};
+    bool rollback_only_{false};
 };
 
 template <reflect::Entity T>
