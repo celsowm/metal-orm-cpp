@@ -81,9 +81,15 @@ private:
 };
 
 template <typename T>
-class belongs_to_reference : public relation_reference<T> {};
+class belongs_to_reference : public relation_reference<T> {
+public:
+    using relation_reference<T>::operator=;
+};
 
 template <typename T>
-class has_one_reference : public relation_reference<T> {};
+class has_one_reference : public relation_reference<T> {
+public:
+    using relation_reference<T>::operator=;
+};
 
 } // namespace metal
