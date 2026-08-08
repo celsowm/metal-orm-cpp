@@ -60,66 +60,81 @@ inline std::string qcol(const Dialect& dialect, std::string_view alias, std::str
     return dialect.quote_identifier(alias) + "." + dialect.quote_identifier(column);
 }
 
-template <std::meta::info Relation, typename ChildQuery>
-requires requires(const ChildQuery& query, const Dialect& dialect) {
-    { query.compile_subquery(dialect) } -> std::same_as<CompiledQuery>;
-}
-RelationFilterSpec make_relation_filter(ChildQuery child, bool negated) {
+template <std::meta::info Relation>
+CompiledQuery compile_relation_correlation(
+    const Dialect& dialect,
+    std::string_view child_alias,
+    std::string_view outer_alias) {
     using Owner = reflect::owner_type_t<Relation>;
     using A = reflect::relation_annotation_t<Relation>;
     using Traits = mapping::relation_annotation_traits<A>;
+    using Target = relation_filter_target_t<Relation>;
     static_assert(Traits::kind != mapping::relation_kind::morph_to,
                   "MetalORM: morph_to does not support where_has/where_has_not because its target table is discriminator-dependent");
-    using Target = relation_filter_target_t<Relation>;
 
+    CompiledQuery out;
+    if constexpr (Traits::kind == mapping::relation_kind::belongs_to) {
+        constexpr auto foreign_key = Traits::foreign_key();
+        constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
+        out.sql = qcol(dialect, child_alias, reflect::column_name<target_key>()) + " = " +
+                  qcol(dialect, outer_alias, reflect::column_name<foreign_key>());
+    } else if constexpr (Traits::kind == mapping::relation_kind::has_one ||
+                         Traits::kind == mapping::relation_kind::has_many) {
+        constexpr auto target_fk = Traits::target_foreign_key();
+        constexpr auto local_key = reflect::key_or_primary<Owner>(Traits::local_key());
+        out.sql = qcol(dialect, child_alias, reflect::column_name<target_fk>()) + " = " +
+                  qcol(dialect, outer_alias, reflect::column_name<local_key>());
+    } else if constexpr (Traits::kind == mapping::relation_kind::many_to_many) {
+        constexpr auto pivot_reflection = Traits::pivot();
+        using Pivot = [: pivot_reflection :];
+        constexpr auto pivot_root_fk = Traits::pivot_root_foreign_key();
+        constexpr auto pivot_target_fk = Traits::pivot_target_foreign_key();
+        constexpr auto local_key = reflect::key_or_primary<Owner>(Traits::local_key());
+        constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
+        const std::string pivot_alias = "__metal_pivot";
+        out.sql =
+            "EXISTS (SELECT 1 FROM " + dialect.quote_identifier(reflect::table_name<Pivot>()) + " AS " +
+            dialect.quote_identifier(pivot_alias) + " WHERE " +
+            qcol(dialect, pivot_alias, reflect::column_name<pivot_target_fk>()) + " = " +
+            qcol(dialect, child_alias, reflect::column_name<target_key>()) + " AND " +
+            qcol(dialect, pivot_alias, reflect::column_name<pivot_root_fk>()) + " = " +
+            qcol(dialect, outer_alias, reflect::column_name<local_key>()) + ")";
+    } else if constexpr (Traits::kind == mapping::relation_kind::morph_one ||
+                         Traits::kind == mapping::relation_kind::morph_many) {
+        constexpr auto type_field = Traits::type_field();
+        constexpr auto id_field = Traits::id_field();
+        constexpr auto local_key = reflect::key_or_primary<Owner>(Traits::local_key());
+        out.sql = qcol(dialect, child_alias, reflect::column_name<id_field>()) + " = " +
+                  qcol(dialect, outer_alias, reflect::column_name<local_key>()) + " AND " +
+                  qcol(dialect, child_alias, reflect::column_name<type_field>()) + " = " +
+                  dialect.placeholder(1);
+        out.params.push_back(Value{std::string(Traits::type_value.view())});
+    }
+    return out;
+}
+
+template <typename Query>
+concept CorrelatableSelectQuery = requires(
+    const Query& query,
+    const Dialect& dialect,
+    ExtraWhereCompiler extra_where) {
+    { query.compile_subquery_with_extra_where(dialect, std::move(extra_where)) } ->
+        std::same_as<CompiledQuery>;
+};
+
+template <std::meta::info Relation, CorrelatableSelectQuery ChildQuery>
+RelationFilterSpec make_relation_filter(ChildQuery child, bool negated) {
     return RelationFilterSpec{
         negated,
-        [child = std::move(child)](const Dialect& dialect, std::string_view root_alias) mutable {
-            auto inner = child.compile_subquery(dialect);
-            const std::string rel_alias = "__metal_rel";
-            const std::string pivot_alias = "__metal_pivot";
-            std::string sql = "SELECT 1 FROM (" + inner.sql + ") AS " + dialect.quote_identifier(rel_alias);
-            std::vector<Value> params = std::move(inner.params);
-            std::string correlation;
-
-            if constexpr (Traits::kind == mapping::relation_kind::belongs_to) {
-                constexpr auto foreign_key = Traits::foreign_key();
-                constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
-                correlation = qcol(dialect, rel_alias, reflect::column_name<target_key>()) + " = " +
-                              qcol(dialect, root_alias, reflect::column_name<foreign_key>());
-            } else if constexpr (Traits::kind == mapping::relation_kind::has_one ||
-                                 Traits::kind == mapping::relation_kind::has_many) {
-                constexpr auto target_fk = Traits::target_foreign_key();
-                constexpr auto local_key = reflect::key_or_primary<Owner>(Traits::local_key());
-                correlation = qcol(dialect, rel_alias, reflect::column_name<target_fk>()) + " = " +
-                              qcol(dialect, root_alias, reflect::column_name<local_key>());
-            } else if constexpr (Traits::kind == mapping::relation_kind::many_to_many) {
-                constexpr auto pivot_reflection = Traits::pivot();
-                using Pivot = [: pivot_reflection :];
-                constexpr auto pivot_root_fk = Traits::pivot_root_foreign_key();
-                constexpr auto pivot_target_fk = Traits::pivot_target_foreign_key();
-                constexpr auto local_key = reflect::key_or_primary<Owner>(Traits::local_key());
-                constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
-                sql += " INNER JOIN " + dialect.quote_identifier(reflect::table_name<Pivot>()) + " AS " +
-                       dialect.quote_identifier(pivot_alias) + " ON " +
-                       qcol(dialect, pivot_alias, reflect::column_name<pivot_target_fk>()) + " = " +
-                       qcol(dialect, rel_alias, reflect::column_name<target_key>());
-                correlation = qcol(dialect, pivot_alias, reflect::column_name<pivot_root_fk>()) + " = " +
-                              qcol(dialect, root_alias, reflect::column_name<local_key>());
-            } else if constexpr (Traits::kind == mapping::relation_kind::morph_one ||
-                                 Traits::kind == mapping::relation_kind::morph_many) {
-                constexpr auto type_field = Traits::type_field();
-                constexpr auto id_field = Traits::id_field();
-                constexpr auto local_key = reflect::key_or_primary<Owner>(Traits::local_key());
-                correlation = qcol(dialect, rel_alias, reflect::column_name<id_field>()) + " = " +
-                              qcol(dialect, root_alias, reflect::column_name<local_key>()) + " AND " +
-                              qcol(dialect, rel_alias, reflect::column_name<type_field>()) + " = " +
-                              dialect.placeholder(params.size() + 1);
-                params.push_back(Value{std::string(Traits::type_value.view())});
-            }
-
-            sql += " WHERE " + correlation;
-            return CompiledQuery{std::move(sql), std::move(params)};
+        [child = std::move(child)](const Dialect& dialect, std::string_view outer_alias) mutable {
+            return child.compile_subquery_with_extra_where(
+                dialect,
+                [outer = std::string(outer_alias)](
+                    const Dialect& nested_dialect,
+                    std::string_view child_alias) {
+                    return compile_relation_correlation<Relation>(
+                        nested_dialect, child_alias, outer);
+                });
         }};
 }
 
@@ -141,8 +156,37 @@ RelationFilterSpec configured_relation_filter(Callback&& callback, bool negated)
         return make_relation_filter<Relation>(std::move(child), negated);
     } else {
         auto configured = std::invoke(std::forward<Callback>(callback), child);
+        static_assert(CorrelatableSelectQuery<decltype(configured)>,
+                      "MetalORM: where_has callback must return a correlatable select query");
         return make_relation_filter<Relation>(std::move(configured), negated);
     }
+}
+
+inline CompiledQuery compile_relation_filter_list(
+    const std::vector<RelationFilterSpec>& filters,
+    const Dialect& dialect,
+    std::string_view root_alias,
+    const ExtraWhereCompiler& outer_extra = {}) {
+    CompiledQuery out;
+    auto append_predicate = [&](std::string sql, std::vector<Value> params) {
+        if (sql.empty()) return;
+        if (!out.sql.empty()) out.sql += " AND ";
+        out.sql += "(" + std::move(sql) + ")";
+        out.params.insert(out.params.end(), params.begin(), params.end());
+    };
+
+    for (const auto& filter : filters) {
+        auto child = filter.compile_exists(dialect, root_alias);
+        append_predicate(
+            std::string(filter.negated ? "NOT EXISTS (" : "EXISTS (") + child.sql + ")",
+            std::move(child.params));
+    }
+
+    if (outer_extra) {
+        auto extra = outer_extra(dialect, root_alias);
+        append_predicate(std::move(extra.sql), std::move(extra.params));
+    }
+    return out;
 }
 
 } // namespace detail
@@ -160,23 +204,27 @@ public:
         return *this;
     }
 
+    [[nodiscard]] RelationFilteredQuery without_pagination() const {
+        auto copy = *this;
+        copy.base_ = base_.without_pagination();
+        return copy;
+    }
+
+    [[nodiscard]] CompiledQuery compile_subquery_with_extra_where(
+        const Dialect& dialect,
+        ExtraWhereCompiler extra_where) const {
+        return base_.compile_subquery_with_extra_where(
+            dialect,
+            [this, extra_where = std::move(extra_where)](
+                const Dialect& nested_dialect,
+                std::string_view root_alias) {
+                return detail::compile_relation_filter_list(
+                    filters_, nested_dialect, root_alias, extra_where);
+            });
+    }
+
     [[nodiscard]] CompiledQuery compile_subquery(const Dialect& dialect) const {
-        auto base = base_.compile_subquery(dialect);
-        const std::string root_alias = "__metal_root";
-        CompiledQuery out;
-        out.params = std::move(base.params);
-        out.sql = "SELECT * FROM (" + base.sql + ") AS " + dialect.quote_identifier(root_alias);
-        if (!filters_.empty()) {
-            out.sql += " WHERE ";
-            for (std::size_t i = 0; i < filters_.size(); ++i) {
-                if (i) out.sql += " AND ";
-                auto exists_query = filters_[i].compile_exists(dialect, root_alias);
-                out.params.insert(out.params.end(), exists_query.params.begin(), exists_query.params.end());
-                out.sql += filters_[i].negated ? "NOT EXISTS (" : "EXISTS (";
-                out.sql += exists_query.sql + ")";
-            }
-        }
-        return out;
+        return compile_subquery_with_extra_where(dialect, {});
     }
 
     [[nodiscard]] CompiledQuery compile(const Dialect& dialect) const {
