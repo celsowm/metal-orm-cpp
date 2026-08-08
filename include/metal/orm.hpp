@@ -98,9 +98,7 @@ public:
         }
 
         const Value pk = reflect::primary_key_value(*entity);
-        const bool is_new = std::holds_alternative<std::nullptr_t>(pk) ||
-            (reflect::primary_key_is_generated<T>() && is_empty_generated_value(pk));
-        track<T>(entity, is_new ? EntityStatus::New : EntityStatus::Managed);
+        track<T>(entity, has_identity_key<T>(pk) ? EntityStatus::Managed : EntityStatus::New);
     }
 
     template <reflect::Entity T>
@@ -148,6 +146,15 @@ private:
     friend class EntityQuery;
 
     template <reflect::Entity T>
+    static bool has_identity_key(const Value& pk) {
+        if (std::holds_alternative<std::nullptr_t>(pk)) return false;
+        if constexpr (reflect::primary_key_is_generated<T>()) {
+            return !is_empty_generated_value(pk);
+        }
+        return true;
+    }
+
+    template <reflect::Entity T>
     std::unordered_map<std::string, Value> snapshot_of(const T& entity) const {
         std::unordered_map<std::string, Value> snapshot;
         reflect::for_each_column<T>([&]<std::meta::info Member>() {
@@ -181,7 +188,7 @@ private:
         tracked.register_identity = [this, weak = std::weak_ptr<T>(entity)] {
             if (auto locked = weak.lock()) {
                 const auto pk = reflect::primary_key_value(*locked);
-                if (!is_empty_generated_value(pk)) identity_map_.put<T>(pk, locked);
+                if (has_identity_key<T>(pk)) identity_map_.put<T>(pk, locked);
             }
         };
         tracked.erase_identity = [this](const Value& pk) { identity_map_.erase<T>(pk); };
@@ -207,7 +214,7 @@ private:
         unit_of_work_.track(entity.get(), std::move(tracked));
 
         const auto pk = reflect::primary_key_value(*entity);
-        if (!is_empty_generated_value(pk)) identity_map_.put<T>(pk, entity);
+        if (has_identity_key<T>(pk)) identity_map_.put<T>(pk, entity);
     }
 
     template <reflect::Entity T>
