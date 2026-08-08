@@ -4,6 +4,7 @@
 #include "metal/query/relation_queries.hpp"
 
 #include <algorithm>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <iomanip>
@@ -12,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <typeindex>
 #include <utility>
 #include <vector>
@@ -329,8 +331,8 @@ CursorPageResult execute_cursor(
             throw std::invalid_argument(
                 "MetalORM: cursor ORDER BY signature does not match the current reflected order");
         }
-        const bool after = options.after.has_value();
-        detail::append_cursor_predicate(sql, params, alias, dialect, order, decoded.values, after);
+        detail::append_cursor_predicate(
+            sql, params, alias, dialect, order, decoded.values, !backward);
     }
 
     sql += " ORDER BY ";
