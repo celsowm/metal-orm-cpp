@@ -100,7 +100,8 @@ struct SchemaDiffOptions {
     bool allow_destructive{false};
 };
 
-struct SynchronizeOptions : SchemaDiffOptions {
+struct SynchronizeOptions {
+    bool allow_destructive{false};
     bool dry_run{false};
 };
 
