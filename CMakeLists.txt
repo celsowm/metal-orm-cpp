@@ -74,6 +74,11 @@ if(METAL_ORM_BUILD_TESTS)
         tests/compile_fail/wrong_pivot_patch_member.cpp
         "pivot_patch member must belong to the pivot type"
     )
+    metal_expect_compile_failure(
+        wrong-pivot-patch-value
+        tests/compile_fail/wrong_pivot_patch_value.cpp
+        "pivot_patch value is incompatible with pivot member type"
+    )
 
     enable_testing()
 
