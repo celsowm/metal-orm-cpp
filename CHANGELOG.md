@@ -2,6 +2,23 @@
 
 All releases currently target GCC 16+ C++26 static reflection and intentionally use SQLite as the only executor/dialect.
 
+## 0.0.15 - 2026-08-08
+
+Lifecycle hooks, Session interceptors and domain-event parity release.
+
+- Added typed `TableHooks<T>` with `before/after` INSERT, UPDATE and DELETE lifecycle callbacks wired through the Unit of Work.
+- Preserved the TypeScript hook ordering, including dirty-diff-before-`beforeUpdate` behavior and `afterDelete` after tracking removal while retaining the entity alive for the callback.
+- Added `SessionInterceptor` with `before_flush` / `after_flush` around relation prepare, both UoW flushes and relation processing.
+- Kept raw `Session::flush()` UoW-only: table hooks run, while Session interceptors, relation processing and event dispatch remain commit/transaction concerns.
+- Added typed `domain_event_queue<Events...>` and `DomainEventBus`, with compile-time event membership and handler-signature checks and internal type erasure only.
+- Added reflected discovery of ignored domain-event queue members on tracked entities and transaction-checkpoint restoration of queued events.
+- Dispatch domain events only after the successful outermost database COMMIT; nested SAVEPOINT releases never dispatch events.
+- Roll back events raised inside failed transactions/savepoints together with scalar/relation runtime state so stale events cannot leak into a later commit.
+- Treat event-handler exceptions as post-commit failures: the exception propagates, but MetalORM does not pretend an already successful database COMMIT was rolled back.
+- Match the TS bus clearing rule: an entity event queue is cleared only after all handlers complete; a handler failure leaves the queue intact for caller-defined recovery/retry policy.
+- Added E2E coverage for hook/interceptor ordering, raw flush boundaries, nested event timing, rollback of events, hook failure, `afterFlush` failure, DELETE lifecycle, and post-commit handler failure.
+- The C++ hook registration surface is deliberately typed and Session-bound (`register_table_hooks<T>`), whereas TypeScript stores hooks on `TableDef`; lifecycle and transactional semantics are aligned, while this binding-scope difference is documented rather than hidden.
+
 ## 0.0.14 - 2026-08-08
 
 Nested-transaction and rollback-safe runtime parity release.
