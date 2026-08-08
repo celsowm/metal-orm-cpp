@@ -11,6 +11,7 @@
 #include "metal/query.hpp"
 #include "metal/reflection.hpp"
 #include "metal/relation_change_processor.hpp"
+#include "metal/runtime_pagination.hpp"
 #include "metal/runtime_types.hpp"
 #include "metal/unit_of_work.hpp"
 #include "metal/value.hpp"
