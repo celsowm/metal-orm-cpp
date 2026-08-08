@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.6 - 2026-08-08
+
+Relation-collection parity release. SQLite remains the only executor/dialect intentionally.
+
+- Replace the generic `metal::collection<T>` surface with dedicated `metal::has_many_collection<T>` and `metal::many_to_many_collection<T, Pivot>` wrappers, matching the distinct collection roles in MetalORM TS.
+- Make reflected mapping validation require the correct wrapper shape for each to-many relation and validate that the N:N wrapper's `Pivot` type matches the reflected pivot annotation.
+- Add Session-bound lazy `load()` and `get_items()` semantics so a tracked relation can be loaded without `.include<...>()`.
+- Add has-many `add()`, `attach()`, `remove()`, and `clear()` semantics; attaching to an already tracked root applies the reflected foreign key immediately.
+- Add N:N attach/detach by entity or reflected target-key value and `sync_by_ids()`.
+- Bind ID-based N:N operations to reflected target identity and the Session Identity Map when the target key is the primary key.
+- Hydrate N:N pivot rows into the real reflected C++ pivot type rather than an untyped side object.
+- Accept typed pivot payloads on N:N attach, persist their non-FK fields on pivot INSERT, and update an existing pivot when an already-linked target is reattached with new pivot data.
+- Restore MetalORM pivot-insert semantics by using a normal INSERT instead of SQLite `ON CONFLICT DO NOTHING` for relation attach.
+- Extend runtime-parity coverage for lazy loading, `get_items()`, attach by ID, `sync_by_ids()`, typed pivot hydration, pivot INSERT, and pivot UPDATE on real in-memory SQLite.
+- Keep synchronous `load()` as the C++ adaptation while the only executor is synchronous SQLite.
+- Leave partial-field pivot patching as a known remaining sub-gap: this release accepts a full typed `Pivot` payload, whereas MetalORM TS accepts `Partial<TPivot>`.
+
 ## 0.0.5 - 2026-08-08
 
 MetalORM architectural-parity release. SQLite remains the only executor/dialect intentionally.
