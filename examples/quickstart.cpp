@@ -27,7 +27,7 @@ struct [[=metal::mapping::table{"users"}]] User {
         ^^UserRole::user_id,
         ^^UserRole::role_id,
         metal::mapping::cascade_mode::persist>{}]]
-    metal::collection<Role> roles;
+    metal::many_to_many_collection<Role, UserRole> roles;
 };
 
 int main() {
@@ -55,13 +55,12 @@ int main() {
     session.commit();
     session.clear();
 
-    auto users = session.query<User>()
+    auto user = session.query<User>()
         .where(metal::field<^^User::active> == true)
-        .order_by(metal::field<^^User::name>)
-        .include<^^User::roles>()
-        .all();
+        .first();
 
-    for (const auto& user : users) {
+    if (user) {
+        user->roles.load();
         std::cout << user->name << '\n';
         for (const auto& role : user->roles) {
             std::cout << "  - " << role->name << '\n';
