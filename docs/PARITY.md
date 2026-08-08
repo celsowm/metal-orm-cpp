@@ -32,7 +32,7 @@ Legend:
 | Table lifecycle hooks | ✅ | both implementations are Session-bound; C++ registration is entity-type-safe |
 | Session interceptors | ✅ | `before_flush` / `after_flush` wrap the full flush pipeline |
 | Domain events | ✅ | typed queues + handlers; dispatch only after successful outermost commit |
-| saveGraph/updateGraph/patchGraph | ✅/🟡 | typed C++ graph payloads, nested relations, pivots, pruning and transaction integration; single-reference runtime hardening continues in 0.0.17 |
+| saveGraph/updateGraph/patchGraph | ✅ | typed nested graph payloads, pivots, pruning, single references and transaction integration |
 
 ## Transaction parity — 0.0.14
 
@@ -70,16 +70,7 @@ DELETE: beforeDelete -> DELETE/remove tracking -> afterDelete
 
 Raw `Session::flush()` remains UoW-only: table hooks execute, but Session interceptors, relation processing and domain-event dispatch do not.
 
-Domain events use typed queues:
-
-```cpp
-using Events = metal::domain_event_queue<UserCreated, UserRenamed>;
-
-[[=metal::mapping::ignore]]
-Events domain_events;
-```
-
-They dispatch only after a successful outermost COMMIT. SAVEPOINT release never dispatches. Event queues participate in transaction checkpoints, and post-COMMIT handler errors propagate without a fake database rollback.
+Domain events use typed queues and dispatch only after a successful outermost COMMIT. SAVEPOINT release never dispatches. Event queues participate in transaction checkpoints, and post-COMMIT handler errors propagate without a fake database rollback.
 
 ## Graph persistence — 0.0.16
 
@@ -101,36 +92,54 @@ auto payload = metal::graph<User>()
 auto user = metal::save_graph(session, payload);
 ```
 
-The public operations are:
+The public operations are `save_graph`, `update_graph` and `patch_graph`. Omitted fields and relations are untouched. `GraphOptions::prune_missing` removes/detaches collection members not represented in the graph. Collection payloads support nested graph values, existing entities and IDs; N:N entries additionally accept `pivot_patch<Pivot>` and respect alternate `targetKey` metadata.
+
+Graph execution composes with `Session::transaction()` by default, therefore database writes, generated IDs, runtime relation state and queued domain events remain under the transaction checkpoint.
+
+The C++ graph API is intentionally not a dynamic `Record<string, unknown>` clone. Its stronger reflected shape is a language-binding adaptation; graph behavior remains the parity target.
+
+## Dedicated single references — 0.0.17
+
+`belongsTo` and `hasOne` now use dedicated wrappers exclusively:
 
 ```cpp
-metal::save_graph(session, payload, options);
-metal::update_graph(session, payload, options);
-metal::patch_graph(session, payload, options);
+metal::belongs_to_reference<User> author;
+metal::has_one_reference<Profile> profile;
 ```
 
-`update_graph` and `patch_graph` require the reflected root PK in the payload and return an empty `shared_ptr` when the root row does not exist. Omitted fields and relations are untouched. `GraphOptions::prune_missing` removes/detaches existing collection members not represented in the graph, matching `pruneMissing` semantics in the TypeScript runtime.
+A raw `std::shared_ptr<T>` member annotated as either relation is rejected by mapping validation. There is no legacy compatibility specialization.
 
-Collection payloads support nested graph values, existing entities and relation IDs. N:N graph entries additionally accept the existing typed `pivot_patch<Pivot>`; relation identity respects a declared alternate `targetKey`.
+Both wrappers expose:
 
-Graph execution composes with `Session::transaction()` by default, therefore database writes, generated IDs, runtime relation state and queued domain events remain under the transaction checkpoint. `GraphOptions{.transactional = false, .flush = ...}` exposes the same explicit non-transactional execution choice as the reference Session API.
+```text
+load / loaded
+get
+set / reset
+dirty
+```
 
-A dedicated SQLite E2E covers root + has-one + has-many + N:N/pivot creation, generated keys, hook/event integration, `prune_missing`, partial patch behavior, nested belongs-to creation and missing-root update behavior. Compile-fail coverage rejects incompatible reflected scalar values.
+Session binding supplies lazy loaders. Eager and lazy hydration call `_metal_hydrate()` internally, which establishes `current == baseline`; reading a relation therefore never creates a false mutation. User `set/reset` changes `current` while preserving the baseline until a successful commit accepts the relation state.
 
-The C++ graph API is intentionally not a dynamic `Record<string, unknown>` clone. Its stronger reflected shape is a language binding adaptation; graph behavior remains the parity target.
+For `belongsTo`, `set()` synchronizes the root FK immediately when the target relation key is already available. If a configured cascade-persist target receives a generated key during the first UoW flush, relation processing resolves the key afterward and the second UoW flush persists the root FK. Clearing requires a nullable root FK in the C++ type.
+
+For `hasOne`, the child carries the FK. Replacing a loaded reference attaches the new child and detaches the old child; detach nulls a nullable child FK or applies cascade remove when configured. Newly attached targets participate in cascade persist.
+
+The same generic transaction checkpoint introduced in 0.0.14 copies relation wrappers. A rollback therefore restores both the pointer and its baseline/dirty state; no single-reference-specific rollback side channel was added.
+
+The dedicated 0.0.17 SQLite E2E covers new-root/generated-key attachment, lazy loading, Identity Map reuse, belongs-to set/reset, has-one replacement/reset, nullable detach, cascade persist and transaction rollback. Compile-fail tests separately reject raw `shared_ptr` belongs-to and has-one shapes.
 
 ## Relations
 
 | MetalORM capability | C++ status | Notes |
 | --- | --- | --- |
-| belongsTo | ✅/🟡 | dedicated `belongs_to_reference<T>` introduced in 0.0.16; eager + graph semantics present, generic lazy/mutation pipeline hardening is next |
-| hasOne | ✅/🟡 | dedicated `has_one_reference<T>` introduced in 0.0.16; eager + graph semantics present, generic lazy/mutation pipeline hardening is next |
+| belongsTo | ✅ | dedicated reference, lazy/eager hydration, target-key FK sync, set/reset, rollback |
+| hasOne | ✅ | dedicated reference, lazy/eager hydration, replacement/detach, cascade and rollback |
 | hasMany | ✅/🟡 | dedicated collection; broader JS-object conveniences remain language-specific |
 | belongsToMany | ✅ | lazy/eager loading, IDs, sync, typed pivot patches, alternate `targetKey` |
 | morphTo | ✅ | typed target set, lazy resolution, switching/reset, cascade persist |
 | morphOne | ✅ | dedicated reference, lazy/eager loading, mutation/cascade |
 | morphMany | ✅ | dedicated collection, lazy/eager loading, mutation/cascade |
-| cascade none/all/persist/remove/link | ✅ | aligned vocabulary and runtime semantics |
+| cascade none/all/persist/remove/link | ✅ | aligned vocabulary and runtime semantics for supported relation operations |
 
 `has_many_collection<T>` supports `load`, `get_items`, `add`, `attach`, `remove`, `clear`, Session-bound lazy loading and reflected FK assignment.
 
@@ -176,7 +185,7 @@ The C++ graph API is intentionally not a dynamic `Record<string, unknown>` clone
 | MorphOne/MorphMany relation predicates | ✅ | reflected id/type correlation |
 | MorphTo whereHas | intentionally unsupported | same physical-target ambiguity as TS |
 
-0.0.13 moved correlation into the SELECT `WHERE` compilation point. Callback-local `ORDER BY / LIMIT / OFFSET` runs after correlation, and root relation predicates run before root pagination. Nested correlation aliases prevent alias shadowing while ordinary queries retain stable `t0/t1/p0` aliases.
+Correlation lives in the SELECT `WHERE` compilation point. Callback-local `ORDER BY / LIMIT / OFFSET` runs after correlation, and root relation predicates run before root pagination. Nested correlation aliases prevent alias shadowing while ordinary queries retain stable `t0/t1/p0` aliases.
 
 ## Pagination parity — 0.0.13
 
@@ -222,9 +231,8 @@ Session-specific tracked pagination remains isolated in `runtime_pagination.hpp`
 
 ## Ordered parity roadmap
 
-With graph persistence functionally landed in 0.0.16, the next reference gap is deliberately narrow:
+The narrow runtime gaps through graph persistence and single-reference semantics are now closed through 0.0.17. The next version should be selected from a **fresh audit of current TypeScript capabilities**, rather than preserving an old checklist after the reference implementation changes.
 
-1. **0.0.17:** finish `belongs_to_reference<T>` / `has_one_reference<T>` as the only single-reference relation shape: Session-bound lazy loading, general `set/reset` mutation/cascade processing, baseline acceptance, then remove raw `std::shared_ptr<T>` relation compatibility.
-2. Then: schema/tooling/ecosystem modules such as introspection/diff, bulk operations, DTO/OpenAPI, cache, Tree/MPTT, pooling and code generation.
+Known larger gaps currently include schema introspection/diff/migrations, bulk operations, DTO/OpenAPI, cache, Tree/MPTT, pooling and DB-to-entity generation. SQLite remains the only backend while these parity layers are evaluated.
 
 A later query-performance pass may replace in-memory root deduplication with a root-aware SQL page plan, provided it preserves the tested 0.0.13 semantics.
