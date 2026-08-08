@@ -1,0 +1,6 @@
+#pragma once
+
+#define METAL_ORM_VERSION_MAJOR 0
+#define METAL_ORM_VERSION_MINOR 0
+#define METAL_ORM_VERSION_PATCH 1
+#define METAL_ORM_VERSION "0.0.1"
