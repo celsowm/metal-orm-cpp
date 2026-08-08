@@ -6,76 +6,50 @@ C++26 reflection may replace metadata plumbing, improve compile-time safety, and
 
 SQLite is intentionally the only backend while semantic parity is being built.
 
+Legend:
+
+- ✅ parity for the supported SQLite execution model
+- 🟡 implemented with an explicit remaining edge/sub-gap
+- ❌ not ported yet
+
 ## Runtime and mapping
 
 | MetalORM capability | C++ status | Notes |
 | --- | --- | --- |
-| Entity/table metadata | ✅ | C++26 annotations + static reflection replace TS table/decorator metadata |
+| Entity/table metadata | ✅ | C++26 annotations + static reflection |
 | Primary/generated columns | ✅ | `consteval` validated |
 | Identity Map | ✅ | Separate runtime component |
 | Unit of Work | ✅ | Separate component; shared DML AST |
 | Session coordinator | ✅ | Coordinates UoW, Identity Map and relation processor |
 | Dirty snapshots | ✅ | Reflection-generated |
-| Persist/remove lifecycle | ✅ | Aligned with TS runtime semantics |
-| Nested transactions/savepoints | ❌ | Not ported yet |
-| Interceptors/hooks | ❌ | Not ported yet |
-| Domain events | ❌ | Not ported yet |
-| saveGraph/updateGraph/patchGraph | ❌ | Not ported yet |
+| Persist/remove lifecycle | ✅ | Aligned with TS semantics |
+| Nested transactions/savepoints | ❌ | Next runtime family |
+| Interceptors/hooks | ❌ | Next runtime family |
+| Domain events | ❌ | Next runtime family |
+| saveGraph/updateGraph/patchGraph | ❌ | Next runtime family |
 
 ## Relations
 
 | MetalORM capability | C++ status | Notes |
 | --- | --- | --- |
-| belongsTo | ✅ | Reflected metadata + eager load |
-| hasOne | ✅ | Reflected metadata + eager load |
-| hasMany | ✅/🟡 | Dedicated collection, lazy/eager load and mutation; broader edge-case parity still evolving |
-| belongsToMany | ✅ | Dedicated collection, lazy/eager load, IDs, sync, partial typed pivots and alternate `targetKey` behavior |
-| morphTo | ✅ | Typed target set, lazy resolution, target switching, reset and cascade persist |
-| morphOne | ✅ | Dedicated reference, lazy/eager loading, mutation and cascade behavior |
-| morphMany | ✅ | Dedicated collection, lazy/eager loading, mutation and cascade behavior |
-| cascade none/all/persist/remove/link | ✅ | Vocabulary and relation remove/persist semantics aligned |
+| belongsTo | ✅ | reflected metadata + eager loading |
+| hasOne | ✅ | reflected metadata + eager loading |
+| hasMany | ✅/🟡 | dedicated collection; broader JS-object conveniences remain |
+| belongsToMany | ✅ | lazy/eager loading, IDs, sync, typed pivot patches, alternate `targetKey` |
+| morphTo | ✅ | typed target set, lazy resolution, switching/reset, cascade persist |
+| morphOne | ✅ | dedicated reference, lazy/eager loading, mutation/cascade |
+| morphMany | ✅ | dedicated collection, lazy/eager loading, mutation/cascade |
+| cascade none/all/persist/remove/link | ✅ | aligned vocabulary and runtime semantics |
 
-### Has-many collection
+### Collection parity
 
-Implemented:
+`has_many_collection<T>` supports `load`, `get_items`, `add`, `attach`, `remove`, `clear`, Session-bound lazy loading and reflected FK assignment.
 
-- `load()`
-- `get_items()`
-- `add()`
-- `attach()`
-- `remove()`
-- `clear()`
-- Session-bound lazy loading
-- reflected FK assignment for tracked roots
-- UoW/cascade integration
-
-### Many-to-many collection
-
-Implemented:
-
-- `load()`
-- `get_items()`
-- `attach(entity)`
-- `attach(id)`
-- `detach(entity)`
-- `detach(id)`
-- `sync_by_ids()`
-- typed pivot hydration
-- typed partial `pivot_patch<Pivot>` INSERT/UPDATE semantics
-- compile-time pivot member ownership and patch-value compatibility
-- relation-FK filtering from pivot DML payloads
-- alternate non-primary `targetKey` for attach/detach/sync/pivot DML/cascade
-- normal primary-key Identity Map integration after hydrated targets are materialized
-
-`pivot_patch<Pivot>` is the C++ adaptation of TypeScript `Partial<TPivot>`: only explicitly reflected members become DML assignments, and repeated patches merge without resetting omitted fields.
-
-The TypeScript `RelationChangeProcessor` now also resolves belongs-to-many mutation keys through the declared `targetKey`, so the previous implementation mismatch is closed in both repositories.
+`many_to_many_collection<T, Pivot>` supports entity/ID attach and detach, `sync_by_ids`, typed pivot hydration, partial `pivot_patch<Pivot>`, alternate non-primary target keys and Identity Map integration after hydration.
 
 ### Polymorphic relations
 
-`morph_one` and `morph_many` keep the MetalORM parent-side semantics: the target row stores the reflected id/type pair, `set()` / `attach()` writes the pair in memory, lazy/eager hydration filters by both fields, and removal either clears them or cascades according to the relation mode.
-
-`morph_to` keeps the child-side semantics with a compile-time target registry:
+`morph_to` encodes discriminator targets at compile time:
 
 ```cpp
 [[=metal::mapping::morph_to<
@@ -87,179 +61,117 @@ The TypeScript `RelationChangeProcessor` now also resolves belongs-to-many mutat
 metal::morph_to_reference<Post, Video> subject;
 ```
 
-The discriminator set is `consteval` validated for uniqueness. Every declared target/key must be compatible with the reflected id field. Lazy loading groups roots by discriminator and performs one query per concrete target type, then hydrates through the normal Identity Map.
-
-The TypeScript query builder explicitly does not support JOIN-based `MorphTo` include and directs callers to lazy loading. The C++ typed SQL AST likewise does not model a polymorphic single-table JOIN; the parity path is `subject.load()`. `MorphOne` and `MorphMany` remain eager-loadable.
-
-Remaining relation adaptation work is limited to JS-object-model conveniences such as `toJSON()` and broader has-many edge cases; those require explicit C++ serialization/API decisions rather than literal copying.
+The discriminator set and target-key compatibility are `consteval` validated. `MorphTo` intentionally has no single-table JOIN representation; lazy polymorphic resolution is the parity path, matching the TypeScript restriction.
 
 ## Query builder and DML
 
 | MetalORM capability | C++ status | Notes |
 | --- | --- | --- |
-| Typed SELECT AST | ✅ | Compile-time entity scope |
-| WHERE/comparisons/logical expressions | ✅ partial catalog | Computed scalar operands now share the same predicate AST |
-| IN / NULL / LIKE | ✅ | Typed values/subqueries |
-| BETWEEN / NOT BETWEEN | ✅ | First-class expression AST |
-| EXISTS / NOT EXISTS | ✅ | Typed SELECT subqueries |
-| Reflected JOINs | ✅ | Non-polymorphic typed joins + runtime MorphOne/MorphMany include |
-| Projections/aliases | ✅ | Columns, aggregates, functions, CASE, and window terms |
-| Aggregates/GROUP BY/HAVING | ✅/🟡 | Core set plus STDDEV/VARIANCE AST; SQLite runtime availability can vary for extension functions |
-| Scalar IN subqueries | ✅ | Exactly-one projection validation |
-| CTE | ✅ | Multiple CTEs and optional column lists |
-| recursive CTE | ✅ | `WITH RECURSIVE` plus typed CTE join bridge; exercised on a real parent/child traversal |
-| UNION / UNION ALL | ✅ | Compound SELECT AST |
-| INTERSECT / EXCEPT | ✅ | Compound SELECT AST |
-| window functions | ✅ | ROW_NUMBER/RANK/DENSE_RANK/NTILE/LAG/LEAD/FIRST_VALUE/LAST_VALUE with partition/order specs |
-| derived tables / fromSubquery | ✅ | Typed subquery source + alias; SQLite column-alias-list syntax is explicitly rejected |
-| CASE | ✅ | Typed searched CASE usable in projections and predicates |
-| SQL function AST | ✅ | Recursive typed scalar node + validated custom function identifier |
-| SQLite text/control/date/JSON function families | ✅/🟡 | Broad executable catalog; TS-only/cross-dialect helpers continue to be filled as SQLite semantics are defined |
-| numeric function catalog | ✅/🟡 | Broad AST surface; execution of optional math functions depends on SQLite build capabilities |
-| INSERT/UPDATE/DELETE AST | ✅ | Shared by public builders, UoW and relation processor |
-| Multi-row INSERT | ✅ | Multiple `VALUES` rows in one statement |
-| INSERT ... SELECT | ✅ | Typed `BasicSelectQuery` source |
-| RETURNING | ✅ | INSERT/UPDATE/DELETE, including aliases |
-| SQLite UPSERT/conflict API | ✅ | target columns, DO NOTHING, DO UPDATE, update predicate, `excluded()` |
-| relation query helpers (`whereHas`, etc.) | ❌ | Planned next |
-| pagination/cursor helpers | ❌ | Planned next |
+| Typed SELECT AST | ✅ | compile-time entity scope |
+| comparisons/logical predicates | ✅ | typed scalar operands |
+| IN / NULL / LIKE | ✅ | values and subqueries |
+| BETWEEN / NOT BETWEEN | ✅ | first-class expression AST |
+| EXISTS / NOT EXISTS | ✅ | typed SELECT subqueries |
+| reflected JOINs | ✅ | N:1 / 1:1 / 1:N / N:N |
+| projections/aliases | ✅ | columns, aggregates, functions, CASE, windows |
+| aggregates/GROUP BY/HAVING | ✅/🟡 | core set; optional SQLite extension functions vary by build |
+| CTE / recursive CTE | ✅ | recursive traversal tested on SQLite |
+| UNION / UNION ALL / INTERSECT / EXCEPT | ✅ | projection arity validated |
+| window functions | ✅ | ranking, NTILE, LAG/LEAD, FIRST/LAST VALUE |
+| derived tables / fromSubquery | ✅ | SQLite alias-list restriction diagnosed explicitly |
+| CASE | ✅ | searched CASE in projection/predicates |
+| SQL function AST | ✅ | recursive typed scalar node + validated generic function helper |
+| text/control/date/JSON functions | ✅/🟡 | broad SQLite catalog; TS cross-dialect-only helpers remain backend-specific |
+| numeric function catalog | ✅/🟡 | AST surface broad; optional SQLite math support depends on linked build |
+| INSERT/UPDATE/DELETE AST | ✅ | public builders + UoW + relation processor share it |
+| multi-row INSERT | ✅ | accumulated VALUES rows |
+| INSERT ... SELECT | ✅ | typed SELECT source |
+| RETURNING | ✅ | INSERT/UPDATE/DELETE |
+| SQLite UPSERT | ✅ | conflict target, DO NOTHING/UPDATE, `excluded()` |
 
-### Computed scalar AST
+## Relation-query parity — 0.0.12
 
-0.0.11 removes the old projection-only split between columns, aggregates, and windows. These are now recursive scalar expressions:
+| Capability | Status | Notes |
+| --- | --- | --- |
+| whereHas | ✅/🟡 | reflected correlated EXISTS; normal child filtering/joins supported |
+| whereHasNot | ✅/🟡 | reflected NOT EXISTS |
+| relation conditions | ✅ | `where_relation<^^Relation>(..., targetPredicate)` |
+| relation match | ✅/🟡 | same root-filtering behavior through the shared EXISTS correlation engine |
+| N:N relation predicates | ✅ | reflected pivot and target keys |
+| MorphOne/MorphMany relation predicates | ✅ | reflected id/type correlation |
+| MorphTo whereHas | intentionally unsupported | same physical-target ambiguity as TS |
+
+The canonical API does not accept relation names or key names as strings:
+
+```cpp
+auto users = metal::where_has<^^User::posts>(
+    metal::select<User>(),
+    [](auto& posts) {
+        posts.where(metal::field<^^Post::published> == true);
+    });
+```
+
+`where_relation` is the concise target-predicate form:
+
+```cpp
+auto admins = metal::where_relation<^^User::roles>(
+    metal::select<User>(),
+    metal::field<^^Role::name> == "admin");
+```
+
+Relations can be filtered repeatedly by composing the free helpers.
+
+**Remaining relation-query edge:** callback-local `LIMIT/OFFSET` is not claimed as complete parity yet. The current C++ correlation engine wraps the configured child query, so ordinary child predicates/joins are correct but pagination inside the child callback can differ from the TS correlation-before-pagination order. This is deliberately marked rather than hidden.
+
+`match_relation` uses the same correlation engine. TypeScript currently renders `match()` as `INNER JOIN + DISTINCT`; C++ renders EXISTS because keeping one reflected correlation compiler avoids two semantically overlapping implementations. Observable root filtering is equivalent for the supported predicates, but SQL shape parity is not claimed.
+
+## Pagination parity — 0.0.12
+
+### Offset pagination
+
+Two execution levels mirror the TypeScript architecture:
+
+- `execute_paged(query, executor, dialect, options)` returns raw `Row` results and counts rows;
+- `execute_paged(query, session, options)` returns tracked root entities and counts `DISTINCT` reflected root primary keys.
+
+The Session overload refuses partial root projections rather than creating incomplete managed entities. Hydrated pages reuse the Identity Map.
+
+### Cursor pagination
+
+Implemented:
+
+- `first` / `after` forward pagination;
+- `last` / `before` backward pagination;
+- `limit + 1` next/previous-page detection;
+- reflected `cursor_order(field<^^T::member>, direction)` terms;
+- lexicographic multi-column keyset predicates;
+- ASC/DESC-aware break operators;
+- non-null cursor keys;
+- order signature validation so cursors cannot be reused with a different ordering;
+- Session overload returning Identity-Map-managed entities.
+
+Cursor payloads are opaque. The C++ encoder preserves the same semantic payload — version, ordered values and ordering signature — but does not promise TypeScript/C++ wire-format interchange.
+
+**Remaining pagination edge:** the Session count is distinct-root aware, but an explicitly joined query that physically duplicates root rows can still require root-aware page extraction as well as root-aware counting. Session `.include()` remains batch-loaded and does not create that duplication. This explicit-join edge is tracked for the next pagination hardening pass.
+
+## Query architecture
+
+`query.hpp` remains a façade:
 
 ```text
-ScalarTerm<Result, Owners...>
-  ├── reflected column
-  ├── literal parameter
-  ├── aggregate
-  ├── function call
-  ├── CASE
-  └── window function
+query.hpp
+  ├── core.hpp
+  │    ├── core_types.hpp
+  │    └── compiler.hpp -> sqlite_compiler.hpp
+  ├── expressions.hpp
+  ├── functions.hpp
+  ├── select.hpp
+  ├── relation_queries.hpp
+  ├── relation_match.hpp
+  └── pagination.hpp
 ```
 
-The owner pack propagates through nested expressions. This means, for example, `lower(field<^^Post::title>)` cannot be projected by a `select<User>()` until `Post` is actually part of the typed query scope.
-
-### Derived tables
-
-```cpp
-auto source = metal::select<User>()
-    .clear_projection()
-    .project(metal::field<^^User::id>)
-    .project(metal::field<^^User::name>)
-    .where(metal::field<^^User::score> >= 10);
-
-auto query = metal::select<User>()
-    .from_subquery(source, "high_scores")
-    .where(metal::field<^^User::score> <= 20);
-```
-
-The subquery remains a normal `BasicSelectQuery`, and projection/subquery/outer-predicate parameters are appended in SQL lexical order. SQLite does not support a derived-table column alias list of the form `AS alias(col1, col2)`, so the SQLite-only port rejects a non-empty alias list and requires aliases to be applied to source projections instead.
-
-### CASE and function expressions
-
-```cpp
-auto band = metal::case_when(
-        metal::field<^^User::score> > 20,
-        std::string{"high"})
-    .when(
-        metal::field<^^User::score> > 10,
-        std::string{"medium"})
-    .otherwise(std::string{"low"});
-
-auto query = metal::select<User>()
-    .clear_projection()
-    .project(band.as("band"))
-    .where(
-        metal::lower(
-            metal::trim(metal::field<^^User::name>)) == "alice");
-```
-
-Representative SQLite helper families now include text operations (`lower`, `upper`, trims, concat, substring, replace, length, left/right, character/byte helpers), numeric operations, control flow (`coalesce`, `if_null`, `nullif`, `greatest`, `least`), date/time helpers, and JSON path/length/aggregation helpers. `sql_function<Result>(name, ...)` is the extensibility path and accepts only a simple SQL identifier; literal arguments still become bound parameters.
-
-### Advanced SELECT parity details
-
-CTEs reuse the same typed SELECT source rather than accepting raw SQL:
-
-```cpp
-auto active = metal::select<User>()
-    .where(metal::field<^^User::active> == true);
-
-auto query = metal::select<User>()
-    .with("active_users", active)
-    .from("active_users");
-```
-
-Recursive CTEs can join a reflected table member to a CTE column without introducing a string predicate:
-
-```cpp
-auto tree = metal::select<Node>()
-    .where(metal::is_null(metal::field<^^Node::parent_id>));
-
-auto step = metal::select<Node>();
-step.join_cte<^^Node::parent_id>("tree", "id");
-tree.union_all(step);
-
-auto query = metal::select<Node>()
-    .with_recursive("tree", tree, {"id", "parent_id", "name"})
-    .from("tree");
-```
-
-Set operations validate projection arity before producing SQL and compound-level ordering/pagination is emitted after the set-operation chain, matching the TypeScript compiler structure.
-
-Window terms remain typed projections:
-
-```cpp
-auto query = metal::select<Employee>()
-    .clear_projection()
-    .project(metal::field<^^Employee::id>)
-    .project(
-        metal::row_number()
-            .partition_by(metal::field<^^Employee::department>)
-            .order_by(metal::field<^^Employee::salary>, false)
-            .as("rank_in_department"));
-```
-
-Window field references remain constrained by the compile-time query scope and literal window arguments are parameterized.
-
-### DML parity details
-
-The TypeScript insert builder treats `VALUES` and `SELECT` as mutually exclusive insert sources. C++ 0.0.9 keeps the same state rule:
-
-```cpp
-auto insert = metal::InsertQueryBuilder{"users"}
-    .values({
-        {{"name", std::string{"A"}}, {"score", std::int64_t{10}}},
-        {{"name", std::string{"B"}}, {"score", std::int64_t{20}}}
-    })
-    .returning({"id", "name"});
-```
-
-Typed INSERT SELECT reuses the normal select AST:
-
-```cpp
-auto source = metal::select<Source>();
-source
-    .clear_projection()
-    .project(metal::field<^^Source::name>)
-    .project(metal::field<^^Source::score>);
-
-metal::insert_into<Target>()
-    .from_select(source, {"name", "score"})
-    .returning({"id"});
-```
-
-SQLite conflict handling follows the TypeScript SQLite dialect contract and requires explicit conflict columns:
-
-```cpp
-metal::InsertQueryBuilder{"users"}
-    .values({{"email", email}, {"name", name}})
-    .on_conflict({"email"})
-    .do_update({{"name", metal::excluded("name")}})
-    .returning({"id", "name"});
-```
-
-`excluded()` is a dedicated DML operand and is accepted only in the `DO UPDATE SET` branch.
+Session-specific tracked pagination is isolated in `runtime_pagination.hpp` rather than growing the SELECT builder into a runtime monolith.
 
 ## Schema/tooling/ecosystem
 
@@ -282,8 +194,10 @@ metal::InsertQueryBuilder{"users"}
 
 The next releases should close reference gaps rather than add unrelated capabilities:
 
-1. **0.0.12:** relation query helpers (`whereHas`, `whereHasNot`, relation conditions) and pagination/cursor helpers.
-2. Then: nested transactions/savepoints, interceptors/hooks, domain events, and graph persistence/update helpers.
-3. Then: schema/tooling/ecosystem modules such as introspection/diff, bulk operations, DTO/OpenAPI, cache, Tree/MPTT, pooling, and code generation.
+1. Harden the two explicit 0.0.12 edges: callback-local relation pagination and distinct-root page extraction for explicit row-multiplying joins.
+2. Port nested transactions/savepoints and rollback-safe in-memory Unit of Work state.
+3. Port interceptors/hooks and domain events.
+4. Port saveGraph/updateGraph/patchGraph.
+5. Then move into schema/tooling/ecosystem modules: introspection/diff, bulk operations, DTO/OpenAPI, cache, Tree/MPTT, pooling and code generation.
 
 This ordering may change when comparison with the TypeScript reference exposes a more fundamental dependency.
