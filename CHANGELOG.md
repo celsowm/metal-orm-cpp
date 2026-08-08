@@ -2,6 +2,23 @@
 
 All releases currently target GCC 16+ C++26 static reflection and intentionally use SQLite as the only executor/dialect.
 
+## 0.0.14 - 2026-08-08
+
+Nested-transaction and rollback-safe runtime parity release.
+
+- Added transaction/savepoint capabilities to `DbExecutor`; SQLite advertises transactions and savepoints explicitly instead of requiring Session to concatenate transaction SQL.
+- Added validated SQLite `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE SAVEPOINT`, and `ROLLBACK TO SAVEPOINT` operations.
+- Added `Session::transaction(fn)` with transaction depth, deterministic `metalorm_sp_N` savepoints, nested release, and rollback-to-savepoint behavior.
+- Added rollback-only semantics: a failed inner transaction poisons the outer scope even when the inner exception is caught, matching the TypeScript runtime contract.
+- Reject nested transactions on executors without savepoint capability instead of issuing a second `BEGIN`.
+- Added nested UnitOfWork checkpoints that retain status, original dirty snapshot, current reflected scalar values, and reflected relation-wrapper state.
+- Restore UPDATE state after rollback, resurrect DELETE-tracked entities, rebuild the Identity Map, and remove entities introduced only inside a rolled-back scope.
+- Reset generated primary keys to their pre-transaction values when an INSERT is rolled back.
+- Preserve an outer checkpoint after a successful inner savepoint so a later outer rollback can undo inner inserts and accepted relation baselines.
+- Restore has-many/N:N/polymorphic wrapper state through reflection-generated relation restore closures instead of resetting only SQL state.
+- Made `commit()` transactional through executor capabilities and checkpoint restoration; a failed database COMMIT restores ORM state as well as rolling back SQLite.
+- Added a dedicated SQLite E2E suite covering rollback-safe UPDATE/DELETE/INSERT, generated IDs, nested success, rollback-only nested failure, relation state across released savepoints, commit failure, and missing-savepoint capability.
+
 ## 0.0.13 - 2026-08-08
 
 Relation-correlation and root-pagination hardening release.
@@ -18,7 +35,7 @@ Relation-correlation and root-pagination hardening release.
 - Kept raw row pagination row-oriented while tracked pagination remains root-oriented, matching the two abstraction levels of the reference runtime.
 - Hardened cursor keyset mode so `first` always uses after semantics and `last` always uses before semantics, independently of which cursor field carries the token.
 - Extended the SQLite E2E suite with root-limit correlation, child OFFSET correlation, pagination override, explicit 1:N JOIN paging, joined cursor paging, and unusual mode/cursor combinations.
-- Closed the two explicit semantic edges left by 0.0.12; remaining work returns to runtime parity (transactions/savepoints and rollback-safe state).
+- Closed the two explicit semantic edges left by 0.0.12; remaining work returns to runtime parity.
 
 ## 0.0.12 - 2026-08-08
 
