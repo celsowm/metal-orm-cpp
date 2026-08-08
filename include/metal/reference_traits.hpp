@@ -17,4 +17,16 @@ struct single_relation_traits<metal::has_one_reference<Target>> {
     using target_type = Target;
 };
 
+template <typename Target>
+struct belongs_to_reference_traits<metal::belongs_to_reference<Target>> {
+    static constexpr bool value = true;
+    using target_type = Target;
+};
+
+template <typename Target>
+struct has_one_reference_traits<metal::has_one_reference<Target>> {
+    static constexpr bool value = true;
+    using target_type = Target;
+};
+
 } // namespace metal::reflect
