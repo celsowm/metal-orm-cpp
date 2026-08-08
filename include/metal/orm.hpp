@@ -2,6 +2,7 @@
 
 #include "metal/execution.hpp"
 #include "metal/identity_map.hpp"
+#include "metal/polymorphic.hpp"
 #include "metal/query.hpp"
 #include "metal/reflection.hpp"
 #include "metal/relation_change_processor.hpp"
@@ -14,9 +15,11 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <typeindex>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace metal {
@@ -265,6 +268,73 @@ private:
                             if constexpr (target_key_is_pk) track<Target>(target, EntityStatus::Managed);
                             return target;
                         });
+                } else if constexpr (Traits::kind == mapping::relation_kind::morph_one) {
+                    using Target = reflect::morph_one_target_t<reflect::member_type_t<relation>>;
+                    constexpr auto type_field = Traits::type_field();
+                    constexpr auto id_field = Traits::id_field();
+                    constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
+                    using TypeField = reflect::member_type_t<type_field>;
+                    using IdField = reflect::member_type_t<id_field>;
+
+                    auto weak = std::weak_ptr<Root>(root);
+                    auto& reference = root->[:relation:];
+                    reference._metal_bind_loader([this, weak] {
+                        if (auto locked = weak.lock()) {
+                            std::vector<std::shared_ptr<Root>> roots{locked};
+                            load_morph_one_batch<Root, relation>(roots);
+                        }
+                    });
+                    reference._metal_bind_attach([weak](Target& target) {
+                        if (auto locked = weak.lock()) {
+                            target.[:id_field:] = from_value<IdField>(to_value((*locked).[:local_key:]));
+                            target.[:type_field:] = from_value<TypeField>(
+                                Value{std::string(Traits::type_value.view())});
+                        }
+                    });
+                } else if constexpr (Traits::kind == mapping::relation_kind::morph_many) {
+                    using Target = reflect::morph_many_target_t<reflect::member_type_t<relation>>;
+                    constexpr auto type_field = Traits::type_field();
+                    constexpr auto id_field = Traits::id_field();
+                    constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
+                    using TypeField = reflect::member_type_t<type_field>;
+                    using IdField = reflect::member_type_t<id_field>;
+
+                    auto weak = std::weak_ptr<Root>(root);
+                    auto& collection = root->[:relation:];
+                    collection._metal_bind_loader([this, weak] {
+                        if (auto locked = weak.lock()) {
+                            std::vector<std::shared_ptr<Root>> roots{locked};
+                            load_morph_many_batch<Root, relation>(roots);
+                        }
+                    });
+                    collection._metal_bind_attach([weak](Target& target) {
+                        if (auto locked = weak.lock()) {
+                            target.[:id_field:] = from_value<IdField>(to_value((*locked).[:local_key:]));
+                            target.[:type_field:] = from_value<TypeField>(
+                                Value{std::string(Traits::type_value.view())});
+                        }
+                    });
+                } else if constexpr (Traits::kind == mapping::relation_kind::morph_to) {
+                    constexpr auto type_field = Traits::type_field();
+                    constexpr auto id_field = Traits::id_field();
+                    using TypeField = reflect::member_type_t<type_field>;
+                    using IdField = reflect::member_type_t<id_field>;
+
+                    auto weak = std::weak_ptr<Root>(root);
+                    auto& reference = root->[:relation:];
+                    reference._metal_bind_loader([this, weak] {
+                        if (auto locked = weak.lock()) {
+                            std::vector<std::shared_ptr<Root>> roots{locked};
+                            load_morph_to_batch<Root, relation>(roots);
+                        }
+                    });
+                    reference._metal_bind_attach([weak](const auto& current) {
+                        if (!std::holds_alternative<std::monostate>(current)) return;
+                        if (auto locked = weak.lock()) {
+                            if constexpr (is_optional_v<TypeField>) (*locked).[:type_field:] = std::nullopt;
+                            if constexpr (is_optional_v<IdField>) (*locked).[:id_field:] = std::nullopt;
+                        }
+                    });
                 }
             }
         }
@@ -481,6 +551,141 @@ private:
         for (auto& root : roots) (*root).[:Relation:]._metal_hydrate(std::move(loaded[root.get()]));
     }
 
+    template <reflect::Entity Root, std::meta::info Relation>
+    void load_morph_one_batch(std::vector<std::shared_ptr<Root>>& roots) {
+        using A = reflect::relation_annotation_t<Relation>;
+        using Traits = mapping::relation_annotation_traits<A>;
+        using Target = reflect::morph_one_target_t<reflect::member_type_t<Relation>>;
+        if (roots.empty()) return;
+        constexpr auto type_field = Traits::type_field();
+        constexpr auto id_field = Traits::id_field();
+        constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
+
+        std::unordered_map<std::string, std::shared_ptr<Root>> roots_by_key;
+        std::unordered_map<Root*, std::shared_ptr<Target>> loaded;
+        std::vector<Value> keys;
+        for (auto& root : roots) {
+            const auto key = to_value((*root).[:local_key:]);
+            roots_by_key[value_key(key)] = root;
+            loaded[root.get()] = {};
+            keys.push_back(key);
+        }
+
+        std::string sql = "SELECT ";
+        append_target_columns<Target>(sql, "t");
+        sql += ", t." + dialect_->quote_identifier(reflect::column_name<id_field>()) + " AS \"__metal_root_key\"";
+        sql += " FROM " + dialect_->quote_identifier(reflect::table_name<Target>()) + " t";
+        sql += " WHERE t." + dialect_->quote_identifier(reflect::column_name<id_field>()) + " IN (";
+        append_in_placeholders(sql, keys.size());
+        sql += ") AND t." + dialect_->quote_identifier(reflect::column_name<type_field>()) + " = ?;";
+        keys.push_back(Value{std::string(Traits::type_value.view())});
+
+        const auto result = executor_->execute(sql, keys);
+        for (const auto& row : result.rows) {
+            auto root_key = row.find("__metal_root_key");
+            if (root_key == row.end()) continue;
+            auto root = roots_by_key.find(value_key(root_key->second));
+            if (root != roots_by_key.end()) loaded[root->second.get()] = hydrate<Target>(row);
+        }
+        for (auto& root : roots) (*root).[:Relation:]._metal_hydrate(std::move(loaded[root.get()]));
+    }
+
+    template <reflect::Entity Root, std::meta::info Relation>
+    void load_morph_many_batch(std::vector<std::shared_ptr<Root>>& roots) {
+        using A = reflect::relation_annotation_t<Relation>;
+        using Traits = mapping::relation_annotation_traits<A>;
+        using Target = reflect::morph_many_target_t<reflect::member_type_t<Relation>>;
+        if (roots.empty()) return;
+        constexpr auto type_field = Traits::type_field();
+        constexpr auto id_field = Traits::id_field();
+        constexpr auto local_key = reflect::key_or_primary<Root>(Traits::local_key());
+
+        std::unordered_map<std::string, std::shared_ptr<Root>> roots_by_key;
+        std::unordered_map<Root*, std::vector<std::shared_ptr<Target>>> loaded;
+        std::vector<Value> keys;
+        for (auto& root : roots) {
+            const auto key = to_value((*root).[:local_key:]);
+            roots_by_key[value_key(key)] = root;
+            loaded[root.get()] = {};
+            keys.push_back(key);
+        }
+
+        std::string sql = "SELECT ";
+        append_target_columns<Target>(sql, "t");
+        sql += ", t." + dialect_->quote_identifier(reflect::column_name<id_field>()) + " AS \"__metal_root_key\"";
+        sql += " FROM " + dialect_->quote_identifier(reflect::table_name<Target>()) + " t";
+        sql += " WHERE t." + dialect_->quote_identifier(reflect::column_name<id_field>()) + " IN (";
+        append_in_placeholders(sql, keys.size());
+        sql += ") AND t." + dialect_->quote_identifier(reflect::column_name<type_field>()) + " = ?;";
+        keys.push_back(Value{std::string(Traits::type_value.view())});
+
+        const auto result = executor_->execute(sql, keys);
+        for (const auto& row : result.rows) {
+            auto root_key = row.find("__metal_root_key");
+            if (root_key == row.end()) continue;
+            auto root = roots_by_key.find(value_key(root_key->second));
+            if (root == roots_by_key.end()) continue;
+            loaded[root->second.get()].push_back(hydrate<Target>(row));
+        }
+        for (auto& root : roots) (*root).[:Relation:]._metal_hydrate(std::move(loaded[root.get()]));
+    }
+
+    template <reflect::Entity Root, std::meta::info Relation>
+    void load_morph_to_batch(std::vector<std::shared_ptr<Root>>& roots) {
+        using A = reflect::relation_annotation_t<Relation>;
+        using Traits = mapping::relation_annotation_traits<A>;
+        using Reference = reflect::member_type_t<Relation>;
+        using Variant = typename Reference::variant_type;
+        if (roots.empty()) return;
+        constexpr auto type_field = Traits::type_field();
+        constexpr auto id_field = Traits::id_field();
+
+        std::unordered_map<Root*, Variant> loaded;
+        for (auto& root : roots) loaded.emplace(root.get(), Variant{std::monostate{}});
+
+        auto load_case = [&]<typename Case>() {
+            using CaseTraits = mapping::morph_target_traits<Case>;
+            constexpr auto target_reflection = CaseTraits::target();
+            using Target = [: target_reflection :];
+            constexpr auto target_key = reflect::key_or_primary<Target>(CaseTraits::target_key());
+
+            std::unordered_map<std::string, std::vector<std::shared_ptr<Root>>> roots_by_key;
+            std::vector<Value> keys;
+            for (auto& root : roots) {
+                const Value type_value = to_value((*root).[:type_field:]);
+                const Value id_value = to_value((*root).[:id_field:]);
+                if (std::holds_alternative<std::nullptr_t>(type_value) ||
+                    std::holds_alternative<std::nullptr_t>(id_value)) continue;
+                if (from_value<std::string>(type_value) != CaseTraits::type_value.view()) continue;
+                const auto key = value_key(id_value);
+                if (!roots_by_key.contains(key)) keys.push_back(id_value);
+                roots_by_key[key].push_back(root);
+            }
+            if (keys.empty()) return;
+
+            std::string sql = "SELECT ";
+            append_target_columns<Target>(sql, "t");
+            sql += " FROM " + dialect_->quote_identifier(reflect::table_name<Target>()) + " t";
+            sql += " WHERE t." + dialect_->quote_identifier(reflect::column_name<target_key>()) + " IN (";
+            append_in_placeholders(sql, keys.size());
+            sql += ");";
+            const auto result = executor_->execute(sql, keys);
+            for (const auto& row : result.rows) {
+                auto target = hydrate<Target>(row);
+                const auto key = value_key(to_value((*target).[:target_key:]));
+                auto matched = roots_by_key.find(key);
+                if (matched == roots_by_key.end()) continue;
+                for (auto& root : matched->second) loaded[root.get()] = target;
+            }
+        };
+
+        [&]<typename... Cases>(mapping::type_list<Cases...>) {
+            (load_case.template operator()<Cases>(), ...);
+        }(typename Traits::targets{});
+
+        for (auto& root : roots) (*root).[:Relation:]._metal_hydrate(std::move(loaded[root.get()]));
+    }
+
     std::shared_ptr<DbExecutor> executor_;
     std::shared_ptr<Dialect> dialect_;
     IdentityMap identity_map_;
@@ -515,6 +720,12 @@ EntityQuery<T>& EntityQuery<T>::include() {
         includes_.push_back([session](auto& roots) { session->template load_has_many_batch<T, Relation>(roots); });
     } else if constexpr (Traits::kind == mapping::relation_kind::many_to_many) {
         includes_.push_back([session](auto& roots) { session->template load_many_to_many_batch<T, Relation>(roots); });
+    } else if constexpr (Traits::kind == mapping::relation_kind::morph_one) {
+        includes_.push_back([session](auto& roots) { session->template load_morph_one_batch<T, Relation>(roots); });
+    } else if constexpr (Traits::kind == mapping::relation_kind::morph_many) {
+        includes_.push_back([session](auto& roots) { session->template load_morph_many_batch<T, Relation>(roots); });
+    } else if constexpr (Traits::kind == mapping::relation_kind::morph_to) {
+        includes_.push_back([session](auto& roots) { session->template load_morph_to_batch<T, Relation>(roots); });
     }
     return *this;
 }
