@@ -499,7 +499,8 @@ private:
 
         const bool has_joins = !state_->joins.empty() || !state_->cte_joins.empty();
         const bool needs_root_alias = has_joins || static_cast<bool>(extra_where);
-        const std::string root_alias = !root_alias_override.empty()
+        const bool correlated_scope = !root_alias_override.empty();
+        const std::string root_alias = correlated_scope
             ? std::string(root_alias_override)
             : (state_->derived_source
                 ? state_->derived_source->alias
@@ -517,12 +518,16 @@ private:
                 throw std::logic_error("MetalORM: join owner was not introduced before its relation");
             }
             const std::string owner_alias = owner_it->second;
-            const std::string target_alias = root_alias + "_j" + std::to_string(entity_alias++);
+            const std::string target_alias = correlated_scope
+                ? root_alias + "_j" + std::to_string(entity_alias++)
+                : "t" + std::to_string(entity_alias++);
             ctx.aliases.emplace(join.target_type, target_alias);
             const std::string keyword = join.kind == JoinKind::Left ? " LEFT JOIN " : " INNER JOIN ";
 
             if (join.relation_kind == mapping::relation_kind::many_to_many) {
-                const std::string pivot_alias_name = root_alias + "_p" + std::to_string(pivot_alias++);
+                const std::string pivot_alias_name = correlated_scope
+                    ? root_alias + "_p" + std::to_string(pivot_alias++)
+                    : "p" + std::to_string(pivot_alias++);
                 join_sql.push_back(
                     keyword + dialect.quote_identifier(*join.pivot_table) + " AS " +
                     dialect.quote_identifier(pivot_alias_name) + " ON " +
