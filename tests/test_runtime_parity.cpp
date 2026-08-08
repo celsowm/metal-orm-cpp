@@ -110,4 +110,35 @@ int main() {
     auto role_count = db->execute("SELECT COUNT(*) AS c FROM parity_roles;");
     assert(metal::from_value<std::int64_t>(pivot_count.rows.at(0).at("c")) == 0);
     assert(metal::from_value<std::int64_t>(role_count.rows.at(0).at("c")) == 0);
+
+    // A non-empty generated PK means persist() attaches as Managed rather
+    // than issuing an INSERT, matching OrmSession.persist in MetalORM TS.
+    db->execute(
+        "INSERT INTO parity_users(id, name) VALUES (?, ?);",
+        {std::int64_t{100}, std::string{"seed"}});
+    session.clear();
+    auto managed = std::make_shared<ParityUser>();
+    managed->id = 100;
+    managed->name = "seed";
+    session.persist(managed);
+    managed->name = "managed";
+    session.commit();
+
+    auto managed_row = db->execute(
+        "SELECT name FROM parity_users WHERE id = ?;",
+        {std::int64_t{100}});
+    assert(managed_row.rows.size() == 1);
+    assert(metal::from_value<std::string>(managed_row.rows[0].at("name")) == "managed");
+
+    // remove() mirrors the original runtime: an untracked detached object is
+    // not implicitly attached just to be deleted.
+    session.clear();
+    auto detached = std::make_shared<ParityUser>();
+    detached->id = user->id;
+    session.remove(detached);
+    session.commit();
+    auto user_count = db->execute(
+        "SELECT COUNT(*) AS c FROM parity_users WHERE id = ?;",
+        {user->id});
+    assert(metal::from_value<std::int64_t>(user_count.rows.at(0).at("c")) == 1);
 }
