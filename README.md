@@ -2,9 +2,9 @@
 
 ![CI](https://github.com/celsowm/metal-orm-cpp/actions/workflows/ci.yml/badge.svg?branch=main)
 
-> A C++26-native ORM built around static reflection, annotations, splicing and expansion statements.
+> A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.5`
+**Version:** `0.0.6`
 
 MetalORM C++ is deliberately not a C++20 ORM with a reflection adapter. Reflection is the architecture: no `entity_traits<T>`, no registration macros, no compatibility metadata layer, and no pre-C++26 fallback.
 
@@ -31,6 +31,7 @@ struct [[=metal::mapping::table{"roles"}]] Role {
 struct [[=metal::mapping::table{"user_roles"}]] UserRole {
     [[=metal::mapping::primary_key]] std::int64_t user_id{};
     [[=metal::mapping::primary_key]] std::int64_t role_id{};
+    std::string label;
 };
 
 struct [[=metal::mapping::table{"users"}]] User {
@@ -43,13 +44,124 @@ struct [[=metal::mapping::table{"users"}]] User {
         ^^UserRole::user_id,
         ^^UserRole::role_id,
         metal::mapping::cascade_mode::persist>{}]]
-    metal::collection<Role> roles;
+    metal::many_to_many_collection<Role, UserRole> roles;
 };
 ```
 
-There is no duplicated relation schema. The pivot type and pivot keys are reflections, and root/target keys default to the reflected primary keys.
+There is no duplicated relation schema. The pivot type and pivot keys are reflections, and root/target keys default to the reflected primary keys. A composite-key pivot satisfies `Mapped<T>` but not `Entity<T>`; tracked `Session` entities intentionally require exactly one primary key.
 
-A composite-key pivot satisfies `Mapped<T>` but not `Entity<T>`; tracked `Session` entities intentionally require exactly one primary key.
+The N:N wrapper is checked at compile time: its `Pivot` template parameter must be exactly the same type referenced by the relation annotation.
+
+## Relation collections
+
+MetalORM TS has distinct has-many and many-to-many collection contracts. `0.0.6` mirrors that instead of exposing one generic collection for both jobs.
+
+### Has many
+
+```cpp
+struct User {
+    [[=metal::mapping::has_many<
+        ^^Post::user_id,
+        metal::mapping::cascade_mode::all>{}]]
+    metal::has_many_collection<Post> posts;
+};
+```
+
+The collection exposes the corresponding C++ API:
+
+```cpp
+auto post = user->posts.add();
+post->title = "C++26 reflection";
+
+user->posts.attach(existing_post);
+user->posts.remove(existing_post);
+user->posts.clear();
+
+const auto& posts = user->posts.load();
+const auto& same_posts = user->posts.get_items();
+```
+
+When the root is already tracked, `attach()` applies the reflected foreign key immediately. Cascades and persistence still flow through the Unit of Work during `commit()`.
+
+### Many to many
+
+```cpp
+user->roles.load();
+
+user->roles.attach(role);
+user->roles.attach(role_id);
+
+user->roles.detach(role);
+user->roles.detach(role_id);
+
+user->roles.sync_by_ids(
+    std::vector<std::int64_t>{1, 2, 3});
+```
+
+ID-based operations use the reflected target key. When that target key is the primary key they integrate with the Session Identity Map and materialize a tracked ID stub when necessary, matching the original collection's attach-by-ID behavior.
+
+### Typed pivot payloads
+
+The TypeScript runtime carries pivot values in an untyped `_pivot` object. C++ can preserve the same behavior more strongly by using the real reflected pivot type:
+
+```cpp
+user->roles.attach(
+    role,
+    UserRole{
+        .label = "owner"
+    });
+
+session.commit();
+```
+
+The non-FK fields are written with the pivot INSERT. Reattaching an already-linked target with a new pivot value schedules an UPDATE rather than another link:
+
+```cpp
+user->roles.attach(
+    role,
+    UserRole{
+        .label = "reviewer"
+    });
+
+session.commit();
+```
+
+Pivot rows are also hydrated back into `UserRole`:
+
+```cpp
+user->roles.load();
+
+if (const auto* pivot = user->roles.pivot(role)) {
+    std::cout << pivot->label;
+}
+```
+
+**Known parity sub-gap:** MetalORM TS accepts `Partial<TPivot>` for pivot mutations. `0.0.6` currently accepts a complete typed `Pivot`, so unspecified non-FK members take their C++ default values. Partial-field pivot patching remains to be implemented.
+
+## Lazy and eager relation loading
+
+To-many wrappers are bound to the `Session` when their root entity becomes tracked. That makes lazy loading possible without building a separate runtime metadata registry:
+
+```cpp
+auto user = session.query<User>()
+    .where(metal::field<^^User::id> == id)
+    .first();
+
+assert(!user->roles.loaded());
+user->roles.load();
+assert(user->roles.loaded());
+```
+
+Eager loading remains available:
+
+```cpp
+auto users = session.query<User>()
+    .include<^^User::posts>()
+    .include<^^User::roles>()
+    .all();
+```
+
+Both paths hydrate through the same Identity Map. The current SQLite executor is synchronous, so `load()` is synchronous; this is an execution-model adaptation, not a different relation semantic.
 
 ## Typed SQL AST
 
@@ -71,87 +183,24 @@ auto query = metal::select<User>()
     .having(
         metal::count(metal::field<^^Post::id>) > 1)
     .order_by(metal::field<^^User::name>, false)
-    .limit(5)
-    .offset(2);
+    .limit(5);
 ```
 
-`select<User>()` initially has only `User` in its C++ query scope. A predicate using `Post` does not satisfy the query's constraints until `join<^^User::posts>()` introduces `Post` through reflected relationship metadata.
+`select<User>()` initially has only `User` in its C++ query scope. A predicate using `Post` does not satisfy the query constraints until `join<^^User::posts>()` introduces `Post` through reflected relationship metadata.
 
-The join itself is generated from the annotation. There are no table or FK strings at the call site.
-
-### Reflected joins
-
-Both inner and left joins are supported:
-
-```cpp
-auto q = metal::select<User>()
-    .left_join<^^User::roles>()
-    .project(metal::field<^^User::name>)
-    .project_as(metal::field<^^Role::name>, "role_name");
-```
-
-For N:N, MetalORM expands the one reflected relation into both SQL joins:
+For N:N, one reflected relation expands into both joins:
 
 ```text
 User -> UserRole pivot -> Role
 ```
 
-The pivot table and all four key sides come from reflected C++ declarations.
-
-### Predicates
-
-```cpp
-metal::field<^^User::age> >= 18
-metal::field<^^User::id> == metal::field<^^Post::user_id>
-metal::is_null(metal::field<^^User::nickname>)
-metal::is_not_null(metal::field<^^User::nickname>)
-metal::like(metal::field<^^User::name>, "C%")
-metal::not_like(metal::field<^^User::name>, "%bot%")
-metal::in(metal::field<^^User::id>, ids)
-metal::not_in(metal::field<^^User::id>, ids)
-```
-
-Field-to-field comparisons require compatible reflected C++ member types. `IN` over an empty range compiles to a false predicate rather than invalid `IN ()` SQLite syntax.
-
-### Aggregates and grouping
-
-```cpp
-metal::count(metal::field<^^Post::id>)
-metal::count(metal::field<^^Post::id>, true) // DISTINCT
-metal::count_all<User>()
-metal::sum(metal::field<^^Invoice::amount>)
-metal::avg(metal::field<^^Invoice::amount>)
-metal::min(metal::field<^^Invoice::amount>)
-metal::max(metal::field<^^Invoice::amount>)
-```
-
-Aggregate terms can be projections or predicates inside `HAVING`.
-
-### Scalar subqueries
-
-```cpp
-auto post_users = metal::select<Post>()
-    .project(metal::field<^^Post::user_id>)
-    .where(metal::like(
-        metal::field<^^Post::title>, "%C++%"));
-
-auto users = metal::select<User>()
-    .where(metal::in(
-        metal::field<^^User::id>,
-        post_users));
-```
-
-A scalar subquery used by `IN` must project exactly one expression. The nested parameters are merged into the outer compiled query.
-
 ## Shared DML AST
 
-Like the original MetalORM, the runtime no longer has a separate hand-written SQL path for persistence. INSERT, UPDATE and DELETE go through shared DML builders:
+Like the original MetalORM, persistence and relation mutation share DML builders instead of maintaining a second hand-written SQL path:
 
 ```cpp
 auto insert = metal::InsertQueryBuilder{"users"}
-    .values({
-        metal::DmlAssignment{"name", std::string{"Celso"}}
-    });
+    .values({metal::DmlAssignment{"name", std::string{"Celso"}}});
 
 auto update = metal::UpdateQueryBuilder{"users"}
     .set({metal::DmlAssignment{"name", std::string{"Updated"}}})
@@ -161,47 +210,11 @@ auto erase = metal::DeleteQueryBuilder{"users"}
     .where_eq("id", std::int64_t{1});
 ```
 
-`UnitOfWork` and relation mutation compile these ASTs through the same SQLite dialect.
-
-## Mutable relation collections
-
-To-many relationships use `metal::collection<T>` rather than `std::vector<std::shared_ptr<T>>`.
-
-```cpp
-auto developer = std::make_shared<Role>();
-developer->name = "developer";
-
-auto admin = std::make_shared<Role>();
-admin->name = "admin";
-
-auto user = std::make_shared<User>();
-user->name = "Celso";
-user->roles.attach(developer);
-user->roles.attach(admin);
-
-session.persist(user);
-session.commit();
-```
-
-With `cascade_mode::persist`, new relation targets are inserted first and reflected pivot rows are written in the same transaction after generated IDs exist.
-
-Collections track current state versus an accepted baseline:
-
-```cpp
-user->roles.attach(auditor);
-user->roles.detach(admin);
-user->roles.sync({developer, auditor});
-
-assert(user->roles.dirty());
-session.commit();
-assert(!user->roles.dirty());
-```
-
-The Unit of Work derives added/removed relation items from this diff, so opposite mutations before a commit naturally cancel.
+`UnitOfWork` and `RelationChangeProcessor` compile these ASTs through the same SQLite dialect. N:N attach now emits a normal pivot INSERT, matching MetalORM rather than silently using `ON CONFLICT DO NOTHING`.
 
 ## Cascade semantics
 
-MetalORM C++ follows the original cascade vocabulary:
+The cascade vocabulary follows the original runtime:
 
 ```cpp
 metal::mapping::cascade_mode::none
@@ -211,56 +224,9 @@ metal::mapping::cascade_mode::remove
 metal::mapping::cascade_mode::link
 ```
 
-For N:N, `remove` and `all` are valid just like in MetalORM TS. Detaching deletes the pivot row first; when target removal is requested, the target is then marked Removed and deleted by a second Unit of Work flush.
-
-`link` links already-persisted entities without cascading persist or remove.
-
-## 1:N mutation and cascades
-
-```cpp
-struct User {
-    // ...
-
-    [[=metal::mapping::has_many<
-        ^^Post::user_id,
-        metal::mapping::cascade_mode::all>{}]]
-    metal::collection<Post> posts;
-};
-```
-
-`cascade_mode::all` persists newly attached children and removes detached children. The reflected child FK is assigned only after generated root IDs exist.
-
-## Relationship loading
-
-All four relation kinds remain reflection-native:
-
-```cpp
-[[=metal::mapping::has_many<^^Post::user_id>{}]]
-metal::collection<Post> posts;
-
-[[=metal::mapping::has_one<^^Profile::user_id>{}]]
-std::shared_ptr<Profile> profile;
-
-[[=metal::mapping::belongs_to<^^Comment::user_id>{}]]
-std::shared_ptr<User> author;
-```
-
-And ORM loading uses reflected members directly:
-
-```cpp
-auto users = session.query<User>()
-    .where(metal::field<^^User::active> == true)
-    .include<^^User::posts>()
-    .include<^^User::profile>()
-    .include<^^User::roles>()
-    .all();
-```
-
-`include<^^...>()` dispatches at compile time to batched `belongs_to`, `has_one`, `has_many`, or `many_to_many` loading. Every hydrated row passes through the same Identity Map.
+For N:N, `remove` and `all` are valid. Detaching deletes the pivot row first; when target removal is requested, the target is marked Removed and deleted by the second Unit of Work flush. `link` links already-persisted entities without cascading persist or remove.
 
 ## Runtime architecture
-
-`Session` coordinates dedicated runtime components rather than implementing all responsibilities itself:
 
 ```text
 Session
@@ -275,7 +241,7 @@ Session
         SQLite
 ```
 
-Commit order follows the MetalORM runtime model:
+Commit order mirrors the MetalORM runtime model:
 
 ```text
 prepare cascaded persistence
@@ -289,20 +255,17 @@ UnitOfWork.flush()
 COMMIT
 ```
 
-The second flush is important because relation processing can schedule entity removals or updates.
-
 ## Compile-time model validation
 
-MetalORM validates mappings with `consteval` reflection. Invalid programs fail to compile for cases including:
+Mappings are validated with `consteval` reflection. Invalid programs fail to compile for cases including:
 
-- wrong relation member shape;
+- wrong relation member wrapper;
+- N:N collection/pivot type mismatch;
 - FK reflected from the wrong owner type;
 - incompatible FK/key C++ types;
 - conflicting annotations;
 - duplicate mapped column names;
 - invalid generated-key declarations.
-
-The test suite also checks typed query scope: a joined entity's fields are not accepted by a query before that reflected join enters the query type.
 
 ## C++26 machinery used directly
 
@@ -323,23 +286,20 @@ entity.[:Member:]
 
 Reflections are non-type template arguments in fields and relationship metadata; splicing is used for hydration, snapshots, key access and relationship mutation.
 
-## What 0.0.5 contains
+## What 0.0.6 contains
 
 - C++26 static reflection and annotations as the only metadata model
-- `Mapped<T>` / `Entity<T>` concepts and `consteval` model validation
-- typed SQL expression AST with compile-time query scope
-- reflected `INNER JOIN` / `LEFT JOIN`, including N:N pivots
-- typed projections and aliases
-- comparisons, `IN`, null predicates and `LIKE`
-- aggregates, `GROUP BY`, `HAVING`
-- scalar subqueries
+- `Mapped<T>` / `Entity<T>` concepts and `consteval` validation
+- typed SELECT SQL AST with compile-time query scope
+- reflected joins, projections, predicates, aggregates, grouping and scalar subqueries
 - shared INSERT / UPDATE / DELETE AST builders
 - reflected SQLite DDL, including composite primary keys
 - SQLite executor
-- `Session` coordinating separate `IdentityMap`, `UnitOfWork`, and `RelationChangeProcessor`
+- `Session` coordinating `IdentityMap`, `UnitOfWork`, and `RelationChangeProcessor`
 - reflected dirty checking and generated keys
-- batched `belongs_to`, `has_one`, `has_many`, `many_to_many`
-- `metal::collection<T>` with `attach`, `detach`, `sync`, `loaded`, `dirty`
+- batched eager relations plus Session-bound lazy to-many loading
+- `has_many_collection<T>` with `load`, `get_items`, `add`, `attach`, `remove`, `clear`
+- `many_to_many_collection<T, Pivot>` with entity/ID attach and detach, `sync_by_ids`, typed pivot hydration and pivot updates
 - MetalORM-compatible cascade vocabulary including `link`
 - N:N `remove/all` semantics aligned with the TypeScript runtime
 
@@ -357,30 +317,4 @@ The CMake project intentionally fails on GCC < 16 and on non-GNU compilers today
 
 The TypeScript MetalORM is the feature reference. The C++ port should preserve its layers and semantics while replacing runtime metadata/string configuration with C++26 reflection where possible.
 
-```text
-C++ declarations + annotations
-           │
-           │ ^^
-           ▼
-   consteval model validation
-           │
-   ┌───────┼──────────────┐
-   ▼       ▼              ▼
-  DDL   typed SQL AST  Relations
-           │              │
-           └──────┬───────┘
-                  ▼
-               Session
-         ┌────────┼───────────┐
-         ▼        ▼           ▼
-   IdentityMap  UnitOfWork  RelationChangeProcessor
-                  │           │
-                  └─────┬─────┘
-                        ▼
-                  shared DML AST
-                        │
-                        ▼
-                      SQLite
-```
-
-Next work should follow missing MetalORM parity rather than invent new APIs: typed DML values/results, richer relation collections and pivot payloads, Morph relations, then the remaining query-builder features such as CTEs, set operations and window functions.
+The immediate remaining relation gaps are partial pivot patches and edge cases around alternate non-primary `targetKey` identity. After those, parity work should move to Morph relations and then the missing query-builder surface such as CTEs, set operations and window functions.
