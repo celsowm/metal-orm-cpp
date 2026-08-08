@@ -147,3 +147,57 @@ private:
 };
 
 } // namespace metal
+
+namespace metal::reflect {
+
+template <typename T>
+struct morph_one_reference_traits { static constexpr bool value = false; };
+
+template <typename Target>
+struct morph_one_reference_traits<metal::morph_one_reference<Target>> {
+    static constexpr bool value = true;
+    using target_type = Target;
+};
+
+template <typename T>
+inline constexpr bool is_morph_one_reference_v =
+    morph_one_reference_traits<std::remove_cvref_t<T>>::value;
+
+template <typename T>
+using morph_one_target_t =
+    typename morph_one_reference_traits<std::remove_cvref_t<T>>::target_type;
+
+template <typename T>
+struct morph_many_collection_traits { static constexpr bool value = false; };
+
+template <typename Target>
+struct morph_many_collection_traits<metal::morph_many_collection<Target>> {
+    static constexpr bool value = true;
+    using target_type = Target;
+};
+
+template <typename T>
+inline constexpr bool is_morph_many_collection_v =
+    morph_many_collection_traits<std::remove_cvref_t<T>>::value;
+
+template <typename T>
+using morph_many_target_t =
+    typename morph_many_collection_traits<std::remove_cvref_t<T>>::target_type;
+
+template <typename T>
+struct morph_to_reference_traits { static constexpr bool value = false; };
+
+template <typename... Targets>
+struct morph_to_reference_traits<metal::morph_to_reference<Targets...>> {
+    static constexpr bool value = true;
+    using target_types = mapping::type_list<Targets...>;
+
+    template <typename T>
+    static constexpr bool contains = (std::same_as<T, Targets> || ...);
+};
+
+template <typename T>
+inline constexpr bool is_morph_to_reference_v =
+    morph_to_reference_traits<std::remove_cvref_t<T>>::value;
+
+} // namespace metal::reflect
