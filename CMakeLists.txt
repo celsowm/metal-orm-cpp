@@ -139,4 +139,8 @@ if(METAL_ORM_BUILD_TESTS)
     add_executable(metal-orm-lifecycle-events-parity-tests tests/test_lifecycle_events_parity.cpp)
     target_link_libraries(metal-orm-lifecycle-events-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-lifecycle-events-parity-tests COMMAND metal-orm-lifecycle-events-parity-tests)
+
+    add_executable(metal-orm-graph-parity-tests tests/test_graph_parity.cpp)
+    target_link_libraries(metal-orm-graph-parity-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-graph-parity-tests COMMAND metal-orm-graph-parity-tests)
 endif()
