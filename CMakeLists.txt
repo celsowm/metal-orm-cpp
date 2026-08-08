@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(metal-orm VERSION 0.0.11 LANGUAGES CXX)
+project(metal-orm VERSION 0.0.12 LANGUAGES CXX)
 
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    message(FATAL_ERROR "MetalORM 0.0.11 is intentionally C++26-native and currently requires GCC 16+ reflection support")
+    message(FATAL_ERROR "MetalORM 0.0.12 is intentionally C++26-native and currently requires GCC 16+ reflection support")
 endif()
 
 if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
-    message(FATAL_ERROR "MetalORM 0.0.11 requires GCC 16 or newer")
+    message(FATAL_ERROR "MetalORM 0.0.12 requires GCC 16 or newer")
 endif()
 
 find_package(SQLite3 REQUIRED)
@@ -127,4 +127,8 @@ if(METAL_ORM_BUILD_TESTS)
     add_executable(metal-orm-computed-query-parity-tests tests/test_computed_query_parity.cpp)
     target_link_libraries(metal-orm-computed-query-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-computed-query-parity-tests COMMAND metal-orm-computed-query-parity-tests)
+
+    add_executable(metal-orm-relation-pagination-parity-tests tests/test_relation_pagination_parity.cpp)
+    target_link_libraries(metal-orm-relation-pagination-parity-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-relation-pagination-parity-tests COMMAND metal-orm-relation-pagination-parity-tests)
 endif()
