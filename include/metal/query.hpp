@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -275,7 +276,8 @@ auto not_like(Field<Member> f, Pattern&& pattern) {
         column_ref(f), to_value(std::string_view(std::forward<Pattern>(pattern))), true}};
 }
 
-template <std::meta::info Member, typename Range>
+template <std::meta::info Member, std::ranges::input_range Range>
+requires FieldComparable<typename Field<Member>::value_type, std::ranges::range_value_t<Range>>
 auto in(Field<Member> f, const Range& values) {
     using Owner = typename Field<Member>::owner_type;
     std::vector<Value> params;
@@ -283,7 +285,8 @@ auto in(Field<Member> f, const Range& values) {
     return Expression<Owner>{InValuesNode{column_ref(f), std::move(params), false}};
 }
 
-template <std::meta::info Member, typename Range>
+template <std::meta::info Member, std::ranges::input_range Range>
+requires FieldComparable<typename Field<Member>::value_type, std::ranges::range_value_t<Range>>
 auto not_in(Field<Member> f, const Range& values) {
     using Owner = typename Field<Member>::owner_type;
     std::vector<Value> params;
@@ -508,19 +511,33 @@ inline std::string compile_expression(const ExprPtr& expression, CompileContext&
     }, expression->node);
 }
 
+template <std::meta::info Relation, mapping::relation_kind Kind>
+struct relation_target_selector;
+
 template <std::meta::info Relation>
-struct relation_target {
-    using A = reflect::relation_annotation_t<Relation>;
-    using Traits = mapping::relation_annotation_traits<A>;
-    using Member = reflect::member_type_t<Relation>;
-    using type = std::conditional_t<
-        Traits::kind == mapping::relation_kind::belongs_to || Traits::kind == mapping::relation_kind::has_one,
-        reflect::single_target_t<Member>,
-        reflect::many_target_t<Member>>;
+struct relation_target_selector<Relation, mapping::relation_kind::belongs_to> {
+    using type = reflect::single_target_t<reflect::member_type_t<Relation>>;
 };
 
 template <std::meta::info Relation>
-using relation_target_t = typename relation_target<Relation>::type;
+struct relation_target_selector<Relation, mapping::relation_kind::has_one> {
+    using type = reflect::single_target_t<reflect::member_type_t<Relation>>;
+};
+
+template <std::meta::info Relation>
+struct relation_target_selector<Relation, mapping::relation_kind::has_many> {
+    using type = reflect::many_target_t<reflect::member_type_t<Relation>>;
+};
+
+template <std::meta::info Relation>
+struct relation_target_selector<Relation, mapping::relation_kind::many_to_many> {
+    using type = reflect::many_target_t<reflect::member_type_t<Relation>>;
+};
+
+template <std::meta::info Relation>
+using relation_target_t = typename relation_target_selector<
+    Relation,
+    mapping::relation_annotation_traits<reflect::relation_annotation_t<Relation>>::kind>::type;
 
 template <std::meta::info Relation>
 JoinSpec make_join_spec(JoinKind kind) {
@@ -623,6 +640,13 @@ public:
         return *this;
     }
 
+    template <std::meta::info Member>
+    requires type_in_pack_v<typename Field<Member>::owner_type, Scope...>
+    BasicSelectQuery& project_as(Field<Member> f, std::string alias) {
+        state_->projections.push_back(ProjectionSpec{column_ref(f), std::move(alias)});
+        return *this;
+    }
+
     template <typename Owner>
     requires type_in_pack_v<Owner, Scope...>
     BasicSelectQuery& project(AggregateTerm<Owner> aggregate) {
@@ -647,11 +671,17 @@ public:
     }
 
     CompiledQuery compile(const Dialect& dialect) const {
-        auto out = compile_impl(dialect, true);
-        return out;
+        return compile_impl(dialect, true);
     }
 
     CompiledQuery compile_subquery(const Dialect& dialect) const {
+        return compile_impl(dialect, false);
+    }
+
+    CompiledQuery compile_scalar_subquery(const Dialect& dialect) const {
+        if (state_->projections.size() != 1) {
+            throw std::logic_error("MetalORM: scalar subquery must project exactly one expression");
+        }
         return compile_impl(dialect, false);
     }
 
@@ -792,25 +822,23 @@ template <reflect::Entity T>
 SelectQuery<T> select() { return {}; }
 
 template <std::meta::info Member, reflect::Entity Root, typename... Scope>
-requires type_in_pack_v<typename Field<Member>::owner_type, Scope...>
 auto in(Field<Member> f, BasicSelectQuery<Root, Scope...> query) {
     using Owner = typename Field<Member>::owner_type;
     return Expression<Owner>{InSubqueryNode{
         column_ref(f),
         [query = std::move(query)](const Dialect& dialect) mutable {
-            return query.compile_subquery(dialect);
+            return query.compile_scalar_subquery(dialect);
         },
         false}};
 }
 
 template <std::meta::info Member, reflect::Entity Root, typename... Scope>
-requires type_in_pack_v<typename Field<Member>::owner_type, Scope...>
 auto not_in(Field<Member> f, BasicSelectQuery<Root, Scope...> query) {
     using Owner = typename Field<Member>::owner_type;
     return Expression<Owner>{InSubqueryNode{
         column_ref(f),
         [query = std::move(query)](const Dialect& dialect) mutable {
-            return query.compile_subquery(dialect);
+            return query.compile_scalar_subquery(dialect);
         },
         true}};
 }
