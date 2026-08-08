@@ -101,14 +101,13 @@ public:
     void reset() {}
 
 private:
-    template <reflect::Mapped Pivot, std::meta::info RootFk, std::meta::info TargetFk>
-    static std::vector<DmlAssignment> pivot_payload(const Pivot& pivot) {
+    template <typename Patch>
+    static std::vector<DmlAssignment> pivot_payload(const Patch& patch) {
         std::vector<DmlAssignment> assignments;
-        reflect::for_each_column<Pivot>([&]<std::meta::info Member>() {
-            if constexpr (Member != RootFk && Member != TargetFk) {
-                assignments.push_back({reflect::column_name<Member>(), to_value(pivot.[:Member:])});
-            }
-        });
+        assignments.reserve(patch.entries().size());
+        for (const auto& value : patch.entries()) {
+            assignments.push_back({value.column, value.value});
+        }
         return assignments;
     }
 
@@ -184,17 +183,19 @@ private:
 
         for (const auto& target : values._metal_added()) {
             const Value target_key = to_value((*target).[:target_key_member:]);
-            if (is_empty_generated_value(target_key)) {
+            if (std::holds_alternative<std::nullptr_t>(target_key) ||
+                (target_key_member == reflect::primary_key_member<Target>() &&
+                 reflect::primary_key_is_generated<Target>() && is_empty_generated_value(target_key))) {
                 throw std::runtime_error(
-                    "MetalORM: attached many_to_many target is not persisted; enable cascade persist or persist it explicitly");
+                    "MetalORM: attached many_to_many target does not have a relation target key");
             }
 
             std::vector<DmlAssignment> assignments{
                 {reflect::column_name<pivot_root_fk>(), root_key},
                 {reflect::column_name<pivot_target_fk>(), target_key}
             };
-            if (const auto* pivot = values._metal_pivot(target)) {
-                auto extra = pivot_payload<Pivot, pivot_root_fk, pivot_target_fk>(*pivot);
+            if (const auto* patch = values._metal_pivot_patch(target)) {
+                auto extra = pivot_payload(*patch);
                 assignments.insert(assignments.end(), extra.begin(), extra.end());
             }
 
@@ -205,9 +206,9 @@ private:
         }
 
         for (const auto& target : values._metal_pivot_updates()) {
-            const auto* pivot = values._metal_pivot(target);
-            if (!pivot) continue;
-            auto assignments = pivot_payload<Pivot, pivot_root_fk, pivot_target_fk>(*pivot);
+            const auto* patch = values._metal_pivot_patch(target);
+            if (!patch || patch->empty()) continue;
+            auto assignments = pivot_payload(*patch);
             if (assignments.empty()) continue;
 
             const Value target_key = to_value((*target).[:target_key_member:]);
