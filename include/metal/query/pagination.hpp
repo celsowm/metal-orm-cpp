@@ -15,6 +15,7 @@
 #include <string_view>
 #include <type_traits>
 #include <typeindex>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -239,7 +240,7 @@ inline void append_cursor_predicate(
     const Dialect& dialect,
     const std::vector<CursorOrderTerm>& order,
     const std::vector<Value>& values,
-    bool after) {
+    bool after_mode) {
     if (values.size() != order.size()) throw std::invalid_argument("MetalORM: invalid cursor payload");
     sql += " WHERE (";
     for (std::size_t i = 0; i < order.size(); ++i) {
@@ -252,7 +253,7 @@ inline void append_cursor_predicate(
             params.push_back(values[j]);
         }
         if (i) sql += " AND ";
-        const bool greater = after ? order[i].ascending : !order[i].ascending;
+        const bool greater = after_mode ? order[i].ascending : !order[i].ascending;
         sql += dialect.quote_identifier(alias) + "." + dialect.quote_identifier(order[i].column) +
                (greater ? " > " : " < ") + dialect.placeholder(params.size() + 1);
         params.push_back(values[i]);
@@ -266,9 +267,103 @@ concept CompilableSelectQuery = requires(const Query& query, const Dialect& dial
     { query.compile_subquery(dialect) } -> std::same_as<CompiledQuery>;
 };
 
+template <typename Query>
+concept PageableSelectQuery = CompilableSelectQuery<Query> && requires(const Query& query) {
+    query.without_pagination();
+};
+
+inline void validate_cursor_options(const CursorPageOptions& options) {
+    if (options.first && options.last) {
+        throw std::invalid_argument("MetalORM: cursor first and last cannot be used together");
+    }
+    if (options.after && options.before) {
+        throw std::invalid_argument("MetalORM: cursor after and before cannot be used together");
+    }
+    if (!options.first && !options.last) {
+        throw std::invalid_argument("MetalORM: cursor pagination requires first or last");
+    }
+    const std::size_t limit = options.first.value_or(options.last.value_or(0));
+    if (limit < 1) throw std::invalid_argument("MetalORM: cursor page size must be >= 1");
+}
+
+template <PageableSelectQuery Query>
+CursorPageResult execute_cursor_impl(
+    const Query& query,
+    DbExecutor& executor,
+    const Dialect& dialect,
+    std::vector<CursorOrderTerm> order,
+    CursorPageOptions options,
+    std::optional<std::string> dedupe_column = std::nullopt) {
+    if (order.empty()) throw std::invalid_argument("MetalORM: cursor pagination requires at least one reflected ORDER BY field");
+    validate_cursor_options(options);
+
+    const std::size_t limit = options.first.value_or(options.last.value_or(0));
+    const bool backward = options.last.has_value();
+    const auto cursor = options.after ? options.after : options.before;
+    const auto unpaged = query.without_pagination();
+    const auto base = unpaged.compile_subquery(dialect);
+    const std::string alias = "__metal_cursor";
+    std::string sql = "SELECT * FROM (" + base.sql + ") AS " + dialect.quote_identifier(alias);
+    std::vector<Value> params = base.params;
+
+    if (cursor) {
+        const auto decoded = decode_cursor(*cursor);
+        if (decoded.signature != order_signature(order)) {
+            throw std::invalid_argument(
+                "MetalORM: cursor ORDER BY signature does not match the current reflected order");
+        }
+        append_cursor_predicate(
+            sql, params, alias, dialect, order, decoded.values, !backward);
+    }
+
+    sql += " ORDER BY ";
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        if (i) sql += ", ";
+        const bool asc = backward ? !order[i].ascending : order[i].ascending;
+        sql += dialect.quote_identifier(alias) + "." + dialect.quote_identifier(order[i].column) +
+               (asc ? " ASC" : " DESC");
+    }
+    if (!dedupe_column) sql += " LIMIT " + std::to_string(limit + 1);
+    sql += ";";
+
+    auto result = executor.execute(sql, params);
+    if (dedupe_column) {
+        std::unordered_set<std::string> seen;
+        std::vector<Row> unique_rows;
+        unique_rows.reserve(result.rows.size());
+        for (auto& row : result.rows) {
+            auto found = row.find(*dedupe_column);
+            if (found == row.end()) {
+                throw std::logic_error(
+                    "MetalORM: root-aware cursor pagination requires the root primary key in the projection");
+            }
+            if (seen.insert(value_key(found->second)).second) {
+                unique_rows.push_back(std::move(row));
+            }
+        }
+        result.rows = std::move(unique_rows);
+    }
+
+    const bool has_extra = result.rows.size() > limit;
+    if (has_extra) result.rows.resize(limit);
+    if (backward) std::reverse(result.rows.begin(), result.rows.end());
+
+    CursorPageInfo info;
+    if (!result.rows.empty()) {
+        info.has_next_page = backward ? options.before.has_value() : has_extra;
+        info.has_previous_page = backward ? has_extra : options.after.has_value();
+        info.start_cursor = encode_cursor(
+            cursor_values_from_row(result.rows.front(), order), order);
+        info.end_cursor = encode_cursor(
+            cursor_values_from_row(result.rows.back(), order), order);
+    }
+
+    return CursorPageResult{std::move(result.rows), std::move(info)};
+}
+
 } // namespace detail
 
-template <detail::CompilableSelectQuery Query>
+template <detail::PageableSelectQuery Query>
 PageResult execute_paged(
     const Query& query,
     DbExecutor& executor,
@@ -277,7 +372,8 @@ PageResult execute_paged(
     if (options.page < 1) throw std::invalid_argument("MetalORM: page must be >= 1");
     if (options.page_size < 1) throw std::invalid_argument("MetalORM: page_size must be >= 1");
 
-    const auto base = query.compile_subquery(dialect);
+    const auto unpaged = query.without_pagination();
+    const auto base = unpaged.compile_subquery(dialect);
     const std::string count_sql =
         "SELECT COUNT(*) AS \"total\" FROM (" + base.sql + ") AS \"__metal_count\";";
     const auto count_result = executor.execute(count_sql, base.params);
@@ -298,68 +394,15 @@ PageResult execute_paged(
         std::move(page_result.rows), total, options.page, options.page_size};
 }
 
-template <detail::CompilableSelectQuery Query>
+template <detail::PageableSelectQuery Query>
 CursorPageResult execute_cursor(
     const Query& query,
     DbExecutor& executor,
     const Dialect& dialect,
     std::vector<CursorOrderTerm> order,
     CursorPageOptions options) {
-    if (order.empty()) throw std::invalid_argument("MetalORM: cursor pagination requires at least one reflected ORDER BY field");
-    if (options.first && options.last) {
-        throw std::invalid_argument("MetalORM: cursor first and last cannot be used together");
-    }
-    if (options.after && options.before) {
-        throw std::invalid_argument("MetalORM: cursor after and before cannot be used together");
-    }
-    if (!options.first && !options.last) {
-        throw std::invalid_argument("MetalORM: cursor pagination requires first or last");
-    }
-    const std::size_t limit = options.first.value_or(options.last.value_or(0));
-    if (limit < 1) throw std::invalid_argument("MetalORM: cursor page size must be >= 1");
-
-    const bool backward = options.last.has_value();
-    const auto cursor = options.after ? options.after : options.before;
-    const auto base = query.compile_subquery(dialect);
-    const std::string alias = "__metal_cursor";
-    std::string sql = "SELECT * FROM (" + base.sql + ") AS " + dialect.quote_identifier(alias);
-    std::vector<Value> params = base.params;
-
-    if (cursor) {
-        const auto decoded = detail::decode_cursor(*cursor);
-        if (decoded.signature != detail::order_signature(order)) {
-            throw std::invalid_argument(
-                "MetalORM: cursor ORDER BY signature does not match the current reflected order");
-        }
-        detail::append_cursor_predicate(
-            sql, params, alias, dialect, order, decoded.values, !backward);
-    }
-
-    sql += " ORDER BY ";
-    for (std::size_t i = 0; i < order.size(); ++i) {
-        if (i) sql += ", ";
-        const bool asc = backward ? !order[i].ascending : order[i].ascending;
-        sql += dialect.quote_identifier(alias) + "." + dialect.quote_identifier(order[i].column) +
-               (asc ? " ASC" : " DESC");
-    }
-    sql += " LIMIT " + std::to_string(limit + 1) + ";";
-
-    auto result = executor.execute(sql, params);
-    const bool has_extra = result.rows.size() > limit;
-    if (has_extra) result.rows.pop_back();
-    if (backward) std::reverse(result.rows.begin(), result.rows.end());
-
-    CursorPageInfo info;
-    if (!result.rows.empty()) {
-        info.has_next_page = backward ? options.before.has_value() : has_extra;
-        info.has_previous_page = backward ? has_extra : options.after.has_value();
-        info.start_cursor = detail::encode_cursor(
-            detail::cursor_values_from_row(result.rows.front(), order), order);
-        info.end_cursor = detail::encode_cursor(
-            detail::cursor_values_from_row(result.rows.back(), order), order);
-    }
-
-    return CursorPageResult{std::move(result.rows), std::move(info)};
+    return detail::execute_cursor_impl(
+        query, executor, dialect, std::move(order), std::move(options));
 }
 
 } // namespace metal
