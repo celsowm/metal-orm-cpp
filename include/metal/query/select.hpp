@@ -53,6 +53,9 @@ struct DerivedSourceSpec {
     std::function<CompiledQuery(const Dialect&)> compile_query;
 };
 
+using ExtraWhereCompiler =
+    std::function<CompiledQuery(const Dialect&, std::string_view root_alias)>;
+
 struct SelectState {
     bool distinct{false};
     std::vector<ProjectionSpec> projections;
@@ -185,6 +188,13 @@ public:
     BasicSelectQuery& offset(std::size_t value) {
         state_->offset = value;
         return *this;
+    }
+
+    [[nodiscard]] BasicSelectQuery without_pagination() const {
+        auto next = std::make_shared<SelectState>(*state_);
+        next->limit.reset();
+        next->offset.reset();
+        return BasicSelectQuery{std::move(next)};
     }
 
     BasicSelectQuery& from(std::string source_name) {
@@ -333,18 +343,24 @@ public:
     }
 
     CompiledQuery compile(const Dialect& dialect) const {
-        return compile_impl(dialect, true);
+        return compile_impl(dialect, true, {});
     }
 
     CompiledQuery compile_subquery(const Dialect& dialect) const {
-        return compile_impl(dialect, false);
+        return compile_impl(dialect, false, {});
+    }
+
+    CompiledQuery compile_subquery_with_extra_where(
+        const Dialect& dialect,
+        ExtraWhereCompiler extra_where) const {
+        return compile_impl(dialect, false, std::move(extra_where));
     }
 
     CompiledQuery compile_scalar_subquery(const Dialect& dialect) const {
         if (projection_arity() != 1) {
             throw std::logic_error("MetalORM: scalar subquery must project exactly one expression");
         }
-        return compile_impl(dialect, false);
+        return compile_impl(dialect, false, {});
     }
 
 private:
@@ -448,7 +464,10 @@ private:
         return sql;
     }
 
-    CompiledQuery compile_impl(const Dialect& dialect, bool terminate) const {
+    CompiledQuery compile_impl(
+        const Dialect& dialect,
+        bool terminate,
+        const ExtraWhereCompiler& extra_where) const {
         CompiledQuery out;
 
         if (!state_->ctes.empty()) {
@@ -475,9 +494,10 @@ private:
         }
 
         const bool has_joins = !state_->joins.empty() || !state_->cte_joins.empty();
+        const bool needs_root_alias = has_joins || static_cast<bool>(extra_where);
         const std::string root_alias = state_->derived_source
             ? state_->derived_source->alias
-            : (has_joins ? "t0" : "");
+            : (needs_root_alias ? "t0" : "");
 
         CompileContext ctx{dialect, {}, out.params};
         ctx.aliases.emplace(std::type_index(typeid(Root)), root_alias);
@@ -537,7 +557,28 @@ private:
         base += compile_from_source(dialect, out, root_alias);
         for (const auto& clause : join_sql) base += clause;
 
-        if (state_->where) base += " WHERE " + compile_expression(*state_->where, ctx);
+        std::optional<std::string> extra_where_sql;
+        std::vector<Value> extra_where_params;
+        if (extra_where) {
+            auto compiled_extra = extra_where(dialect, root_alias);
+            if (!compiled_extra.sql.empty()) {
+                extra_where_sql = std::move(compiled_extra.sql);
+                extra_where_params = std::move(compiled_extra.params);
+            }
+        }
+
+        if (state_->where || extra_where_sql) {
+            base += " WHERE ";
+            if (state_->where) {
+                base += "(" + compile_expression(*state_->where, ctx) + ")";
+            }
+            if (state_->where && extra_where_sql) base += " AND ";
+            if (extra_where_sql) {
+                base += "(" + *extra_where_sql + ")";
+                out.params.insert(
+                    out.params.end(), extra_where_params.begin(), extra_where_params.end());
+            }
+        }
         if (!state_->group_by.empty()) {
             base += " GROUP BY ";
             for (std::size_t i = 0; i < state_->group_by.size(); ++i) {
