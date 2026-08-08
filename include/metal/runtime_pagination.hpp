@@ -6,6 +6,8 @@
 #include <memory>
 #include <stdexcept>
 #include <type_traits>
+#include <typeindex>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -67,6 +69,25 @@ void validate_cursor_root(const std::vector<CursorOrderTerm>& order) {
     }
 }
 
+inline std::vector<Row> distinct_root_rows(
+    std::vector<Row> rows,
+    std::string_view primary_key) {
+    std::unordered_set<std::string> seen;
+    std::vector<Row> unique;
+    unique.reserve(rows.size());
+    for (auto& row : rows) {
+        auto found = row.find(std::string(primary_key));
+        if (found == row.end()) {
+            throw std::logic_error(
+                "MetalORM: root-aware pagination requires the root primary key in the projection");
+        }
+        if (seen.insert(value_key(found->second)).second) {
+            unique.push_back(std::move(row));
+        }
+    }
+    return unique;
+}
+
 } // namespace detail
 
 template <reflect::Entity T>
@@ -84,7 +105,7 @@ struct EntityCursorPageResult {
 };
 
 template <typename Query>
-requires detail::CompilableSelectQuery<Query>
+requires detail::PageableSelectQuery<Query>
 auto execute_paged(
     const Query& query,
     Session& session,
@@ -93,41 +114,30 @@ auto execute_paged(
     if (options.page < 1) throw std::invalid_argument("MetalORM: page must be >= 1");
     if (options.page_size < 1) throw std::invalid_argument("MetalORM: page_size must be >= 1");
 
-    const auto base = query.compile_subquery(session.dialect());
-    const std::string count_alias = "__metal_count";
-    const auto pk = reflect::primary_key_name<Root>();
-    const std::string count_sql =
-        "SELECT COUNT(DISTINCT " + session.dialect().quote_identifier(count_alias) + "." +
-        session.dialect().quote_identifier(pk) + ") AS \"total\" FROM (" + base.sql + ") AS " +
-        session.dialect().quote_identifier(count_alias) + ";";
-    const auto count_result = session.executor().execute(count_sql, base.params);
-    std::size_t total = 0;
-    if (!count_result.rows.empty()) {
-        auto found = count_result.rows.front().find("total");
-        if (found != count_result.rows.front().end()) {
-            total = static_cast<std::size_t>(from_value<std::int64_t>(found->second));
-        }
-    }
-
-    const auto offset = (options.page - 1) * options.page_size;
-    const std::string page_sql =
-        "SELECT * FROM (" + base.sql + ") AS \"__metal_page\" LIMIT " +
-        std::to_string(options.page_size) + " OFFSET " + std::to_string(offset) + ";";
-    auto result = session.executor().execute(page_sql, base.params);
+    const auto unpaged = query.without_pagination();
+    const auto base = unpaged.compile_subquery(session.dialect());
+    auto raw = session.executor().execute(base.sql, base.params);
+    auto unique_rows = detail::distinct_root_rows(
+        std::move(raw.rows), reflect::primary_key_name<Root>());
 
     EntityPageResult<Root> out;
-    out.total_items = total;
+    out.total_items = unique_rows.size();
     out.page = options.page;
     out.page_size = options.page_size;
-    out.items.reserve(result.rows.size());
-    for (const auto& row : result.rows) {
-        out.items.push_back(detail::hydrate_complete_entity_row<Root>(session, row));
+
+    const auto offset = (options.page - 1) * options.page_size;
+    if (offset >= unique_rows.size()) return out;
+    const auto end = std::min(unique_rows.size(), offset + options.page_size);
+    out.items.reserve(end - offset);
+    for (std::size_t i = offset; i < end; ++i) {
+        out.items.push_back(
+            detail::hydrate_complete_entity_row<Root>(session, unique_rows[i]));
     }
     return out;
 }
 
 template <typename Query>
-requires detail::CompilableSelectQuery<Query>
+requires detail::PageableSelectQuery<Query>
 auto execute_cursor(
     const Query& query,
     Session& session,
@@ -135,12 +145,13 @@ auto execute_cursor(
     CursorPageOptions options) -> EntityCursorPageResult<detail::query_root_t<Query>> {
     using Root = detail::query_root_t<Query>;
     detail::validate_cursor_root<Root>(order);
-    auto rows = execute_cursor(
+    auto rows = detail::execute_cursor_impl(
         query,
         session.executor(),
         session.dialect(),
         std::move(order),
-        std::move(options));
+        std::move(options),
+        reflect::primary_key_name<Root>());
 
     EntityCursorPageResult<Root> out;
     out.page_info = std::move(rows.page_info);
