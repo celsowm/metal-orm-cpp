@@ -3,7 +3,6 @@
 #include <concepts>
 #include <cstddef>
 #include <functional>
-#include <stdexcept>
 #include <type_traits>
 #include <typeindex>
 #include <unordered_map>
@@ -46,9 +45,7 @@ public:
 
     template <typename Fn>
     void for_each(Fn&& fn) const {
-        for (const auto& event : events_) {
-            std::visit(std::forward<Fn>(fn), event);
-        }
+        for (const auto& event : events_) std::visit(fn, event);
     }
 
 private:
