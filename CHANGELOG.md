@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.0.7 - 2026-08-08
+
+Typed pivot-patch and alternate-target-key parity release. SQLite remains the only executor/dialect intentionally.
+
+- Replace full-pivot mutation payloads with `metal::pivot_patch<Pivot>`, the C++26-native equivalent of MetalORM TS `Partial<TPivot>` semantics.
+- Address pivot members by reflection with `patch.set<^^Pivot::member>(value)`; reject members from another pivot type at compile time.
+- Validate pivot-patch value compatibility at compile time instead of deferring obvious type mismatches to runtime conversion.
+- Merge repeated pivot patches by column and update the hydrated pivot object in memory without resetting untouched fields.
+- Compile pivot INSERT/UPDATE DML from only the fields explicitly present in the patch, preserving existing database values for omitted members.
+- Filter pivot root/target FK columns from generated pivot DML, matching the original `filterPivotPayload` behavior.
+- Make N:N attach/detach/sync consistently use the relation's reflected `targetKey`, including when it is not the target primary key.
+- Preserve normal Session Identity Map semantics by primary key after alternate-key relation hydration.
+- Make cascade remove work for alternate-key attach stubs by deleting the target through the declared relation target key when no tracked entity exists.
+- Preserve integral zero as a valid relation key unless the key is specifically a generated primary key.
+- Add an end-to-end alternate-target-key suite using `Role::code` while `Role::id` remains the real primary key.
+- Add compile-fail coverage for foreign pivot members and incompatible pivot-patch value types.
+- Follow the declared `targetKey` relation contract end-to-end even though the current TypeScript relation-change processor still resolves the target primary key during N:N flush; the TypeScript collection and schema contracts already use `targetKey`.
+
 ## 0.0.6 - 2026-08-08
 
 Relation-collection parity release. SQLite remains the only executor/dialect intentionally.
@@ -61,7 +79,7 @@ Mutable reflected relation collections. SQLite remains the only executor/dialect
 
 - Add `metal::collection<T>` with `attach`, `detach`, `sync`, `loaded`, `dirty`, iteration and indexed access.
 - Replace `std::vector<std::shared_ptr<T>>` as the supported shape for `has_many` and `many_to_many` relations.
-- Track relation state as current items versus an accepted baseline, so opposite mutations before `commit()` cancel naturally.
+- Track relation state as current items versus an accepted baseline, so opposite mutations before a commit naturally cancel.
 - Flush relation diffs through the same Unit of Work transaction as entity inserts/updates/deletes.
 - Add relation cascade metadata with concise C++26 annotation syntax.
 - Support cascade persist for `has_many` and `many_to_many` attached targets.
