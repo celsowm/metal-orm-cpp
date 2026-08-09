@@ -2,6 +2,23 @@
 
 All releases currently target GCC 16+ C++26 static reflection and intentionally use SQLite as the only executor/dialect.
 
+## 0.0.24 - 2026-08-09
+
+Shared reflected database defaults and DTO/OpenAPI parity closure.
+
+- Added C++26 annotation metadata for typed numeric/boolean defaults, quoted text defaults, explicit NULL defaults and raw SQL default expressions.
+- Added compile-time validation for duplicate defaults and type/default mismatches, including nullable-only `default_null`.
+- Added one shared reflection API (`has_column_default`, `column_default_sql`, literal extraction and entity-wide validation) instead of DDL- or API-specific metadata.
+- Wired reflected defaults into SQLite `CREATE TABLE` generation with SQL string escaping and raw-expression preservation.
+- Added reflected defaults to `expected_table()` / `DatabaseColumn::default_value`, allowing schema introspection/diff to compare declared defaults.
+- Added a real SQLite E2E proving literal text, `0`, `false`, floating, `CURRENT_TIMESTAMP` and NULL defaults are applied when INSERT omits the fields.
+- Added E2E convergence for `expected -> create -> introspect -> diff` with reflected defaults.
+- Added `DtoField::has_default` and made create DTO requiredness depend on nullability plus default presence.
+- Made create OpenAPI requiredness use the same reflected default metadata; falsy defaults such as `0` and `false` are correctly optional rather than tested by truthiness.
+- Added compile-fail coverage for multiple default annotations on one column.
+- Marked DTO/OpenAPI ✅ for the supported SQLite execution model.
+- Split the remaining schema metadata gap: reflected defaults are now ✅, while physical FK/check declaration annotations remain future schema-layer work.
+
 ## 0.0.23 - 2026-08-09
 
 Relation-aware DTO/REST/OpenAPI expansion.
