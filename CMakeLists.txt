@@ -206,4 +206,12 @@ if(METAL_ORM_BUILD_TESTS)
     add_executable(metal-orm-openapi-tree-parity-tests tests/test_openapi_tree_parity.cpp)
     target_link_libraries(metal-orm-openapi-tree-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-openapi-tree-parity-tests COMMAND metal-orm-openapi-tree-parity-tests)
+
+    add_executable(metal-orm-dto-relation-filter-parity-tests tests/test_dto_relation_filter_parity.cpp)
+    target_link_libraries(metal-orm-dto-relation-filter-parity-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-dto-relation-filter-parity-tests COMMAND metal-orm-dto-relation-filter-parity-tests)
+
+    add_executable(metal-orm-openapi-relations-parity-tests tests/test_openapi_relations_parity.cpp)
+    target_link_libraries(metal-orm-openapi-relations-parity-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-openapi-relations-parity-tests COMMAND metal-orm-openapi-relations-parity-tests)
 endif()
