@@ -24,7 +24,7 @@ ExpectedTable expected_table(const Dialect& dialect) {
         using M = reflect::member_type_t<Member>;
         DatabaseColumn column;
         column.name = reflect::column_name<Member>();
-        column.type = sqlite_type_name<M>();
+        column.type = sqlite_column_type_name<Member>();
         column.not_null = !is_optional_v<M>;
         if constexpr (reflect::has_column_default<Member>()) {
             column.default_value = reflect::column_default_sql<Member>();
