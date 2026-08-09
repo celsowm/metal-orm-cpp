@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 struct [[=metal::mapping::table{"oar_comments"}]] OarComment {
@@ -139,6 +140,52 @@ int main() {
     const auto ref = metal::schema_ref("UserNested");
     assert(ref.ref);
     assert(*ref.ref == "#/components/schemas/UserNested");
+    assert(metal::schema_to_ref("User").ref == "#/components/schemas/User");
+    assert(metal::parameter_to_ref("Page").ref == "#/components/parameters/Page");
+    assert(metal::response_to_ref("NotFound").ref == "#/components/responses/NotFound");
+
+    const auto generated = metal::generate_component_schemas(
+        metal::component_target<OarUser>("User"),
+        metal::component_target<OarPost>("Post"));
+    assert(generated.size() == 2);
+    assert(generated.contains("User"));
+    assert(generated.contains("Post"));
+
+    const auto user_schema = metal::dto_to_openapi_schema<OarUser>();
+    auto documented_user = metal::deep_clone_schema(user_schema);
+    documented_user.description = "ignored by canonical component naming";
+    assert(metal::compute_schema_hash(user_schema) ==
+           metal::compute_schema_hash(documented_user));
+
+    auto naming = metal::create_deterministic_naming_state();
+    const auto first_name = metal::get_deterministic_component_name(
+        "User!", user_schema, naming);
+    assert(first_name == "User");
+    const auto same_name = metal::get_deterministic_component_name(
+        "DifferentBase", documented_user, naming);
+    assert(same_name == "User");
+    const auto collision = metal::get_deterministic_component_name(
+        "User", metal::dto_to_openapi_schema<OarPost>(), naming);
+    assert(collision.rfind("User_", 0) == 0);
+
+    metal::OpenApiSchema holder;
+    holder.types = {metal::OpenApiType::object};
+    holder.properties.emplace(
+        "user",
+        std::make_shared<metal::OpenApiSchema>(user_schema));
+    const auto replaced = metal::replace_with_refs(
+        holder,
+        metal::OpenApiSchemaMap{{"User", user_schema}});
+    assert(replaced.properties.at("user")->ref);
+    assert(*replaced.properties.at("user")->ref == "#/components/schemas/User");
+
+    const auto extracted = metal::extract_reusable_schemas(nested, {}, "User");
+    assert(!extracted.empty());
+    assert(extracted.contains("User"));
+
+    auto clone = metal::deep_clone_schema(nested);
+    clone.properties.at("name")->description = "clone only";
+    assert(!nested.properties.at("name")->description);
 
     const auto filter30 =
         metal::where_input_with_relations_to_openapi_schema<OarUser, 1>(
