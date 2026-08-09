@@ -198,4 +198,8 @@ if(METAL_ORM_BUILD_TESTS)
     add_executable(metal-orm-dto-openapi-parity-tests tests/test_dto_openapi_parity.cpp)
     target_link_libraries(metal-orm-dto-openapi-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-dto-openapi-parity-tests COMMAND metal-orm-dto-openapi-parity-tests)
+
+    add_executable(metal-orm-dto-filter-parity-tests tests/test_dto_filter_parity.cpp)
+    target_link_libraries(metal-orm-dto-filter-parity-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-dto-filter-parity-tests COMMAND metal-orm-dto-filter-parity-tests)
 endif()
