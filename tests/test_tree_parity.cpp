@@ -94,6 +94,13 @@ int main() {
     assert(row_string(path[1].data, "name") == "A");
     assert(row_string(path[2].data, "name") == "Grand");
 
+    const auto leaf_query = tenant1.query().find_leaves().compile(dialect);
+    assert(leaf_query.sql.find("\"rght\" - \"lft\"") != std::string::npos);
+    assert(leaf_query.sql.find("\"tenant_id\" = ?") != std::string::npos);
+    assert(leaf_query.params.size() == 2);
+    assert(metal::from_value<std::int64_t>(leaf_query.params[0]) == 1);
+    assert(metal::from_value<std::int64_t>(leaf_query.params[1]) == 1);
+
     auto leaves = tenant1.get_leaves();
     assert(leaves.size() == 2);
     assert(row_string(leaves[0].data, "name") == "Grand");
@@ -106,7 +113,38 @@ int main() {
     assert(row_string(threaded[0].children[0].node, "name") == "Grand");
     assert(row_string(threaded[1].node, "name") == "B");
 
+    // Regression for the temporary-range trap: A is a width-4 subtree. Moving it
+    // below the right-hand sibling must not let gap shifts touch the isolated range.
     auto a = tenant1.get_node(metal::Value{a_id});
+    auto b = tenant1.get_node(metal::Value{b_id});
+    assert(a && b);
+    assert(a->rght - a->lft + 1 == 4);
+    tenant1.move_to(*a, metal::Value{b_id});
+    assert(tenant1.validate().empty());
+
+    auto root = tenant1.get_node(metal::Value{root_id});
+    a = tenant1.get_node(metal::Value{a_id});
+    b = tenant1.get_node(metal::Value{b_id});
+    grand = tenant1.get_node(metal::Value{grand_id});
+    assert(root && a && b && grand);
+    assert(root->lft == 1 && root->rght == 8);
+    assert(b->lft == 2 && b->rght == 7);
+    assert(a->lft == 3 && a->rght == 6);
+    assert(grand->lft == 4 && grand->rght == 5);
+    assert(metal::value_key(a->parent_id) == metal::value_key(metal::Value{b_id}));
+
+    // Move the same wide subtree back under the root. It becomes the last child,
+    // then move_up restores the original A/B ordering for the remaining parity checks.
+    tenant1.move_to(*a, metal::Value{root_id});
+    assert(tenant1.validate().empty());
+    a = tenant1.get_node(metal::Value{a_id});
+    assert(a);
+    assert(tenant1.move_up(*a));
+    children = tenant1.get_children(metal::Value{root_id});
+    assert(row_string(children[0].data, "name") == "A");
+    assert(row_string(children[1].data, "name") == "B");
+
+    a = tenant1.get_node(metal::Value{a_id});
     assert(a);
     assert(tenant1.move_down(*a));
     children = tenant1.get_children(metal::Value{root_id});
@@ -120,7 +158,7 @@ int main() {
     assert(row_string(children[0].data, "name") == "A");
     assert(row_string(children[1].data, "name") == "B");
 
-    auto b = tenant1.get_node(metal::Value{b_id});
+    b = tenant1.get_node(metal::Value{b_id});
     a = tenant1.get_node(metal::Value{a_id});
     assert(a && b);
     tenant1.move_to(*b, metal::Value{a_id});
@@ -131,7 +169,7 @@ int main() {
 
     bool invalid_move_rejected = false;
     try {
-        auto root = tenant1.get_node(metal::Value{root_id});
+        root = tenant1.get_node(metal::Value{root_id});
         grand = tenant1.get_node(metal::Value{grand_id});
         assert(root && grand);
         tenant1.move_to(*root, metal::Value{grand_id});
@@ -152,7 +190,7 @@ int main() {
     assert(!tenant1.get_node(metal::Value{b_id}));
     assert(!tenant1.get_node(metal::Value{grand_id}));
 
-    auto root = tenant1.get_node(metal::Value{root_id});
+    root = tenant1.get_node(metal::Value{root_id});
     assert(root);
     assert(root->lft == 1 && root->rght == 2);
     assert(root->is_leaf);
