@@ -639,6 +639,59 @@ public:
         return Value{nullptr};
     }
 
+    void remove_from_tree(const TreeNodeResult& node) {
+        const auto node_id = require_value(node.data, TreeQuery<T>::pk_name());
+        const auto original_max_rght = max_rght();
+
+        // Promote direct children to the removed node's parent. Deeper descendants
+        // keep their immediate parent links and therefore preserve subtree topology.
+        auto promote = update<T>();
+        promote.set({DmlAssignment{TreeQuery<T>::parent_name(), node.parent_id}})
+            .where_eq(TreeQuery<T>::parent_name(), node_id);
+        for (const auto& [column, value] : query_.scope_values()) promote.where_eq(column, value);
+        auto promote_compiled = promote.compile(session_->dialect());
+        session_->executor().execute(promote_compiled.sql, promote_compiled.params);
+
+        // Remove the node's left boundary from every strict descendant. This promotes
+        // the whole descendant forest one level while keeping each nested subtree intact.
+        if (node.rght - node.lft > 1) {
+            std::string sql = "UPDATE " + session_->dialect().quote_identifier(reflect::table_name<T>()) +
+                " SET " + session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " = " +
+                session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " - 1, " +
+                session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " = " +
+                session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " - 1";
+            if (!TreeQuery<T>::depth_name().empty()) {
+                sql += ", " + session_->dialect().quote_identifier(TreeQuery<T>::depth_name()) + " = " +
+                       session_->dialect().quote_identifier(TreeQuery<T>::depth_name()) + " - 1";
+            }
+            sql += " WHERE " + session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " > ? AND " +
+                   session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " < ?";
+            std::vector<Value> params{Value{node.lft}, Value{node.rght}};
+            append_scope(sql, params, true);
+            sql += ";";
+            session_->executor().execute(sql, params);
+        }
+
+        // Remove the node's two shell slots from its former location. The retained
+        // node itself is then placed after the compacted forest as a standalone root.
+        shift_for_delete(node.rght, 2);
+
+        std::vector<DmlAssignment> assignments{
+            {TreeQuery<T>::parent_name(), Value{nullptr}},
+            {TreeQuery<T>::left_name(), Value{original_max_rght - 1}},
+            {TreeQuery<T>::right_name(), Value{original_max_rght}}
+        };
+        if (!TreeQuery<T>::depth_name().empty()) {
+            assignments.push_back({TreeQuery<T>::depth_name(), Value{std::int64_t{0}}});
+        }
+
+        auto detach = update<T>();
+        detach.set(std::move(assignments)).where_eq(TreeQuery<T>::pk_name(), node_id);
+        for (const auto& [column, value] : query_.scope_values()) detach.where_eq(column, value);
+        auto detach_compiled = detach.compile(session_->dialect());
+        session_->executor().execute(detach_compiled.sql, detach_compiled.params);
+    }
+
     std::size_t delete_subtree(const TreeNodeResult& node) {
         const auto width = NestedSetStrategy::subtree_width(node.lft, node.rght);
         std::string sql = "DELETE FROM " + session_->dialect().quote_identifier(reflect::table_name<T>()) +
