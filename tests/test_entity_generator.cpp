@@ -54,6 +54,12 @@ int main() {
                 .default_value = "NULL"
             },
             metal::DatabaseColumn{
+                .name = "required_note",
+                .type = "TEXT",
+                .not_null = true,
+                .default_value = "NULL"
+            },
+            metal::DatabaseColumn{
                 .name = "avatar",
                 .type = "BLOB",
                 .not_null = false
@@ -75,6 +81,15 @@ int main() {
             metal::DatabaseColumn{.name = "title", .type = "TEXT", .not_null = true}
         };
         schema.tables.push_back(posts);
+
+        metal::DatabaseTable status;
+        status.name = "status";
+        status.primary_key = {"id"};
+        status.columns = {
+            metal::DatabaseColumn{.name = "id", .type = "INTEGER", .not_null = true}
+        };
+        schema.tables.push_back(status);
+
         schema.views.push_back(metal::DatabaseView{.name = "active_users"});
 
         const auto generated = metal::generate_entity_header(
@@ -83,12 +98,14 @@ int main() {
 
         assert(contains(generated.code, "namespace app_model {"));
         assert(contains(generated.code, "struct [[=metal::mapping::table{\"users\"}]] User"));
+        assert(contains(generated.code, "struct [[=metal::mapping::table{\"status\"}]] Status"));
         assert(contains(generated.code, "=metal::mapping::generated"));
         assert(contains(generated.code, "=metal::mapping::column{\"display-name\"}"));
         assert(contains(generated.code, "=metal::mapping::database_type{\"VARCHAR(80)\"}"));
         assert(contains(generated.code, "=metal::mapping::default_text{\"guest\"}"));
         assert(contains(generated.code, "=metal::mapping::default_value{true}"));
         assert(contains(generated.code, "=metal::mapping::default_null"));
+        assert(contains(generated.code, "=metal::mapping::default_sql{\"NULL\"}"));
         assert(contains(generated.code, "std::optional<std::string> bio;"));
         assert(contains(generated.code, "[[=metal::mapping::belongs_to<^^Post::user_id>{}]]"));
         assert(contains(generated.code, "metal::belongs_to_reference<User> user;"));
@@ -117,6 +134,7 @@ int main() {
         const auto generated = metal::generate_sqlite_entity_header(db);
         assert(generated.warnings.empty());
         assert(contains(generated.code, "struct [[=metal::mapping::table{\"parents\"}]] Parent"));
+        assert(contains(generated.code, "struct [[=metal::mapping::table{\"children\"}]] Child"));
         assert(contains(generated.code, "=metal::mapping::database_type{\"VARCHAR(40)\"}"));
         assert(contains(generated.code, "=metal::mapping::default_text{\"root\"}"));
         assert(contains(generated.code, "=metal::mapping::default_value{true}"));
