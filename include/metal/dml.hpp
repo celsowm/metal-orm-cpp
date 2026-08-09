@@ -7,6 +7,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <typeindex>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -34,6 +35,15 @@ struct DmlPredicate {
     Value value;
 };
 
+struct DmlInPredicate {
+    std::string column;
+    std::vector<Value> values;
+    bool negated{false};
+};
+
+using DmlWhereCompiler =
+    std::function<std::string(const Dialect&, std::vector<Value>&)>;
+
 struct DmlReturning {
     std::string column;
     std::optional<std::string> alias;
@@ -59,12 +69,16 @@ struct UpdateNode {
     std::string table;
     std::vector<DmlAssignment> assignments;
     std::vector<DmlPredicate> predicates;
+    std::vector<DmlInPredicate> in_predicates;
+    DmlWhereCompiler extra_where;
     std::vector<DmlReturning> returning;
 };
 
 struct DeleteNode {
     std::string table;
     std::vector<DmlPredicate> predicates;
+    std::vector<DmlInPredicate> in_predicates;
+    DmlWhereCompiler extra_where;
     std::vector<DmlReturning> returning;
 };
 
@@ -98,6 +112,71 @@ inline void append_dml_predicates(
                dialect.placeholder(params.size() + 1);
         params.push_back(predicate.value);
     }
+}
+
+inline void append_dml_where(
+    std::string& sql,
+    const std::vector<DmlPredicate>& predicates,
+    const std::vector<DmlInPredicate>& in_predicates,
+    const DmlWhereCompiler& extra_where,
+    const Dialect& dialect,
+    std::vector<Value>& params) {
+    if (predicates.empty() && in_predicates.empty() && !extra_where) return;
+
+    sql += " WHERE ";
+    bool has_term = false;
+    const auto append_and = [&] {
+        if (has_term) sql += " AND ";
+        has_term = true;
+    };
+
+    for (const auto& predicate : predicates) {
+        append_and();
+        sql += dialect.quote_identifier(predicate.column) + " " + compare_token(predicate.op) + " " +
+               dialect.placeholder(params.size() + 1);
+        params.push_back(predicate.value);
+    }
+
+    for (const auto& predicate : in_predicates) {
+        append_and();
+        if (predicate.values.empty()) {
+            sql += predicate.negated ? "1" : "0";
+            continue;
+        }
+
+        sql += dialect.quote_identifier(predicate.column);
+        sql += predicate.negated ? " NOT IN (" : " IN (";
+        for (std::size_t i = 0; i < predicate.values.size(); ++i) {
+            if (i) sql += ", ";
+            sql += dialect.placeholder(params.size() + 1);
+            params.push_back(predicate.values[i]);
+        }
+        sql += ")";
+    }
+
+    if (extra_where) {
+        append_and();
+        const auto fragment = extra_where(dialect, params);
+        if (fragment.empty()) {
+            throw std::logic_error("MetalORM: DML expression predicate compiled to an empty fragment");
+        }
+        sql += "(" + fragment + ")";
+    }
+}
+
+template <reflect::Mapped T>
+DmlWhereCompiler dml_where(Expression<T> expression) {
+    static_assert(reflect::validate_mapping<T>());
+    return [expression = std::move(expression)](
+               const Dialect& dialect,
+               std::vector<Value>& params) -> std::string {
+        CompileContext ctx{
+            dialect,
+            {{std::type_index(typeid(T)), std::string{}}},
+            params
+        };
+        return compile_expression(expression.node(), ctx);
+    };
 }
 
 inline void append_returning(
@@ -168,7 +247,7 @@ public:
         BasicSelectQuery<Root, Scope...> query,
         std::vector<std::string> columns = {}) {
         if (!node_.rows.empty()) {
-            throw std::logic_error("MetalORM: cannot mix INSERT ... SELECT with INSERT ... VALUES");
+            throw std::logic_error("MetalORM: cannot mix INSERT ... VALUES with INSERT ... SELECT");
         }
         if (!columns.empty()) node_.columns = std::move(columns);
         if (node_.columns.empty()) node_.columns = known_table_columns_;
@@ -312,7 +391,8 @@ inline InsertQueryBuilder& ConflictBuilder::do_update(
 
 class UpdateQueryBuilder {
 public:
-    explicit UpdateQueryBuilder(std::string table) : node_{std::move(table), {}, {}, {}} {}
+    explicit UpdateQueryBuilder(std::string table)
+        : node_{std::move(table), {}, {}, {}, {}, {}} {}
 
     UpdateQueryBuilder& set(std::vector<DmlAssignment> assignments) {
         node_.assignments = std::move(assignments);
@@ -321,11 +401,38 @@ public:
 
     UpdateQueryBuilder& where(std::vector<DmlPredicate> predicates) {
         node_.predicates = std::move(predicates);
+        node_.in_predicates.clear();
+        node_.extra_where = {};
+        return *this;
+    }
+
+    template <reflect::Mapped T>
+    UpdateQueryBuilder& where(Expression<T> expression) {
+        if (node_.table != reflect::table_name<T>()) {
+            throw std::logic_error("MetalORM: UPDATE expression owner does not match target table");
+        }
+        node_.predicates.clear();
+        node_.in_predicates.clear();
+        node_.extra_where = dml_where<T>(std::move(expression));
         return *this;
     }
 
     UpdateQueryBuilder& where_eq(std::string column, Value value) {
         node_.predicates.push_back(DmlPredicate{std::move(column), CompareOp::Eq, std::move(value)});
+        return *this;
+    }
+
+    UpdateQueryBuilder& where_in(std::string column, std::vector<Value> values, bool negated = false) {
+        node_.in_predicates.push_back(DmlInPredicate{std::move(column), std::move(values), negated});
+        return *this;
+    }
+
+    template <reflect::Mapped T>
+    UpdateQueryBuilder& and_where(Expression<T> expression) {
+        if (node_.table != reflect::table_name<T>()) {
+            throw std::logic_error("MetalORM: UPDATE expression owner does not match target table");
+        }
+        node_.extra_where = dml_where<T>(std::move(expression));
         return *this;
     }
 
@@ -357,7 +464,13 @@ public:
             out.sql += dialect.quote_identifier(assignment.column) + " = " +
                        compile_dml_operand(assignment.value, dialect, out.params);
         }
-        append_dml_predicates(out.sql, node_.predicates, dialect, out.params);
+        append_dml_where(
+            out.sql,
+            node_.predicates,
+            node_.in_predicates,
+            node_.extra_where,
+            dialect,
+            out.params);
         append_returning(out.sql, node_.returning, dialect);
         out.sql += ";";
         return out;
@@ -369,15 +482,43 @@ private:
 
 class DeleteQueryBuilder {
 public:
-    explicit DeleteQueryBuilder(std::string table) : node_{std::move(table), {}, {}} {}
+    explicit DeleteQueryBuilder(std::string table)
+        : node_{std::move(table), {}, {}, {}, {}} {}
 
     DeleteQueryBuilder& where(std::vector<DmlPredicate> predicates) {
         node_.predicates = std::move(predicates);
+        node_.in_predicates.clear();
+        node_.extra_where = {};
+        return *this;
+    }
+
+    template <reflect::Mapped T>
+    DeleteQueryBuilder& where(Expression<T> expression) {
+        if (node_.table != reflect::table_name<T>()) {
+            throw std::logic_error("MetalORM: DELETE expression owner does not match target table");
+        }
+        node_.predicates.clear();
+        node_.in_predicates.clear();
+        node_.extra_where = dml_where<T>(std::move(expression));
         return *this;
     }
 
     DeleteQueryBuilder& where_eq(std::string column, Value value) {
         node_.predicates.push_back(DmlPredicate{std::move(column), CompareOp::Eq, std::move(value)});
+        return *this;
+    }
+
+    DeleteQueryBuilder& where_in(std::string column, std::vector<Value> values, bool negated = false) {
+        node_.in_predicates.push_back(DmlInPredicate{std::move(column), std::move(values), negated});
+        return *this;
+    }
+
+    template <reflect::Mapped T>
+    DeleteQueryBuilder& and_where(Expression<T> expression) {
+        if (node_.table != reflect::table_name<T>()) {
+            throw std::logic_error("MetalORM: DELETE expression owner does not match target table");
+        }
+        node_.extra_where = dml_where<T>(std::move(expression));
         return *this;
     }
 
@@ -400,7 +541,13 @@ public:
     [[nodiscard]] CompiledQuery compile(const Dialect& dialect) const {
         CompiledQuery out;
         out.sql = "DELETE FROM " + dialect.quote_identifier(node_.table);
-        append_dml_predicates(out.sql, node_.predicates, dialect, out.params);
+        append_dml_where(
+            out.sql,
+            node_.predicates,
+            node_.in_predicates,
+            node_.extra_where,
+            dialect,
+            out.params);
         append_returning(out.sql, node_.returning, dialect);
         out.sql += ";";
         return out;
