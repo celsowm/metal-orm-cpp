@@ -10,6 +10,7 @@ if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
 endif()
 
 find_package(SQLite3 REQUIRED)
+find_package(Threads REQUIRED)
 
 add_library(metal-orm STATIC
     src/sqlite_executor.cpp
@@ -20,7 +21,7 @@ target_include_directories(metal-orm PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(metal-orm PUBLIC SQLite::SQLite3)
+target_link_libraries(metal-orm PUBLIC SQLite::SQLite3 Threads::Threads)
 target_compile_options(metal-orm PUBLIC -std=c++26 -freflection)
 
 option(METAL_ORM_BUILD_EXAMPLES "Build MetalORM examples" ON)
