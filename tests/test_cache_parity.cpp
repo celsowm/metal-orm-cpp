@@ -204,38 +204,53 @@ int main() {
         "INSERT INTO cache_users(id, name) VALUES (1, 'Ada'), (2, 'Grace');");
 
     metal::Session session{counting};
+    metal::CacheSession cache_session{session, manager};
     auto query = metal::select<CacheUser>();
     query.order_by(metal::field<^^CacheUser::id>);
-    auto cached_query = metal::cache_query(
+    auto cached_query = metal::cache(
         query,
         "cache-users",
         metal::Duration{"1h"},
         {"cache_users"});
 
-    const auto users1 = cached_query.execute(session, manager);
+    const auto users1 = cache_session.execute(cached_query);
     assert(users1.size() == 2);
     assert(users1[0]->name == "Ada");
     assert(counting->select_count == 1);
     auto* identity = users1[0].get();
 
     counting->execute("UPDATE cache_users SET name = 'Ada changed' WHERE id = 1;");
-    const auto users2 = cached_query.execute(session, manager);
+    const auto users2 = cache_session.execute(cached_query);
     assert(counting->select_count == 1);
     assert(users2[0].get() == identity);
     assert(users2[0]->name == "Ada");
 
     session.clear();
-    const auto users3 = cached_query.execute(session, manager);
+    const auto users3 = cache_session.execute(cached_query);
     assert(counting->select_count == 1);
     assert(users3[0]->name == "Ada");
 
-    manager.invalidate_tags({"cache_users"});
+    cache_session.invalidate_cache_tags({"cache_users"});
     session.clear();
-    const auto users4 = cached_query.execute(session, manager);
+    const auto users4 = cache_session.execute(cached_query);
     assert(counting->select_count == 2);
     assert(users4[0]->name == "Ada changed");
 
-    const auto auto_options = metal::cache_query(
+    metal::CacheSession tenant_cache_session{
+        session,
+        manager,
+        metal::CacheTenantId{std::string{"blue"}}};
+    auto tenant_cached = metal::cache(
+        metal::select<CacheUser>(),
+        "tenant-users",
+        metal::Duration{"1h"});
+    session.clear();
+    (void)tenant_cache_session.execute(tenant_cached);
+    assert(manager_provider->has("tenant:blue:tenant-users"));
+    tenant_cache_session.invalidate_cache_key("tenant-users");
+    assert(!manager_provider->has("tenant:blue:tenant-users"));
+
+    const auto auto_options = metal::cache(
         metal::select<CacheUser>(),
         "auto-flag",
         metal::Duration{"1m"},
