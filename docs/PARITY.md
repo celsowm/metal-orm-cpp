@@ -311,6 +311,26 @@ Implemented in 0.0.25:
 
 The cache core is complete for the supported SQLite model. The overall cache row remains 🟡 only because the TypeScript package also ships ecosystem-specific Keyv and ioredis adapters. C++ exposes the same provider extension boundary plus the in-memory provider, but does not yet mandate a particular Redis client dependency.
 
+## Procedure-call parity — 0.0.26
+
+The TypeScript API models procedure calls independently from SELECT/DML with a procedure reference, ordered `IN`/`OUT`/`INOUT` parameters, optional schema, optional database type metadata, compiled OUT-result metadata and a multi-result execution contract. The C++ binding keeps those semantics while splitting optional database capabilities instead of forcing every dialect/executor to implement procedure methods.
+
+0.0.26 adds:
+
+- `ProcedureCall`, `ProcedureRef`, `ProcedureParam` and `ProcedureDirection` as first-class procedure AST types;
+- immutable-style `call_procedure(...).in(...).out(...).in_out(...)` construction, including schema and `db_type` metadata;
+- scalar procedure inputs backed by the same typed `ScalarPtr` representation used by the query AST;
+- `CompiledProcedureCall` with `ProcedureOutSource::{None,FirstResultSet,LastResultSet}` and ordered OUT names;
+- segregated `ProcedureCompiler` and `ProcedureExecutor` capability interfaces rather than extending the already-minimal `Dialect`/`DbExecutor` base contracts with methods unsupported by SQLite;
+- `ProcedureExecutionResult` containing all result sets plus a name-to-`Value` OUT map;
+- case-insensitive OUT-column matching and explicit errors for missing result sets, empty OUT result sets and absent OUT columns;
+- regression coverage proving both first-result-set and last-result-set OUT extraction, preserving the semantic difference used by PostgreSQL versus MySQL/MSSQL in the reference implementation;
+- explicit rejection when either the active dialect lacks procedure compilation or the executor lacks multi-result procedure execution.
+
+SQLite stored procedures are **not** implemented because SQLite has no stored-procedure facility and the TypeScript `SqliteDialect.compileProcedureCall()` also throws `Stored procedures are not supported by the SQLite dialect.` The supported SQLite behavior is therefore an explicit rejection, not emulated `CALL` SQL. A synthetic capability dialect/executor in the C++ suite proves the vendor-independent AST/execution contract without pretending SQLite can execute procedures.
+
+Procedure calls are ✅ for the supported SQLite execution model: the public contract is present and SQLite rejects exactly at the unsupported database capability boundary. Future PostgreSQL/MySQL/MSSQL dialects can implement `ProcedureCompiler`/`ProcedureExecutor` without modifying the core Session or query AST.
+
 ## Schema/tooling/ecosystem
 
 | MetalORM capability | C++ status |
@@ -327,7 +347,7 @@ The cache core is complete for the supported SQLite model. The overall cache row
 | DTO/OpenAPI | ✅ |
 | Tree/MPTT | ✅ |
 | cache layer | 🟡 |
-| procedure calls | ❌ |
+| procedure calls | ✅ |
 | pooling | ❌ |
 | DB-to-entity code generation | ❌ |
 
@@ -335,6 +355,6 @@ The 🟡 on schema diff reflects the remaining expected-metadata surface, not th
 
 ## Ordered parity roadmap
 
-0.0.25 closes the query-cache core for the supported SQLite model. The next parity pass moves to procedure calls, followed by pooling and DB-to-entity generation. A first-party remote-cache adapter and physical FK/check declaration metadata remain separate integration/schema decisions and should continue to follow the reflection-native, no-compatibility approach.
+0.0.26 closes the procedure-call surface for the supported SQLite model by matching the reference's explicit SQLite rejection while providing the vendor-independent AST and capability-based execution contract. The next parity pass moves to pooling, followed by DB-to-entity generation. A first-party remote-cache adapter and physical FK/check declaration metadata remain separate integration/schema decisions and should continue to follow the reflection-native, no-compatibility approach.
 
 A later performance pass may replace in-memory root pagination deduplication with a root-aware SQL page plan, provided it preserves the tested 0.0.13 semantics.
