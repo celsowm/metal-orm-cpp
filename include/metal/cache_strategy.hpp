@@ -2,6 +2,7 @@
 
 #include "metal/cache_types.hpp"
 
+#include <concepts>
 #include <optional>
 #include <string>
 #include <string_view>
