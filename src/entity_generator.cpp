@@ -5,9 +5,9 @@
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <iomanip>
 #include <optional>
-#include <set>
 #include <sstream>
 #include <string_view>
 #include <unordered_map>
@@ -28,6 +28,13 @@ std::string trim(std::string_view value) {
 std::string uppercase(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
         return static_cast<char>(std::toupper(c));
+    });
+    return value;
+}
+
+std::string lowercase(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
     });
     return value;
 }
@@ -77,10 +84,26 @@ std::string identifier(std::string_view input, std::string_view fallback = "fiel
 }
 
 std::string singularize(std::string value) {
-    if (value.size() > 3 && value.ends_with("ies")) {
+    static const std::unordered_map<std::string, std::string> irregular{
+        {"children", "child"},
+        {"people", "person"},
+        {"men", "man"},
+        {"women", "woman"},
+        {"mice", "mouse"},
+        {"geese", "goose"}
+    };
+
+    const auto lower = lowercase(value);
+    if (const auto found = irregular.find(lower); found != irregular.end()) return found->second;
+    if (lower == "series" || lower == "species" || lower == "news" ||
+        lower.ends_with("status") || lower.ends_with("analysis")) {
+        return value;
+    }
+    if (value.size() > 3 && lower.ends_with("ies")) {
         value.resize(value.size() - 3);
         value += 'y';
-    } else if (value.size() > 1 && value.ends_with('s') && !value.ends_with("ss")) {
+    } else if (value.size() > 1 && lower.ends_with('s') && !lower.ends_with("ss") &&
+               !lower.ends_with("us") && !lower.ends_with("is")) {
         value.pop_back();
     }
     return value;
@@ -194,7 +217,10 @@ std::optional<std::string> default_annotation(
     if (!column.default_value) return std::nullopt;
     auto value = strip_outer_parentheses(*column.default_value);
     const auto upper = uppercase(value);
-    if (upper == "NULL") return "metal::mapping::default_null";
+    if (upper == "NULL") {
+        if (!column.not_null) return "metal::mapping::default_null";
+        return "metal::mapping::default_sql{\"NULL\"}";
+    }
 
     if (type.kind == ScalarKind::Boolean && (value == "0" || value == "1" || upper == "TRUE" || upper == "FALSE")) {
         const bool enabled = value == "1" || upper == "TRUE";
