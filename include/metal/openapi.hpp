@@ -174,6 +174,7 @@ OpenApiSchema nonnullable_scalar_openapi_schema() {
 template <DtoMode Mode, reflect::Entity T, std::meta::info... Excluded>
 OpenApiSchema dto_openapi_schema_impl(OpenApiDialect dialect) {
     static_assert(validate_dto_members<T, Excluded...>());
+    static_assert(reflect::validate_column_defaults<T>());
 
     OpenApiSchema root;
     root.types.push_back(OpenApiType::object);
@@ -182,6 +183,7 @@ OpenApiSchema dto_openapi_schema_impl(OpenApiDialect dialect) {
         if constexpr (!dto_member_excluded<Member, Excluded...>()) {
             constexpr bool generated = reflect::has<mapping::generated_t>(Member);
             constexpr bool primary = reflect::has<mapping::primary_key_t>(Member);
+            constexpr bool has_default = reflect::has_column_default<Member>();
             using M = reflect::member_type_t<Member>;
             constexpr bool nullable = is_optional_v<M>;
 
@@ -197,9 +199,7 @@ OpenApiSchema dto_openapi_schema_impl(OpenApiDialect dialect) {
             if constexpr (Mode == DtoMode::response) {
                 if constexpr (!nullable || primary) root.required.push_back(name);
             } else if constexpr (Mode == DtoMode::create) {
-                // Reflected DB defaults are not present yet in the C++ mapping layer.
-                // Optional members are therefore the only create-time omission signal.
-                if constexpr (!nullable) root.required.push_back(name);
+                if constexpr (!nullable && !has_default) root.required.push_back(name);
             }
         }
     });
