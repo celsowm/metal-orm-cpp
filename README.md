@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.19`
+**Version:** `0.0.20`
 
 MetalORM C++ deliberately has no C++20/23 compatibility layer. The TypeScript [`metal-orm`](https://github.com/celsowm/metal-orm) repository is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
 
@@ -110,6 +110,44 @@ auto user = metal::save_graph(session, payload);
 ```
 
 `save_graph`, `update_graph`, `patch_graph`, pruning and typed N:N pivot patches reuse the same transactional Session/UoW infrastructure.
+
+## Tree / MPTT — 0.0.20
+
+Tree metadata is reflection-native rather than string-configured:
+
+```cpp
+struct [[=metal::mapping::table{"categories"}]] Category {
+    [[=metal::mapping::primary_key, =metal::mapping::generated]]
+    std::int64_t id{};
+    std::string name;
+
+    [[=metal::mapping::tree_parent]]
+    std::optional<std::int64_t> parent_id;
+    [[=metal::mapping::tree_left]]
+    std::int64_t lft{};
+    [[=metal::mapping::tree_right]]
+    std::int64_t rght{};
+    [[=metal::mapping::tree_depth]]
+    std::optional<std::int64_t> depth;
+    [[=metal::mapping::tree_scope]]
+    std::int64_t tenant_id{};
+};
+
+auto tree = metal::create_tree_manager<Category>(session)
+    .with_scope<^^Category::tenant_id>(42);
+
+auto root_id = tree.insert_as_child(
+    metal::Value{nullptr},
+    metal::tree_row<Category>()
+        .set<^^Category::name>("Root")
+        .build());
+```
+
+The 0.0.20 baseline ports the TypeScript Nested Set/MPTT model with reflected mapping validation, `TreeQuery<T>`, `TreeManager<T>`, ancestor/descendant/path/root/child/sibling/depth queries, leaf discovery, threaded descendants, insert-as-child/root, sibling movement, subtree movement, subtree deletion, recovery and structural validation.
+
+Multi-tree scope is applied to both reads **and boundary-changing mutations**. This intentionally hardens an edge in the current TypeScript manager where raw `lft/rght` shift SQL does not consistently append scope conditions. Subtree moves also isolate the moving range below zero while gaps are closed/opened so the temporary subtree cannot be shifted by its own destination-gap update.
+
+The remaining Tree edge is narrow: the generic SELECT AST still lacks a first-class arithmetic scalar node, so `TreeManager::get_leaves()` currently emits the tiny `(rght - lft) = 1` predicate directly instead of exposing `TreeQuery::find_leaves()` as a normal `SelectQuery<T>`. The questionable TS `removeFromTree()` semantics are also intentionally not copied until that source behavior is clarified/fixed.
 
 ## Bulk operations — 0.0.19
 
@@ -245,6 +283,6 @@ MetalORM intentionally refuses older compilers instead of shipping a compatibili
 
 ## Current roadmap
 
-Bulk parity is now the 0.0.19 baseline. The next step is a fresh source-level audit of the current TypeScript repository to choose the next concrete subsystem from the remaining DTO/OpenAPI, Tree/MPTT, cache, procedure-call, pooling and DB-to-entity generation gaps instead of assuming an old roadmap is still accurate.
+Tree/MPTT is now the 0.0.20 baseline. The immediate next pass should close the two explicit Tree edges — arithmetic-expression support so leaves stay inside the generic SELECT AST, and a source-level decision/fix for the current TypeScript `removeFromTree()` behavior — before moving on to DTO/OpenAPI, cache, procedure-call, pooling and DB-to-entity generation gaps.
 
 See [`CHANGELOG.md`](CHANGELOG.md) and [`docs/PARITY.md`](docs/PARITY.md) for release-by-release details and remaining gaps.
