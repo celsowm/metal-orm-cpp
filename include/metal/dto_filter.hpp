@@ -103,6 +103,9 @@ template <std::meta::info Member>
 ExprPtr build_member_filter(const FilterClause& clause) {
     using M = reflect::member_type_t<Member>;
     using U = optional_value_t<M>;
+    constexpr bool numeric = std::is_arithmetic_v<U> && !std::same_as<U, bool>;
+    constexpr bool string_like = std::same_as<U, std::string>;
+    constexpr bool boolean = std::same_as<U, bool>;
     const auto operand = as_scalar(field<Member>).node();
 
     const auto comparison = [&](CompareOp op) -> ExprPtr {
@@ -126,37 +129,47 @@ ExprPtr build_member_filter(const FilterClause& clause) {
         case FilterOperator::not_equals:
             return comparison(CompareOp::Ne);
         case FilterOperator::lt:
-            return comparison(CompareOp::Lt);
         case FilterOperator::lte:
-            return comparison(CompareOp::Le);
         case FilterOperator::gt:
-            return comparison(CompareOp::Gt);
-        case FilterOperator::gte:
-            return comparison(CompareOp::Ge);
+        case FilterOperator::gte: {
+            if constexpr (!numeric) {
+                throw std::invalid_argument("MetalORM: lt/lte/gt/gte REST filters require a numeric DTO field");
+            } else {
+                const auto op = clause.op == FilterOperator::lt ? CompareOp::Lt
+                    : clause.op == FilterOperator::lte ? CompareOp::Le
+                    : clause.op == FilterOperator::gt ? CompareOp::Gt
+                    : CompareOp::Ge;
+                return comparison(op);
+            }
+        }
         case FilterOperator::is_null:
             return std::make_shared<ExprNode>(ExprNode{NullCheckNode{operand, false}});
         case FilterOperator::is_not_null:
             return std::make_shared<ExprNode>(ExprNode{NullCheckNode{operand, true}});
         case FilterOperator::in:
         case FilterOperator::not_in: {
-            std::vector<Value> values;
-            values.reserve(clause.values.size());
-            for (const auto& value : clause.values) {
-                if (std::holds_alternative<std::nullptr_t>(value)) {
-                    throw std::invalid_argument("MetalORM: IN/NOT IN REST filters do not accept null; use is_null/is_not_null");
+            if constexpr (boolean) {
+                throw std::invalid_argument("MetalORM: boolean REST filters support equals/not only");
+            } else {
+                std::vector<Value> values;
+                values.reserve(clause.values.size());
+                for (const auto& value : clause.values) {
+                    if (std::holds_alternative<std::nullptr_t>(value)) {
+                        throw std::invalid_argument("MetalORM: IN/NOT IN REST filters do not accept null; use is_null/is_not_null");
+                    }
+                    values.push_back(normalize_filter_value<M>(value));
                 }
-                values.push_back(normalize_filter_value<M>(value));
+                return std::make_shared<ExprNode>(ExprNode{InValuesNode{
+                    operand,
+                    std::move(values),
+                    clause.op == FilterOperator::not_in
+                }});
             }
-            return std::make_shared<ExprNode>(ExprNode{InValuesNode{
-                operand,
-                std::move(values),
-                clause.op == FilterOperator::not_in
-            }});
         }
         case FilterOperator::contains:
         case FilterOperator::starts_with:
         case FilterOperator::ends_with: {
-            if constexpr (!std::same_as<U, std::string>) {
+            if constexpr (!string_like) {
                 throw std::invalid_argument("MetalORM: contains/starts_with/ends_with require a string DTO field");
             } else {
                 if (std::holds_alternative<std::nullptr_t>(clause.value)) {
