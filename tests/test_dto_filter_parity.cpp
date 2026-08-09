@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -22,16 +23,16 @@ static_assert(metal::reflect::validate_mapping<FilterUser>());
 
 int main() {
     metal::SQLiteDialect dialect;
-    metal::SQLiteExecutor db{":memory:"};
-    db.execute(metal::create_table_sql<FilterUser>(dialect));
+    auto db = std::make_shared<metal::SQLiteExecutor>(":memory:");
+    db->execute(metal::create_table_sql<FilterUser>(dialect));
 
-    db.execute(
+    db->execute(
         "INSERT INTO \"filter_users\" (\"display_name\", \"age\", \"active\", \"email\") VALUES (?, ?, ?, ?);",
         {metal::Value{std::string{"Celso"}}, metal::Value{std::int64_t{40}}, metal::Value{true}, metal::Value{std::string{"celso@example.com"}}});
-    db.execute(
+    db->execute(
         "INSERT INTO \"filter_users\" (\"display_name\", \"age\", \"active\", \"email\") VALUES (?, ?, ?, ?);",
         {metal::Value{std::string{"Alice"}}, metal::Value{std::int64_t{29}}, metal::Value{true}, metal::Value{std::string{"alice@example.com"}}});
-    db.execute(
+    db->execute(
         "INSERT INTO \"filter_users\" (\"display_name\", \"age\", \"active\", \"email\") VALUES (?, ?, ?, ?);",
         {metal::Value{std::string{"Grace"}}, metal::Value{std::int64_t{37}}, metal::Value{false}, metal::Value{nullptr}});
 
@@ -62,7 +63,7 @@ int main() {
     assert(compiled.sql.find("display_name") != std::string::npos);
     assert(compiled.params.size() == 3);
 
-    const auto filtered = db.execute(compiled.sql, compiled.params);
+    const auto filtered = db->execute(compiled.sql, compiled.params);
     assert(filtered.rows.size() == 1);
     assert(metal::from_value<std::string>(filtered.rows[0].at("display_name")) == "Celso");
 
@@ -74,13 +75,13 @@ int main() {
     };
     auto in_query = metal::apply_filter<^^FilterUser::age>(metal::select<FilterUser>(), ids);
     const auto in_compiled = in_query.compile(dialect);
-    const auto in_rows = db.execute(in_compiled.sql, in_compiled.params);
+    const auto in_rows = db->execute(in_compiled.sql, in_compiled.params);
     assert(in_rows.rows.size() == 2);
 
     metal::FilterInput null_email{{metal::null_filter_clause("email")}};
     auto null_query = metal::apply_filter<^^FilterUser::email>(metal::select<FilterUser>(), null_email);
     const auto null_compiled = null_query.compile(dialect);
-    const auto null_rows = db.execute(null_compiled.sql, null_compiled.params);
+    const auto null_rows = db->execute(null_compiled.sql, null_compiled.params);
     assert(null_rows.rows.size() == 1);
     assert(metal::from_value<std::string>(null_rows.rows[0].at("display_name")) == "Grace");
 
@@ -93,9 +94,44 @@ int main() {
     auto composed = metal::select<FilterUser>();
     composed.where((metal::field<^^FilterUser::active> == true) && *api_expression);
     const auto composed_sql = composed.compile(dialect);
-    const auto composed_rows = db.execute(composed_sql.sql, composed_sql.params);
+    const auto composed_rows = db->execute(composed_sql.sql, composed_sql.params);
     assert(composed_rows.rows.size() == 1);
     assert(metal::from_value<std::string>(composed_rows.rows[0].at("display_name")) == "Celso");
+
+    auto sorted = metal::apply_sort<^^FilterUser::displayName>(
+        metal::select<FilterUser>(),
+        metal::SortInput{std::string{"displayName"}, false});
+    const auto sorted_sql = sorted.compile(dialect);
+    assert(sorted_sql.sql.find("ORDER BY \"display_name\" DESC, \"id\" ASC") != std::string::npos);
+    const auto sorted_rows = db->execute(sorted_sql.sql, sorted_sql.params);
+    assert(sorted_rows.rows.size() == 3);
+    assert(metal::from_value<std::string>(sorted_rows.rows[0].at("display_name")) == "Grace");
+    assert(metal::from_value<std::string>(sorted_rows.rows[1].at("display_name")) == "Celso");
+
+    auto default_sorted = metal::apply_sort<^^FilterUser::displayName>(
+        metal::select<FilterUser>());
+    const auto default_sorted_sql = default_sorted.compile(dialect);
+    assert(default_sorted_sql.sql.find("ORDER BY \"id\" ASC") != std::string::npos);
+
+    metal::Session session{db};
+    const auto page = metal::execute_filtered_paged(
+        metal::select<FilterUser>(),
+        session,
+        metal::FilterInput{{metal::filter_clause(
+            "age",
+            metal::FilterOperator::gte,
+            metal::Value{std::int64_t{20}})}},
+        metal::SortInput{std::string{"displayName"}, false},
+        metal::PageOptions{1, 2},
+        metal::DtoMemberPolicy<^^FilterUser::age>{},
+        metal::DtoMemberPolicy<^^FilterUser::displayName>{});
+    assert(page.items.size() == 2);
+    assert(page.total_items == 3);
+    assert(page.total_pages == 2);
+    assert(page.has_next_page);
+    assert(!page.has_prev_page);
+    assert(page.items[0]->displayName == "Grace");
+    assert(page.items[1]->displayName == "Celso");
 
     bool unknown = false;
     try {
@@ -121,6 +157,16 @@ int main() {
     }
     assert(disallowed);
 
+    bool disallowed_sort = false;
+    try {
+        (void)metal::apply_sort<^^FilterUser::displayName>(
+            metal::select<FilterUser>(),
+            metal::SortInput{std::string{"age"}, true});
+    } catch (const std::invalid_argument&) {
+        disallowed_sort = true;
+    }
+    assert(disallowed_sort);
+
     bool wrong_type = false;
     try {
         (void)metal::build_filter_expression<FilterUser, ^^FilterUser::age>(
@@ -132,4 +178,16 @@ int main() {
         wrong_type = true;
     }
     assert(wrong_type);
+
+    bool wrong_operator = false;
+    try {
+        (void)metal::build_filter_expression<FilterUser, ^^FilterUser::active>(
+            metal::FilterInput{{metal::filter_list_clause(
+                "active",
+                metal::FilterOperator::in,
+                {metal::Value{true}})}});
+    } catch (const std::invalid_argument&) {
+        wrong_operator = true;
+    }
+    assert(wrong_operator);
 }
