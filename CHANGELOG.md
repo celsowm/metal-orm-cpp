@@ -2,6 +2,21 @@
 
 All releases currently target GCC 16+ C++26 static reflection and intentionally use SQLite as the only executor/dialect.
 
+## 0.0.21 - 2026-08-09
+
+Tree/MPTT parity closure and reusable scalar arithmetic.
+
+- Added first-class scalar arithmetic to the shared SELECT AST with `+`, `-`, `*`, `/` and integral `%` operations.
+- Added typed arithmetic result promotion with `std::optional` propagation and compile-time rejection of boolean arithmetic.
+- Added SQLite compilation for nested arithmetic expressions while preserving lexical parameter order.
+- Added real SQLite coverage for arithmetic in projections and predicates.
+- Added `TreeQuery<T>::find_leaves()` as a normal typed query using `(rght - lft) = 1`; `TreeManager::get_leaves()` no longer emits a special raw SELECT.
+- Added width-4 subtree-move regression coverage so the negative temporary-range isolation is proven for real subtrees rather than only leaves.
+- Added `TreeManager<T>::remove_from_tree()` with child promotion, descendant boundary/depth compaction, and retained-node detachment as a valid root.
+- Added dedicated SQLite coverage for `remove_from_tree()` with exact MPTT bounds, parent/depth promotion, retained root placement and cross-scope isolation.
+- Registered the remove-from-tree E2E in the CMake test suite and bumped the C++ release to 0.0.21.
+- Closed the Tree/MPTT parity row for the supported SQLite execution model; the next parity pass moves to DTO/OpenAPI and the remaining tooling/runtime gaps.
+
 ## 0.0.20 - 2026-08-09
 
 Tree/MPTT parity baseline.
