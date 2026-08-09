@@ -267,6 +267,11 @@ inline std::string compile_case(const CaseRef& value, CompileContext& ctx) {
     return out;
 }
 
+inline std::string compile_arithmetic(const ArithmeticRef& value, CompileContext& ctx) {
+    return "(" + compile_scalar(value.left, ctx) + " " + arithmetic_token(value.op) + " " +
+           compile_scalar(value.right, ctx) + ")";
+}
+
 inline std::string compile_scalar(const ScalarPtr& scalar, CompileContext& ctx) {
     return std::visit([&](const auto& node) -> std::string {
         using N = std::remove_cvref_t<decltype(node)>;
@@ -275,6 +280,8 @@ inline std::string compile_scalar(const ScalarPtr& scalar, CompileContext& ctx) 
         } else if constexpr (std::same_as<N, Value>) {
             ctx.params.push_back(node);
             return ctx.dialect.placeholder(ctx.params.size());
+        } else if constexpr (std::same_as<N, ArithmeticRef>) {
+            return compile_arithmetic(node, ctx);
         } else if constexpr (std::same_as<N, AggregateRef>) {
             return compile_aggregate(node, ctx);
         } else if constexpr (std::same_as<N, FunctionRef>) {
