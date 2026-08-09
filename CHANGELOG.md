@@ -2,6 +2,25 @@
 
 All releases currently target GCC 16+ C++26 static reflection and intentionally use SQLite as the only executor/dialect.
 
+## 0.0.23 - 2026-08-09
+
+Relation-aware DTO/REST/OpenAPI expansion.
+
+- Added recursive `WhereInput` relation filters with `some`, `every`, `none`, `isEmpty` and `isNotEmpty` operators.
+- Added reflection-native `DtoRelationPolicy<^^T::relation...>` allowlists with compile-time owner/relation validation and runtime rejection of unknown/disallowed API relation names.
+- Reused the existing correlated relation-query compiler for belongsTo, hasOne, hasMany, N:N, morphOne and morphMany instead of adding a REST-specific SQL compiler.
+- Added recursive relation predicates, including multi-level REST filters such as user -> posts -> comments.
+- Matched the TypeScript runtime's non-vacuous `every()` behavior: the relation must be non-empty and no related row may fail the predicate.
+- Kept morphTo relation filtering explicitly unsupported because the target table is discriminator-dependent, matching the existing relation-query limitation.
+- Added a relation-aware `execute_filtered_paged()` overload that combines recursive filters, reflected safe sorting, existing root-aware Session pagination and enhanced page metadata.
+- Added nested relation DTO OpenAPI generation with single-object and collection shapes, bounded compile-time recursion and explicit morphTo treatment.
+- Added recursive relation-filter OpenAPI schemas using the same `some/every/none/isEmpty/isNotEmpty` contract as runtime filtering.
+- Added nested single-relation update schemas and relation component maps.
+- Added OpenAPI component utilities for deep cloning, canonical structural hashing, deterministic names, `$ref` creation/replacement, reusable-schema extraction and heterogeneous reflected component generation.
+- Added real SQLite coverage for 1:N, N:N, recursive relation filtering, non-vacuous `every`, relation allowlists and relation-aware paged execution.
+- Added OpenAPI coverage for nested DTOs, recursive relation filters, update-with-relations, component maps, deterministic naming, deduplication, deep cloning and `$ref` replacement.
+- Kept DTO/OpenAPI 🟡 only for default-aware create requiredness: reflected database-default metadata still belongs in the shared mapping/DDL layer rather than an API-only declaration.
+
 ## 0.0.22 - 2026-08-09
 
 Reflection-native DTO/REST/OpenAPI baseline.
@@ -67,7 +86,7 @@ Bulk-operation parity release.
 - Added `BulkResult`/metadata with processed-row count, chunks executed, RETURNING rows and optional timings.
 - Extended the shared UPDATE/DELETE DML AST with `IN` predicates and reusable typed `Expression<T>` filters so the bulk subsystem does not introduce a second SQL compiler.
 - Reused `Session::transaction()` for rollback semantics across chunks; a later chunk failure rolls back earlier chunks when transactional execution is enabled.
-- Serialized access to the single SQLite connection inside `SQLiteExecutor`, allowing bounded bulk workers without racing the underlying SQLite handle.
+- Serialized access to the single SQLite connection inside `SQLiteExecutor`, allowing bounded bulk workers without racing the underlying handle.
 - Added a dedicated SQLite E2E suite covering insert, update, update-where, delete, delete-where, upsert/update, upsert/do-nothing, RETURNING, callbacks/timing, concurrency, transaction rollback, non-transactional partial progress and invalid chunk sizes.
 
 ## 0.0.18 - 2026-08-08
