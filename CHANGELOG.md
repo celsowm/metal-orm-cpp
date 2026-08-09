@@ -2,6 +2,25 @@
 
 All releases currently target GCC 16+ C++26 static reflection and intentionally use SQLite as the only executor/dialect.
 
+## 0.0.25 - 2026-08-09
+
+Query-cache core parity release.
+
+- Added segregated `CacheReader`, `CacheWriter`, `CacheInvalidator` and `CacheProvider` contracts plus optional tag registration, clear and statistics capabilities.
+- Added cache capability discovery for tags, prefix invalidation and TTL.
+- Added human-readable cache durations (`s`, `m`, `h`, `d`, `w`) plus millisecond values, validation and formatting.
+- Added a thread-safe bidirectional `TagIndex` for tag-to-key and key-to-tag membership.
+- Added a thread-safe `MemoryCacheAdapter` with lazy TTL expiry, tags, prefix invalidation, clear, statistics and disposal.
+- Added `CacheStrategy` / `DefaultCacheStrategy` with conditional caching and the TypeScript-compatible `tenant:<tenantId>:<queryKey>` key shape.
+- Added `QueryCacheManager` with execute-around hit/miss behavior, default TTL, conditional storage, key/tag/prefix invalidation, clear, stats and disposal.
+- Added generic `CachedQuery`, `cache_query()` and concise `cache()` wrappers without injecting cache state into the SELECT AST.
+- Added `CacheSession` composition for Session + cache manager + optional tenant context and tenant-aware invalidation helpers.
+- Cache entity results as typed `QueryResult` rows and re-hydrate through Session/Identity Map, preventing cache hits from creating detached duplicate entity identities.
+- Added support for both ordinary `SelectQuery` and correlated `RelationFilteredQuery` caching through the same execution wrapper.
+- Added real SQLite coverage with a counting executor proving cache hits skip SELECT execution, stale values persist until explicit invalidation, tag invalidation refreshes rows, tenant keys isolate entries and relation queries are cacheable.
+- Preserved `auto_invalidate` as configuration without inventing runtime behavior that the current TypeScript cache manager does not implement.
+- Marked cache 🟡 only at the adapter/ecosystem boundary: the core and memory provider are implemented, while first-party Keyv/ioredis equivalents await a deliberate C++ remote-cache dependency choice.
+
 ## 0.0.24 - 2026-08-09
 
 Shared reflected database defaults and DTO/OpenAPI parity closure.
