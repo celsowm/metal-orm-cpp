@@ -32,14 +32,13 @@ DbExecutor& PooledExecutor::ensure_persistent_executor_locked() {
 QueryResult PooledExecutor::execute(
     const std::string& sql,
     const std::vector<Value>& params) {
-    if (mode_ == PooledExecutorMode::Sticky) {
-        std::lock_guard lock(mutex_);
-        return ensure_persistent_executor_locked().execute(sql, params);
-    }
+    // Serialize lease selection and execution for one pooled executor. This is
+    // stronger than the single-threaded TypeScript runtime and prevents a
+    // concurrent begin_transaction() from racing an otherwise temporary lease.
+    std::lock_guard lock(mutex_);
 
-    {
-        std::lock_guard lock(mutex_);
-        if (lease_) return lease_->resource().execute(sql, params);
+    if (mode_ == PooledExecutorMode::Sticky || lease_) {
+        return ensure_persistent_executor_locked().execute(sql, params);
     }
 
     auto lease = pool_->acquire();
