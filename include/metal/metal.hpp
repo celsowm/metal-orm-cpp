@@ -23,6 +23,7 @@
 #include "metal/schema_introspection.hpp"
 #include "metal/schema_expected.hpp"
 #include "metal/schema_diff.hpp"
+#include "metal/tree.hpp"
 #include "metal/unit_of_work.hpp"
 #include "metal/value.hpp"
 #include "metal/version.hpp"
