@@ -8,6 +8,7 @@
 #include "metal/cache_memory.hpp"
 #include "metal/query_cache_manager.hpp"
 #include "metal/cache_execute.hpp"
+#include "metal/cache_session.hpp"
 #include "metal/collection.hpp"
 #include "metal/column_defaults.hpp"
 #include "metal/ddl.hpp"
