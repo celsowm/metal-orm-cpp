@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(metal-orm VERSION 0.0.19 LANGUAGES CXX)
+project(metal-orm VERSION 0.0.20 LANGUAGES CXX)
 
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    message(FATAL_ERROR "MetalORM 0.0.19 is intentionally C++26-native and currently requires GCC 16+ reflection support")
+    message(FATAL_ERROR "MetalORM 0.0.20 is intentionally C++26-native and currently requires GCC 16+ reflection support")
 endif()
 
 if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
-    message(FATAL_ERROR "MetalORM 0.0.19 requires GCC 16 or newer")
+    message(FATAL_ERROR "MetalORM 0.0.20 requires GCC 16 or newer")
 endif()
 
 find_package(SQLite3 REQUIRED)
@@ -110,6 +110,11 @@ if(METAL_ORM_BUILD_TESTS)
         tests/compile_fail/wrong_schema_index_member.cpp
         "schema index members must belong to the declared entity"
     )
+    metal_expect_compile_failure(
+        wrong-tree-parent
+        tests/compile_fail/wrong_tree_parent.cpp
+        "tree parent column must be std::optional<T> so root nodes can be NULL"
+    )
 
     enable_testing()
 
@@ -176,4 +181,8 @@ if(METAL_ORM_BUILD_TESTS)
     add_executable(metal-orm-bulk-parity-tests tests/test_bulk_parity.cpp)
     target_link_libraries(metal-orm-bulk-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-bulk-parity-tests COMMAND metal-orm-bulk-parity-tests)
+
+    add_executable(metal-orm-tree-parity-tests tests/test_tree_parity.cpp)
+    target_link_libraries(metal-orm-tree-parity-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-tree-parity-tests COMMAND metal-orm-tree-parity-tests)
 endif()
