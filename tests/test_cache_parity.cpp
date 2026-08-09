@@ -12,11 +12,21 @@
 
 using namespace std::chrono_literals;
 
+struct [[=metal::mapping::table{"cache_posts"}]] CachePost {
+    [[=metal::mapping::primary_key]] std::int64_t id{};
+    std::int64_t user_id{};
+    std::string title;
+};
+
 struct [[=metal::mapping::table{"cache_users"}]] CacheUser {
     [[=metal::mapping::primary_key]] std::int64_t id{};
     std::string name;
+
+    [[=metal::mapping::has_many<^^CachePost::user_id>{}]]
+    metal::has_many_collection<CachePost> posts;
 };
 
+static_assert(metal::reflect::validate_mapping<CachePost>());
 static_assert(metal::reflect::validate_mapping<CacheUser>());
 
 class CountingExecutor final : public metal::DbExecutor {
@@ -200,8 +210,12 @@ int main() {
     auto counting = std::make_shared<CountingExecutor>(sqlite);
     metal::SQLiteDialect dialect;
     counting->execute(metal::create_table_sql<CacheUser>(dialect));
+    counting->execute(metal::create_table_sql<CachePost>(dialect));
     counting->execute(
         "INSERT INTO cache_users(id, name) VALUES (1, 'Ada'), (2, 'Grace');");
+    counting->execute(
+        "INSERT INTO cache_posts(id, user_id, title) VALUES "
+        "(10, 1, 'C++26'), (11, 2, 'Rust');");
 
     metal::Session session{counting};
     metal::CacheSession cache_session{session, manager};
@@ -246,9 +260,33 @@ int main() {
         metal::Duration{"1h"});
     session.clear();
     (void)tenant_cache_session.execute(tenant_cached);
+    assert(counting->select_count == 3);
     assert(manager_provider->has("tenant:blue:tenant-users"));
     tenant_cache_session.invalidate_cache_key("tenant-users");
     assert(!manager_provider->has("tenant:blue:tenant-users"));
+
+    auto relation_query = metal::where_has<^^CacheUser::posts>(
+        metal::select<CacheUser>(),
+        [](auto& posts) {
+            posts.where(
+                metal::field<^^CachePost::title> == std::string{"C++26"});
+        });
+    auto cached_relation_query = metal::cache(
+        std::move(relation_query),
+        "users-with-cpp-posts",
+        metal::Duration{"1h"},
+        {"cache_users", "cache_posts"});
+
+    session.clear();
+    const auto relation1 = cache_session.execute(cached_relation_query);
+    assert(relation1.size() == 1);
+    assert(relation1[0]->id == 1);
+    assert(counting->select_count == 4);
+    session.clear();
+    const auto relation2 = cache_session.execute(cached_relation_query);
+    assert(relation2.size() == 1);
+    assert(relation2[0]->id == 1);
+    assert(counting->select_count == 4);
 
     const auto auto_options = metal::cache(
         metal::select<CacheUser>(),
