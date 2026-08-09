@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.22`
+**Version:** `0.0.23`
 
 MetalORM C++ deliberately has no C++20/23 compatibility layer. The TypeScript [`metal-orm`](https://github.com/celsowm/metal-orm) repository is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
 
@@ -111,7 +111,7 @@ auto user = metal::save_graph(session, payload);
 
 `save_graph`, `update_graph`, `patch_graph`, pruning and typed N:N pivot patches reuse the same transactional Session/UoW infrastructure.
 
-## DTO / REST / OpenAPI — 0.0.22
+## DTO / REST / OpenAPI — 0.0.23
 
 DTO metadata is derived from the entity itself. Public API field names remain C++ member identifiers even when a member maps to a different physical SQL column:
 
@@ -131,9 +131,9 @@ auto create = metal::describe_create_dto<User>();
 auto update = metal::describe_update_dto<User>();
 ```
 
-`displayName` is the DTO/OpenAPI key while `display_name` remains the SQL column. Generated members are excluded from create/update DTOs, update fields are optional, and `std::optional<T>` drives nullability. C++ currently has no reflected database-default annotation, so create-time requiredness cannot yet reproduce the TypeScript default-value rule without duplicating metadata; that remains an explicit parity edge.
+`displayName` is the DTO/OpenAPI key while `display_name` remains the SQL column. Generated members are excluded from create/update DTOs, update fields are optional, and `std::optional<T>` drives nullability. C++ currently has no reflected database-default annotation, so create-time requiredness cannot yet reproduce the TypeScript default-value rule without duplicating metadata; that remains the explicit DTO/OpenAPI parity edge.
 
-The REST filtering path is allowlisted with reflected members rather than free-form SQL names:
+Scalar REST filtering is allowlisted with reflected members rather than free-form SQL names:
 
 ```cpp
 metal::FilterInput filters{{
@@ -155,9 +155,34 @@ auto query = metal::apply_filter<
 
 The filter compiler resolves the public API key back to the reflected member and reuses the shared SELECT AST. It supports equality, `IN`/`NOT IN`, numeric ordering operators, string contains/starts/ends predicates, null checks and case-insensitive matching through `LOWER()`. Unknown fields, disallowed fields, invalid operator/type combinations and incompatible values fail before SQL execution.
 
-Safe runtime sorting uses the same model and appends the reflected primary key as a deterministic tie-breaker. `execute_filtered_paged()` composes reflected filters, allowlisted sorting, the existing Session-level root pagination engine and the enhanced `PagedResponse` metadata.
+0.0.23 adds recursive relation-aware `WhereInput` on top of the existing relation-query compiler:
 
-OpenAPI schemas are framework-independent C++ objects derived from the same reflection metadata. Response/create/update DTO schemas, REST filter schemas, pagination parameters/responses, OpenAPI 3.0 versus 3.1 nullability, route documents and Tree/MPTT result/threaded/list components are covered. Relation filters and nested relation DTO/component generation remain the next DTO/OpenAPI sub-pass, so this area is intentionally marked 🟡 rather than pretending full parity.
+```cpp
+metal::WhereInput postFilter = metal::where_input(metal::FilterInput{{
+    metal::filter_clause(
+        "title",
+        metal::FilterOperator::contains,
+        metal::Value{std::string{"C++"}})
+}});
+
+metal::WhereInput where;
+where.relations.push_back(
+    metal::relation_filter("posts").some(std::move(postFilter)));
+
+auto query = metal::apply_where(
+    metal::select<User>(),
+    where,
+    metal::DtoMemberPolicy<>{},
+    metal::DtoRelationPolicy<^^User::posts>{});
+```
+
+`some`, `none`, `every`, `isEmpty` and `isNotEmpty` compile through the existing correlated `EXISTS` machinery for belongsTo, hasOne, hasMany, N:N, morphOne and morphMany. Nested relation filters are recursive. `every` intentionally preserves the TypeScript runtime's **non-vacuous** behavior: the relation must contain at least one row and no related row may fail the predicate. `morphTo` remains discriminator-dependent and unsupported by relation filtering in both the relation-query model and this REST binding.
+
+Safe runtime sorting uses the same reflection model and appends the reflected primary key as a deterministic tie-breaker. The `WhereInput` overload of `execute_filtered_paged()` composes scalar/relation filters, allowlisted sorting, the existing Session-level root pagination engine and enhanced `PagedResponse` metadata.
+
+OpenAPI schemas are framework-independent C++ objects derived from the same reflection metadata. Response/create/update DTO schemas, recursive relation filter schemas, nested DTOs, update-with-single-relations schemas, pagination, OpenAPI 3.0/3.1 nullability, route documents, Tree/MPTT components and relation component maps are available. Component helpers add deep cloning, stable canonical hashing, deterministic names, reusable-schema extraction and `$ref` replacement without introducing a JSON or web-framework dependency.
+
+DTO/OpenAPI remains **🟡 only because create DTO requiredness still cannot see database defaults**. That will be solved in shared mapping/DDL metadata rather than by introducing an API-only default declaration.
 
 ## Tree / MPTT — 0.0.21
 
@@ -333,6 +358,6 @@ MetalORM intentionally refuses older compilers instead of shipping a compatibili
 
 ## Current roadmap
 
-0.0.22 establishes the reflection-native DTO/REST/OpenAPI baseline. The immediate next pass is relation-aware REST filtering and nested relation/component OpenAPI parity, followed by cache, procedure calls, pooling and DB-to-entity generation gaps.
+0.0.23 closes relation-aware REST filtering, nested relation/component OpenAPI and reusable component utilities. The remaining DTO/OpenAPI edge is default-aware create requiredness, which should be solved in shared mapping/DDL metadata. After that, continue through cache, procedure calls, pooling and DB-to-entity generation gaps.
 
 See [`CHANGELOG.md`](CHANGELOG.md) and [`docs/PARITY.md`](docs/PARITY.md) for release-by-release details and remaining gaps.
