@@ -18,6 +18,7 @@ Legend:
 | --- | --- | --- |
 | Entity/table metadata | ✅ | C++26 annotations + static reflection |
 | Primary/generated columns | ✅ | `consteval` validated |
+| Reflected database defaults | ✅ | typed literal/text/null + raw SQL annotations |
 | Identity Map | ✅ | Separate runtime component |
 | Unit of Work | ✅ | Separate component; shared DML AST |
 | Session coordinator | ✅ | Coordinates UoW, Identity Map and relation processor |
@@ -120,7 +121,7 @@ Raw `std::shared_ptr<T>` annotated as either relation is rejected at compile tim
 
 Raw executor pagination is row-oriented. Session pagination is root-oriented and deduplicates row-multiplying joins by reflected root PK. Cursor pagination supports forward/backward mode, `limit + 1`, multi-column lexicographic keys, mixed ASC/DESC, ordering signatures and root deduplication.
 
-## SQLite schema parity — 0.0.18
+## SQLite schema parity — 0.0.24
 
 Schema state is represented independently from ORM mapping:
 
@@ -151,6 +152,24 @@ metal::add_expected_index<User, ^^User::email, ^^User::tenant_id>(
     expected, dialect, "users_email_tenant_idx", true);
 ```
 
+0.0.24 adds shared reflected defaults:
+
+```cpp
+[[=metal::mapping::default_text{"active"}]]
+std::string status;
+
+[[=metal::mapping::default_value{0}]]
+std::int64_t retries{};
+
+[[=metal::mapping::default_sql{"CURRENT_TIMESTAMP"}]]
+std::string created_at;
+
+[[=metal::mapping::default_null]]
+std::optional<std::string> note;
+```
+
+The same default metadata is rendered into `CREATE TABLE`, stored in `DatabaseColumn::default_value`, compared by schema diff and consumed by create DTO/OpenAPI requiredness. Text literals are SQL-escaped, numeric/bool defaults are typed, raw SQL is preserved, and `default_null` is restricted to nullable members. The E2E requires `expected -> create -> introspect -> diff` to converge with literal, falsy, raw and null defaults.
+
 `diff_schema` / `synchronize_schema` follow the TS safety contract:
 
 - missing table -> CREATE TABLE + expected indexes, safe;
@@ -161,9 +180,7 @@ metal::add_expected_index<User, ^^User::email, ^^User::tenant_id>(
 - SQLite DROP COLUMN -> warning + no rebuild SQL;
 - `dry_run=true` never executes the plan.
 
-ORM relation metadata is deliberately not treated as a physical FK constraint declaration. The TypeScript model also keeps relation metadata separate from column `references`. Introspection reports real FK constraints, while reflected FK/check/default declaration remains a later DDL-metadata extension rather than hidden inference.
-
-The 0.0.18 E2E requires the complete cycle `expected -> synchronize -> introspect -> diff` to converge to an empty plan with no warnings.
+ORM relation metadata is deliberately not treated as a physical FK constraint declaration. The TypeScript model also keeps relation metadata separate from column `references`. Introspection reports real FK constraints; reflected FK/check declaration remains a later DDL-metadata extension rather than hidden inference.
 
 ## Bulk parity — 0.0.19
 
@@ -234,7 +251,7 @@ Three hardenings preserve the documented Tree contract instead of copying source
 
 The Tree/MPTT row is now ✅ for the supported SQLite execution model.
 
-## DTO / REST / OpenAPI parity — 0.0.23
+## DTO / REST / OpenAPI parity — 0.0.24
 
 The TypeScript DTO subsystem includes response/create/update DTOs, transforms, scalar and relation-aware REST filters, safe sorting/paging helpers and OpenAPI generators. The C++ binding derives these surfaces directly from C++26 reflection instead of maintaining a second metadata model.
 
@@ -266,9 +283,11 @@ The 0.0.22 scalar baseline includes:
 - component maps, deep schema cloning, stable canonical hashing, deterministic component naming, reusable-schema extraction and `$ref` replacement are framework-independent C++ utilities;
 - real SQLite coverage exercises 1:N, N:N, recursive relation filtering, non-vacuous `every`, relation allowlists and relation-aware paged execution.
 
+0.0.24 closes the final create-contract gap. Reflected database defaults now make non-null columns optional in create DTO/OpenAPI when SQLite can supply the value. `DtoField::has_default` exposes that fact without duplicating SQL metadata. Literal `0` and `false` are handled by annotation presence rather than JavaScript-style truthiness; raw SQL defaults also make create fields optional while remaining opaque expressions.
+
 `morphTo` filtering remains explicitly unsupported because its target table depends on a runtime discriminator; this is already the relation-query limitation and is not papered over by the DTO layer. The TypeScript OpenAPI source has a single-relation schema path that does not fully mirror its runtime `RelationFilter` operator shape; the C++ generator deliberately follows the runtime/type contract uniformly instead of reproducing that inconsistency.
 
-DTO/OpenAPI remains 🟡 for one shared metadata reason: TypeScript create-schema requiredness understands database defaults, while the C++ mapping/DDL model still has no reflected default declaration. C++ therefore uses `std::optional<T>` as the create-time omission signal until default metadata is added once at the mapping/schema layer and reused by both DDL and DTO/OpenAPI.
+DTO/OpenAPI is now ✅ for the supported SQLite execution model.
 
 ## Schema/tooling/ecosystem
 
@@ -276,23 +295,24 @@ DTO/OpenAPI remains 🟡 for one shared metadata reason: TypeScript create-schem
 | --- | --- |
 | SQLite DDL generation | ✅ foundational |
 | composite PK DDL | ✅ |
+| reflected column defaults | ✅ |
 | SQLite schema introspection | ✅ |
 | schema diff / plan execution | ✅/🟡 |
 | schema synchronize / dry-run / destructive policy | ✅ |
-| physical FK/check/default declaration metadata | ❌ |
+| physical FK/check declaration metadata | ❌ |
 | migration history/versioned migration runner | not present as a distinct TS subsystem |
 | bulk operations | ✅ |
-| DTO/OpenAPI | 🟡 |
+| DTO/OpenAPI | ✅ |
 | Tree/MPTT | ✅ |
 | cache layer | ❌ |
 | procedure calls | ❌ |
 | pooling | ❌ |
 | DB-to-entity code generation | ❌ |
 
-The 🟡 on schema diff reflects the expected-metadata surface, not the diff engine: reflected tables currently expose scalar type/nullability/generated state and explicitly-added indexes, but do not yet have C++ annotations for physical FK/default/check constraints.
+The 🟡 on schema diff reflects the remaining expected-metadata surface, not the diff engine: reflected defaults are now first-class, while physical FK/check declarations still do not have C++ annotations.
 
 ## Ordered parity roadmap
 
-0.0.23 closes relation-aware REST filtering, nested relation/component OpenAPI and reusable component utilities. The next pass should add shared reflected database-default metadata at the mapping/DDL layer and feed it into expected schema/DDL plus create-DTO/OpenAPI requiredness. That can close the remaining DTO/OpenAPI edge without an API-only metadata system. After that, continue through cache, procedure calls, pooling and DB-to-entity generation without compatibility-era abstractions.
+0.0.24 closes DTO/OpenAPI parity and shared reflected defaults for the supported SQLite model. The next parity pass moves to the cache layer, followed by procedure calls, pooling and DB-to-entity generation. Physical FK/check declaration metadata remains a separate schema-layer gap and should continue to use the same reflection-native, no-compatibility approach.
 
 A later performance pass may replace in-memory root pagination deduplication with a root-aware SQL page plan, provided it preserves the tested 0.0.13 semantics.
