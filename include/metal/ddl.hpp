@@ -1,5 +1,6 @@
 #pragma once
 
+#include "metal/column_defaults.hpp"
 #include "metal/reference_traits.hpp"
 #include "metal/query.hpp"
 
@@ -21,6 +22,7 @@ std::string sqlite_type_name() {
 template <reflect::Mapped T>
 std::string create_table_sql(const Dialect& dialect) {
     static_assert(reflect::validate_mapping<T>());
+    static_assert(reflect::validate_column_defaults<T>());
 
     std::string sql = "CREATE TABLE IF NOT EXISTS " + dialect.quote_identifier(reflect::table_name<T>()) + " (";
     bool first = true;
@@ -50,6 +52,9 @@ std::string create_table_sql(const Dialect& dialect) {
             if constexpr (!reflect::has<mapping::primary_key_t>(Member) || pk_count > 1) {
                 sql += " NOT NULL";
             }
+        }
+        if constexpr (reflect::has_column_default<Member>()) {
+            sql += " DEFAULT " + reflect::column_default_sql<Member>();
         }
     });
 
