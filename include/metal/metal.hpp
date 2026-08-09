@@ -2,6 +2,7 @@
 
 #include "metal/bulk.hpp"
 #include "metal/collection.hpp"
+#include "metal/column_defaults.hpp"
 #include "metal/ddl.hpp"
 #include "metal/dml.hpp"
 #include "metal/domain_events.hpp"
@@ -15,6 +16,7 @@
 #include "metal/identity_map.hpp"
 #include "metal/lifecycle.hpp"
 #include "metal/mapping.hpp"
+#include "metal/mapping_defaults.hpp"
 #include "metal/openapi.hpp"
 #include "metal/openapi_relations.hpp"
 #include "metal/openapi_components.hpp"
