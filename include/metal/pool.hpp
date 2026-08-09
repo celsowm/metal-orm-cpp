@@ -121,8 +121,8 @@ public:
 
     Pool(const Pool&) = delete;
     Pool& operator=(const Pool&) = delete;
-    Pool(Pool&&) noexcept = default;
-    Pool& operator=(Pool&&) noexcept = default;
+    Pool(Pool&&) = delete;
+    Pool& operator=(Pool&&) = delete;
 
     /** Acquire a resource lease, blocking up to acquire_timeout when configured. */
     Lease acquire() {
@@ -207,29 +207,29 @@ public:
                     if (!resource) {
                         throw std::runtime_error("MetalORM: pool adapter.create returned null");
                     }
-
-                    bool destroyed = false;
-                    {
-                        std::lock_guard lock(state->mutex);
-                        if (state->creating != 0) --state->creating;
-                        destroyed = state->destroyed;
-                        if (!destroyed) ++state->leased;
-                    }
-                    state->cv.notify_all();
-
-                    if (destroyed) {
-                        state->destroy_one(std::move(resource));
-                        throw std::runtime_error("MetalORM: pool is destroyed");
-                    }
-                    return Lease{state, std::move(resource)};
                 } catch (...) {
                     {
                         std::lock_guard lock(state->mutex);
-                        if (state->creating != 0) --state->creating;
+                        --state->creating;
                     }
                     state->cv.notify_all();
                     throw;
                 }
+
+                bool destroyed = false;
+                {
+                    std::lock_guard lock(state->mutex);
+                    --state->creating;
+                    destroyed = state->destroyed;
+                    if (!destroyed) ++state->leased;
+                }
+                state->cv.notify_all();
+
+                if (destroyed) {
+                    state->destroy_one(std::move(resource));
+                    throw std::runtime_error("MetalORM: pool is destroyed");
+                }
+                return Lease{state, std::move(resource)};
             }
         }
     }
@@ -350,12 +350,12 @@ private:
                 if (!resource) throw std::runtime_error("MetalORM: pool adapter.create returned null");
                 {
                     std::lock_guard lock(state->mutex);
-                    if (state->creating != 0) --state->creating;
+                    --state->creating;
                     state->idle.push_back({std::move(resource), std::chrono::steady_clock::now()});
                 }
             } catch (...) {
                 std::lock_guard lock(state->mutex);
-                if (state->creating != 0) --state->creating;
+                --state->creating;
                 return;
             }
         }
