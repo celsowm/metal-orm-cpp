@@ -20,6 +20,7 @@
 #include "metal/dto_sort.hpp"
 #include "metal/dto_execute.hpp"
 #include "metal/dto_relation_execute.hpp"
+#include "metal/entity_generator.hpp"
 #include "metal/execution.hpp"
 #include "metal/pool.hpp"
 #include "metal/pooling.hpp"
