@@ -33,6 +33,9 @@ concept CanProjectForeignFunction = requires(Q query) {
 
 static_assert(!CanProjectForeignFunction<metal::SelectQuery<ComputedPerson>>);
 
+using ScoreMinusOne = decltype(metal::field<^^ComputedPerson::score> - 1);
+static_assert(std::same_as<typename ScoreMinusOne::result_type, std::int64_t>);
+
 int main() {
     auto db = std::make_shared<metal::SQLiteExecutor>(":memory:");
     metal::SQLiteDialect dialect;
@@ -128,6 +131,34 @@ int main() {
     assert(metal::from_value<std::int64_t>(row.at("at_least_ten")) == 10);
     assert(metal::from_value<std::int64_t>(row.at("year")) == 2026);
     assert(metal::from_value<std::string>(row.at("theme")) == "dark");
+
+    auto arithmetic_query = metal::select<ComputedPerson>()
+        .clear_projection()
+        .project(metal::field<^^ComputedPerson::id>)
+        .project((metal::field<^^ComputedPerson::score> + 5).as("plus_five"))
+        .project((metal::field<^^ComputedPerson::score> - 2).as("minus_two"))
+        .project((metal::field<^^ComputedPerson::score> * 2).as("times_two"))
+        .project((metal::field<^^ComputedPerson::score> / 5).as("divided_by_five"))
+        .project((metal::field<^^ComputedPerson::score> % 7).as("mod_seven"))
+        .where((metal::field<^^ComputedPerson::score> - 10) == 5);
+
+    const auto arithmetic_sql = arithmetic_query.compile(dialect);
+    assert(arithmetic_sql.sql.find(" + ") != std::string::npos);
+    assert(arithmetic_sql.sql.find(" - ") != std::string::npos);
+    assert(arithmetic_sql.sql.find(" * ") != std::string::npos);
+    assert(arithmetic_sql.sql.find(" / ") != std::string::npos);
+    assert(arithmetic_sql.sql.find(" % ") != std::string::npos);
+    assert(arithmetic_sql.params.size() == 6);
+
+    const auto arithmetic_rows = db->execute(arithmetic_sql.sql, arithmetic_sql.params);
+    assert(arithmetic_rows.rows.size() == 1);
+    const auto& arithmetic_row = arithmetic_rows.rows[0];
+    assert(metal::from_value<std::int64_t>(arithmetic_row.at("id")) == 2);
+    assert(metal::from_value<std::int64_t>(arithmetic_row.at("plus_five")) == 20);
+    assert(metal::from_value<std::int64_t>(arithmetic_row.at("minus_two")) == 13);
+    assert(metal::from_value<std::int64_t>(arithmetic_row.at("times_two")) == 30);
+    assert(metal::from_value<std::int64_t>(arithmetic_row.at("divided_by_five")) == 3);
+    assert(metal::from_value<std::int64_t>(arithmetic_row.at("mod_seven")) == 1);
 
     auto control = metal::select<ComputedPerson>()
         .clear_projection()
