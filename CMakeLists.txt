@@ -223,4 +223,8 @@ if(METAL_ORM_BUILD_TESTS)
     add_executable(metal-orm-column-default-parity-tests tests/test_column_defaults_parity.cpp)
     target_link_libraries(metal-orm-column-default-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-column-default-parity-tests COMMAND metal-orm-column-default-parity-tests)
+
+    add_executable(metal-orm-cache-parity-tests tests/test_cache_parity.cpp)
+    target_link_libraries(metal-orm-cache-parity-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-cache-parity-tests COMMAND metal-orm-cache-parity-tests)
 endif()
