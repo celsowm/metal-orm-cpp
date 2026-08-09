@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.23`
+**Version:** `0.0.24`
 
 MetalORM C++ deliberately has no C++20/23 compatibility layer. The TypeScript [`metal-orm`](https://github.com/celsowm/metal-orm) repository is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
 
@@ -111,9 +111,9 @@ auto user = metal::save_graph(session, payload);
 
 `save_graph`, `update_graph`, `patch_graph`, pruning and typed N:N pivot patches reuse the same transactional Session/UoW infrastructure.
 
-## DTO / REST / OpenAPI — 0.0.23
+## DTO / REST / OpenAPI — 0.0.24
 
-DTO metadata is derived from the entity itself. Public API field names remain C++ member identifiers even when a member maps to a different physical SQL column:
+DTO metadata is derived from the entity itself. Public API field names remain C++ member identifiers even when a member maps to a different physical SQL column. Database defaults are now reflection-native too:
 
 ```cpp
 struct [[=metal::mapping::table{"users"}]] User {
@@ -123,15 +123,23 @@ struct [[=metal::mapping::table{"users"}]] User {
     [[=metal::mapping::column{"display_name"}]]
     std::string displayName;
 
+    [[=metal::mapping::default_text{"active"}]]
+    std::string status;
+
+    [[=metal::mapping::default_value{false}]]
+    bool disabled{};
+
+    [[=metal::mapping::default_sql{"CURRENT_TIMESTAMP"}]]
+    std::string createdAt;
+
+    [[=metal::mapping::default_null]]
     std::optional<std::string> bio;
 };
-
-auto response = metal::describe_response_dto<User>();
-auto create = metal::describe_create_dto<User>();
-auto update = metal::describe_update_dto<User>();
 ```
 
-`displayName` is the DTO/OpenAPI key while `display_name` remains the SQL column. Generated members are excluded from create/update DTOs, update fields are optional, and `std::optional<T>` drives nullability. C++ currently has no reflected database-default annotation, so create-time requiredness cannot yet reproduce the TypeScript default-value rule without duplicating metadata; that remains the explicit DTO/OpenAPI parity edge.
+`default_value{...}` handles numeric/bool literals, `default_text{...}` handles quoted text, `default_sql{...}` preserves raw SQL expressions and `default_null` represents an explicit nullable default. The same reflected declaration drives SQLite DDL, expected-schema metadata/diffing and create-DTO/OpenAPI requiredness. Defaults such as `0` and `false` are recognized by metadata presence rather than truthiness.
+
+`displayName` is the DTO/OpenAPI key while `display_name` remains the SQL column. Generated members are excluded from create/update DTOs, update fields are optional, `std::optional<T>` drives nullability, and a non-null create field with a database default is correctly optional in the create contract.
 
 Scalar REST filtering is allowlisted with reflected members rather than free-form SQL names:
 
@@ -155,7 +163,7 @@ auto query = metal::apply_filter<
 
 The filter compiler resolves the public API key back to the reflected member and reuses the shared SELECT AST. It supports equality, `IN`/`NOT IN`, numeric ordering operators, string contains/starts/ends predicates, null checks and case-insensitive matching through `LOWER()`. Unknown fields, disallowed fields, invalid operator/type combinations and incompatible values fail before SQL execution.
 
-0.0.23 adds recursive relation-aware `WhereInput` on top of the existing relation-query compiler:
+0.0.23 added recursive relation-aware `WhereInput` on top of the existing relation-query compiler:
 
 ```cpp
 metal::WhereInput postFilter = metal::where_input(metal::FilterInput{{
@@ -182,7 +190,7 @@ Safe runtime sorting uses the same reflection model and appends the reflected pr
 
 OpenAPI schemas are framework-independent C++ objects derived from the same reflection metadata. Response/create/update DTO schemas, recursive relation filter schemas, nested DTOs, update-with-single-relations schemas, pagination, OpenAPI 3.0/3.1 nullability, route documents, Tree/MPTT components and relation component maps are available. Component helpers add deep cloning, stable canonical hashing, deterministic names, reusable-schema extraction and `$ref` replacement without introducing a JSON or web-framework dependency.
 
-DTO/OpenAPI remains **🟡 only because create DTO requiredness still cannot see database defaults**. That will be solved in shared mapping/DDL metadata rather than by introducing an API-only default declaration.
+DTO/OpenAPI is now **✅ parity for the supported SQLite execution model**. `morphTo` filtering remains the same discriminator-dependent relation-query limitation rather than a DTO-specific gap.
 
 ## Tree / MPTT — 0.0.21
 
@@ -327,7 +335,7 @@ The diff/synchronizer follows the current TypeScript safety policy:
 - SQLite DROP COLUMN emits a rebuild warning and no automatic rebuild;
 - `dry_run=true` executes nothing.
 
-ORM relation metadata is not silently converted into physical FK constraints; the TypeScript reference also keeps relation definitions separate from schema `references` metadata.
+Reflected defaults now feed the expected schema and diff engine directly. ORM relation metadata is still not silently converted into physical FK constraints; the TypeScript reference also keeps relation definitions separate from schema `references` metadata.
 
 ## Transactions
 
@@ -358,6 +366,6 @@ MetalORM intentionally refuses older compilers instead of shipping a compatibili
 
 ## Current roadmap
 
-0.0.23 closes relation-aware REST filtering, nested relation/component OpenAPI and reusable component utilities. The remaining DTO/OpenAPI edge is default-aware create requiredness, which should be solved in shared mapping/DDL metadata. After that, continue through cache, procedure calls, pooling and DB-to-entity generation gaps.
+0.0.24 closes DTO/OpenAPI parity for the supported SQLite execution model by adding shared reflected database defaults. The next parity pass moves to the remaining runtime/tooling gaps: cache, procedure calls, pooling and DB-to-entity generation; physical FK/check declaration metadata remains a separate schema-layer gap.
 
 See [`CHANGELOG.md`](CHANGELOG.md) and [`docs/PARITY.md`](docs/PARITY.md) for release-by-release details and remaining gaps.
