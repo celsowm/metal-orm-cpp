@@ -14,6 +14,7 @@ namespace metal {
 template <reflect::Entity T>
 ExpectedTable expected_table(const Dialect& dialect) {
     static_assert(reflect::validate_mapping<T>());
+    static_assert(reflect::validate_column_defaults<T>());
 
     ExpectedTable expected;
     expected.table.name = reflect::table_name<T>();
@@ -25,6 +26,9 @@ ExpectedTable expected_table(const Dialect& dialect) {
         column.name = reflect::column_name<Member>();
         column.type = sqlite_type_name<M>();
         column.not_null = !is_optional_v<M>;
+        if constexpr (reflect::has_column_default<Member>()) {
+            column.default_value = reflect::column_default_sql<Member>();
+        }
         column.auto_increment = reflect::has<mapping::generated_t>(Member);
         expected.table.columns.push_back(std::move(column));
         if constexpr (reflect::has<mapping::primary_key_t>(Member)) {
