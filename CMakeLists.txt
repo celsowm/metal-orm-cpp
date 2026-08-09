@@ -115,6 +115,11 @@ if(METAL_ORM_BUILD_TESTS)
         tests/compile_fail/wrong_tree_parent.cpp
         "tree parent column must be std::optional<T> so root nodes can be NULL"
     )
+    metal_expect_compile_failure(
+        wrong-dto-member
+        tests/compile_fail/wrong_dto_member.cpp
+        "DTO members must belong to the declared entity"
+    )
 
     enable_testing()
 
@@ -189,4 +194,8 @@ if(METAL_ORM_BUILD_TESTS)
     add_executable(metal-orm-tree-remove-parity-tests tests/test_tree_remove_parity.cpp)
     target_link_libraries(metal-orm-tree-remove-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-tree-remove-parity-tests COMMAND metal-orm-tree-remove-parity-tests)
+
+    add_executable(metal-orm-dto-openapi-parity-tests tests/test_dto_openapi_parity.cpp)
+    target_link_libraries(metal-orm-dto-openapi-parity-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-dto-openapi-parity-tests COMMAND metal-orm-dto-openapi-parity-tests)
 endif()
