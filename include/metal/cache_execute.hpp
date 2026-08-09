@@ -3,8 +3,11 @@
 #include "metal/query_cache_manager.hpp"
 #include "metal/runtime_pagination.hpp"
 
+#include <concepts>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
