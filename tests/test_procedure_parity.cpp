@@ -123,6 +123,18 @@ int main() {
     assert(metal::from_value<std::string>(result.out.at("state")) == "done");
     assert(executor->last_call.sql == compiled.sql);
 
+    metal::CompiledProcedureCall first_out;
+    first_out.out_params.source = metal::ProcedureOutSource::FirstResultSet;
+    first_out.out_params.names = {"answer"};
+    metal::QueryResult first_set;
+    first_set.rows.push_back(metal::Row{{"ANSWER", metal::Value{std::int64_t{1}}}});
+    metal::QueryResult last_set;
+    last_set.rows.push_back(metal::Row{{"answer", metal::Value{std::int64_t{2}}}});
+    const auto first_values = metal::procedure_detail::extract_out_values(
+        first_out,
+        std::vector<metal::QueryResult>{first_set, last_set});
+    assert(metal::from_value<std::int64_t>(first_values.at("answer")) == 1);
+
     metal::SQLiteDialect sqlite;
     bool sqlite_rejected = false;
     try {
