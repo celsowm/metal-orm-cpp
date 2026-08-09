@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(metal-orm VERSION 0.0.27 LANGUAGES CXX)
+project(metal-orm VERSION 0.0.28 LANGUAGES CXX)
 
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    message(FATAL_ERROR "MetalORM 0.0.27 is intentionally C++26-native and currently requires GCC 16+ reflection support")
+    message(FATAL_ERROR "MetalORM 0.0.28 is intentionally C++26-native and currently requires GCC 16+ reflection support")
 endif()
 
 if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
-    message(FATAL_ERROR "MetalORM 0.0.27 requires GCC 16 or newer")
+    message(FATAL_ERROR "MetalORM 0.0.28 requires GCC 16 or newer")
 endif()
 
 find_package(SQLite3 REQUIRED)
@@ -15,6 +15,7 @@ find_package(Threads REQUIRED)
 add_library(metal-orm STATIC
     src/sqlite_executor.cpp
     src/pooled_executor.cpp
+    src/entity_generator.cpp
 )
 add_library(metal::orm ALIAS metal-orm)
 
@@ -26,11 +27,17 @@ target_link_libraries(metal-orm PUBLIC SQLite::SQLite3 Threads::Threads)
 target_compile_options(metal-orm PUBLIC -std=c++26 -freflection)
 
 option(METAL_ORM_BUILD_EXAMPLES "Build MetalORM examples" ON)
+option(METAL_ORM_BUILD_TOOLS "Build MetalORM command-line tools" ON)
 option(METAL_ORM_BUILD_TESTS "Build MetalORM tests" ON)
 
 if(METAL_ORM_BUILD_EXAMPLES)
     add_executable(metal-orm-quickstart examples/quickstart.cpp)
     target_link_libraries(metal-orm-quickstart PRIVATE metal::orm)
+endif()
+
+if(METAL_ORM_BUILD_TOOLS)
+    add_executable(metal-orm-gen tools/metal_orm_gen.cpp)
+    target_link_libraries(metal-orm-gen PRIVATE metal::orm)
 endif()
 
 if(METAL_ORM_BUILD_TESTS)
@@ -236,4 +243,8 @@ if(METAL_ORM_BUILD_TESTS)
     add_executable(metal-orm-pooling-parity-tests tests/test_pooling_parity.cpp)
     target_link_libraries(metal-orm-pooling-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-pooling-parity-tests COMMAND metal-orm-pooling-parity-tests)
+
+    add_executable(metal-orm-entity-generator-tests tests/test_entity_generator.cpp)
+    target_link_libraries(metal-orm-entity-generator-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-entity-generator-tests COMMAND metal-orm-entity-generator-tests)
 endif()
