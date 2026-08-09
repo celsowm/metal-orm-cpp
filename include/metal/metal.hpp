@@ -21,6 +21,8 @@
 #include "metal/dto_execute.hpp"
 #include "metal/dto_relation_execute.hpp"
 #include "metal/execution.hpp"
+#include "metal/pool.hpp"
+#include "metal/pooling.hpp"
 #include "metal/identity_map.hpp"
 #include "metal/lifecycle.hpp"
 #include "metal/mapping.hpp"
