@@ -388,6 +388,13 @@ public:
         return ordered({}, true);
     }
 
+    SelectQuery<T> find_leaves() const {
+        constexpr auto Left = reflect::tree_left_member<T>();
+        constexpr auto Right = reflect::tree_right_member<T>();
+        const auto leaf = subtract(field<Right>, field<Left>) == std::int64_t{1};
+        return ordered(leaf.node(), true);
+    }
+
     SelectQuery<T> find_at_depth(std::int64_t depth) const {
         constexpr auto Depth = reflect::tree_depth_member<T>();
         if constexpr (Depth == std::meta::info{}) {
@@ -546,20 +553,7 @@ public:
     }
 
     std::vector<TreeNodeResult> get_leaves() const {
-        std::string sql = "SELECT ";
-        bool first = true;
-        reflect::for_each_column<T>([&]<std::meta::info Member>() {
-            if (!first) sql += ", ";
-            first = false;
-            sql += session_->dialect().quote_identifier(reflect::column_name<Member>());
-        });
-        sql += " FROM " + session_->dialect().quote_identifier(reflect::table_name<T>());
-        sql += " WHERE (" + session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " - " +
-               session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + ") = 1";
-        std::vector<Value> params;
-        append_scope(sql, params, true);
-        sql += " ORDER BY " + session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " ASC;";
-        return results(session_->executor().execute(sql, params).rows);
+        return results(execute(query_.find_leaves()));
     }
 
     std::int64_t child_count(NestedSetBounds bounds) const {
@@ -832,7 +826,7 @@ private:
 
         // Isolate the subtree below zero before opening/closing gaps. A positive
         // temporary range would itself be shifted by shift_for_insert(), which
-        // corrupts the restore delta (the current TS implementation has this edge).
+        // corrupts the restore delta.
         const auto isolate_delta = -temp - node.rght;
         const auto isolated_lft = node.lft + isolate_delta;
         const auto isolated_rght = node.rght + isolate_delta;
