@@ -109,6 +109,7 @@ Raw `std::shared_ptr<T>` annotated as either relation is rejected at compile tim
 | INSERT ... SELECT | ✅ | typed SELECT source |
 | RETURNING | ✅ | INSERT/UPDATE/DELETE |
 | SQLite UPSERT | ✅ | conflict target, DO NOTHING/UPDATE, `excluded()` |
+| DML typed predicate reuse | ✅ | UPDATE/DELETE can reuse `Expression<T>` plus chunked IN predicates |
 
 ## Relation-query parity — 0.0.13
 
@@ -163,6 +164,32 @@ ORM relation metadata is deliberately not treated as a physical FK constraint de
 
 The 0.0.18 E2E requires the complete cycle `expected -> synchronize -> introspect -> diff` to converge to an empty plan with no warnings.
 
+## Bulk parity — 0.0.19
+
+The C++ binding mirrors the concrete TypeScript bulk subsystem rather than replacing it with a different batching model:
+
+| TypeScript operation/behavior | C++ binding | Strategy |
+| --- | --- | --- |
+| `bulkInsert` | `bulk_insert<T>` | multi-row INSERT per chunk |
+| `bulkUpdate` | `bulk_update<T>` | individual identity-aware UPDATE per row |
+| `bulkUpdateWhere` | `bulk_update_where<T>` | UPDATE with `IN (...)` per ID chunk |
+| `bulkDelete` | `bulk_delete<T>` | DELETE with `IN (...)` per ID chunk |
+| `bulkDeleteWhere` | `bulk_delete_where<T>` | one typed predicate DELETE |
+| `bulkUpsert` | `bulk_upsert<T>` | multi-row INSERT/ON CONFLICT per chunk |
+| default chunk size 500 | `BulkBaseOptions::chunk_size = 500` | ✅ |
+| sequential by default | `concurrency = 1` | ✅ |
+| bounded numeric concurrency | worker pool | ✅ |
+| transactional by default | existing `Session::transaction()` | ✅ |
+| non-transactional partial progress | direct chunk execution | ✅ |
+| timing / per-chunk callback | timings + `ChunkCompleteInfo` | ✅ |
+| RETURNING on insert/update/upsert | reflected selections | ✅ |
+
+Rows are constructed through `bulk_row<T>().set<^^T::member>(value)`. `by`, conflict, update and RETURNING selections use reflected members through `bulk_columns<^^T::member...>()`; this is an intentional C++26 binding improvement over the string-column portions of the TypeScript surface.
+
+`bulk_update` deliberately remains one UPDATE per row because that is the reference implementation's current strategy. `bulk_delete` and `bulk_update_where` deliberately use `IN (...)` chunks, and `bulk_upsert` deliberately infers default update columns from the first row excluding conflict columns. These are parity choices, not accidental implementation limitations.
+
+The shared DML AST gained reusable typed `Expression<T>` predicates and explicit IN predicates for UPDATE/DELETE, so bulk execution does not create a second SQL compiler. SQLite connection access is serialized inside `SQLiteExecutor`; bounded workers therefore preserve the TypeScript concurrency control contract without data-racing one SQLite handle.
+
 ## Schema/tooling/ecosystem
 
 | MetalORM capability | C++ status |
@@ -174,7 +201,7 @@ The 0.0.18 E2E requires the complete cycle `expected -> synchronize -> introspec
 | schema synchronize / dry-run / destructive policy | ✅ |
 | physical FK/check/default declaration metadata | ❌ |
 | migration history/versioned migration runner | not present as a distinct TS subsystem |
-| bulk operations | ❌ |
+| bulk operations | ✅ |
 | DTO/OpenAPI | ❌ |
 | Tree/MPTT | ❌ |
 | cache layer | ❌ |
@@ -186,9 +213,6 @@ The 🟡 on schema diff reflects the expected-metadata surface, not the diff eng
 
 ## Ordered parity roadmap
 
-A fresh audit of the current TypeScript repository shows a concrete bulk subsystem (`bulk insert/update/delete/upsert`, chunking, transaction controls, returning and dialect strategy metadata). Therefore the next focused release is:
-
-1. **0.0.19:** bulk insert/update/delete/upsert for SQLite, reusing the existing DML AST and Session transaction semantics; reflected `by`/returning columns instead of string column APIs where C++ can make them static.
-2. Then re-audit DTO/OpenAPI, cache, Tree/MPTT, pooling and DB-to-entity generation against the current TS tree.
+0.0.19 closes the concrete bulk subsystem found in the latest source-level audit. Before naming 0.0.20, re-audit the current TypeScript implementations of DTO/OpenAPI, Tree/MPTT, cache, procedure calls, pooling and DB-to-entity generation and choose the next self-contained subsystem based on the code that actually exists now.
 
 A later performance pass may replace in-memory root pagination deduplication with a root-aware SQL page plan, provided it preserves the tested 0.0.13 semantics.
