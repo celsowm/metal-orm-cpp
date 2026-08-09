@@ -35,6 +35,7 @@
 #include "metal/orm.hpp"
 #include "metal/graph_persistence.hpp"
 #include "metal/query.hpp"
+#include "metal/procedure.hpp"
 #include "metal/relation_change_processor.hpp"
 #include "metal/runtime_pagination.hpp"
 #include "metal/runtime_types.hpp"
