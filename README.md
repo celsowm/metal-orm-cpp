@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.25`
+**Version:** `0.0.26`
 
 MetalORM C++ deliberately has no C++20/23 compatibility layer. The TypeScript [`metal-orm`](https://github.com/celsowm/metal-orm) repository is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
 
@@ -225,6 +225,25 @@ C++ caches typed `QueryResult` rows rather than forcing a generic JSON serialize
 
 The **cache core is complete for the supported SQLite model**. Overall cache parity remains 🟡 only at the adapter/ecosystem boundary: the TypeScript package bundles Keyv and ioredis adapters, while the C++ library currently exposes the provider extension point and the in-memory provider without choosing a mandatory Redis client dependency.
 
+## Procedure calls — 0.0.26
+
+Procedure calls have a dedicated AST and execution capability surface:
+
+```cpp
+auto procedure = metal::call_procedure("refresh_user", std::string{"admin"})
+    .in("user_id", std::int64_t{7})
+    .out("total", std::string{"INTEGER"})
+    .in_out("state", std::string{"pending"}, std::string{"TEXT"});
+```
+
+`ProcedureCall`, `ProcedureRef` and ordered `ProcedureParam` nodes preserve `IN`, `OUT` and `INOUT` directions, optional schema and optional database type metadata. `CompiledProcedureCall` carries the SQL/params plus the ordered OUT names and whether those values come from the first or last result set, matching the reference distinction between PostgreSQL and MySQL/MSSQL.
+
+C++ keeps procedure support behind segregated `ProcedureCompiler` and `ProcedureExecutor` capabilities rather than bloating every `Dialect` and `DbExecutor` implementation. `ProcedureExecutionResult` returns all result sets plus a case-insensitive name-to-`Value` OUT map. Missing result sets, empty OUT sets and absent OUT columns fail explicitly.
+
+SQLite intentionally does **not** implement those capabilities. The TypeScript `SqliteDialect` also throws for stored procedures, so C++ rejects the call at the same database-capability boundary rather than emitting fake `CALL` SQL. The parity suite uses a synthetic procedure-capable dialect/executor to prove compilation, multi-result execution and both first/last OUT extraction without pretending SQLite has stored procedures.
+
+Procedure calls are **✅ parity for the supported SQLite execution model**: the complete public/vendor-independent contract exists, and SQLite's correct behavior is explicit unsupported rejection.
+
 ## Tree / MPTT — 0.0.21
 
 Tree metadata is reflection-native rather than string-configured:
@@ -399,6 +418,6 @@ MetalORM intentionally refuses older compilers instead of shipping a compatibili
 
 ## Current roadmap
 
-0.0.25 closes the query-cache core for the supported SQLite execution model. The next parity pass moves to procedure calls, followed by pooling and DB-to-entity generation. A first-party remote-cache adapter remains an ecosystem decision rather than a reason to couple the core to a specific C++ Redis client; physical FK/check declaration metadata remains a separate schema-layer gap.
+0.0.26 closes procedure-call parity for the supported SQLite execution model by matching the reference's explicit SQLite rejection while providing the vendor-independent AST and capability execution contract. The next parity pass moves to pooling, followed by DB-to-entity generation. A first-party remote-cache adapter remains an ecosystem decision rather than a reason to couple the core to a specific C++ Redis client; physical FK/check declaration metadata remains a separate schema-layer gap.
 
 See [`CHANGELOG.md`](CHANGELOG.md) and [`docs/PARITY.md`](docs/PARITY.md) for release-by-release details and remaining gaps.
