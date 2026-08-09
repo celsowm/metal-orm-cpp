@@ -3,7 +3,6 @@
 #include "metal/execution.hpp"
 #include "metal/schema_types.hpp"
 
-#include <cstdlib>
 #include <string>
 #include <vector>
 
