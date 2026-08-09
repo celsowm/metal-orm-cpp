@@ -24,6 +24,7 @@ enum class DtoMode {
 
 struct DtoField {
     std::string name;
+    std::string column_name;
     bool required{false};
     bool nullable{false};
     bool generated{false};
@@ -37,6 +38,11 @@ struct DtoDescriptor {
 };
 
 namespace detail {
+
+template <std::meta::info Member>
+std::string dto_member_name() {
+    return std::string(std::meta::identifier_of(Member));
+}
 
 template <std::meta::info Member, std::meta::info... Excluded>
 consteval bool dto_member_excluded() {
@@ -83,6 +89,7 @@ DtoDescriptor describe_dto_impl() {
             }
 
             out.fields.push_back(DtoField{
+                dto_member_name<Member>(),
                 reflect::column_name<Member>(),
                 required,
                 nullable,
@@ -106,7 +113,7 @@ Row entity_to_dto_impl(const T& entity) {
             if constexpr ((Mode == DtoMode::create || Mode == DtoMode::update) && generated) {
                 return;
             }
-            out.emplace(reflect::column_name<Member>(), to_value(ptr->[:Member:]));
+            out.emplace(dto_member_name<Member>(), to_value(ptr->[:Member:]));
         }
     });
     return out;
@@ -152,7 +159,7 @@ Row pick_dto(const T& entity) {
 
     Row out;
     const auto* ptr = std::addressof(entity);
-    ((out.emplace(reflect::column_name<Members>(), to_value(ptr->[:Members:]))), ...);
+    ((out.emplace(detail::dto_member_name<Members>(), to_value(ptr->[:Members:]))), ...);
     return out;
 }
 
