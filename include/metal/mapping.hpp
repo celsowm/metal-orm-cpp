@@ -41,6 +41,16 @@ struct column {
     consteval column(const char (&value)[N]) : name(value) {}
 };
 
+/** Preserves an introspected database's declared SQL type for DDL/schema round-trips. */
+struct database_type {
+    fixed_text<96> name;
+
+    template <std::size_t N>
+    consteval database_type(const char (&value)[N]) : name(value) {
+        if (name.view().empty()) throw "MetalORM: database_type cannot be empty";
+    }
+};
+
 struct primary_key_t {};
 struct generated_t {};
 struct ignore_t {};
