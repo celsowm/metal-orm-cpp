@@ -2,6 +2,26 @@
 
 All releases currently target GCC 16+ C++26 static reflection and intentionally use SQLite as the only executor/dialect.
 
+## 0.0.22 - 2026-08-09
+
+Reflection-native DTO/REST/OpenAPI baseline.
+
+- Added response/create/update DTO descriptors derived from C++26 reflection instead of duplicated API metadata.
+- Kept public API member names distinct from physical SQL column names, including explicit coverage for a `displayName` member mapped to `display_name`.
+- Added reflected DTO transforms for response projection, generated-field exclusion, member picking, defaults, exclusion and field mapping.
+- Added enhanced `PagedResponse` metadata on top of the existing Session/root-aware pagination runtime.
+- Added reflection-allowlisted scalar REST filters with equality, IN/NOT IN, numeric ordering, string contains/starts/ends, null checks and case-insensitive string matching through the shared SELECT AST.
+- Added operator/type validation so boolean, numeric and string REST filter surfaces match the TypeScript contract instead of accepting arbitrary SQL comparisons.
+- Added reflection-allowlisted dynamic sorting with public-name resolution and reflected primary-key tie-breaking for deterministic pagination.
+- Added `execute_filtered_paged()` to compose REST filtering, safe sorting, `execute_paged()` and enhanced page metadata without a second executor.
+- Added framework-independent OpenAPI 3.0/3.1 schema models plus response/create/update DTO schema generation.
+- Added OpenAPI REST filter schemas driven by the same reflected allowlists used by runtime filtering.
+- Added pagination parameter/response schemas and route-document structures.
+- Added reflected Tree/MPTT OpenAPI schemas for node results, threaded nodes, flat tree-list entries and reusable components.
+- Added real SQLite coverage for filters, physical/public-name resolution, sorting and filtered paged execution, plus dedicated DTO/OpenAPI and Tree-schema suites.
+- Added compile-fail coverage rejecting DTO policies that reference a member from another entity.
+- Marked DTO/OpenAPI 🟡: relation-aware REST filters and nested relation/component OpenAPI remain, and create-time default-aware requiredness waits for shared reflected default metadata in the mapping/DDL layer.
+
 ## 0.0.21 - 2026-08-09
 
 Tree/MPTT parity closure and reusable scalar arithmetic.
