@@ -1,5 +1,6 @@
 #pragma once
 
+#include "metal/column_defaults.hpp"
 #include "metal/execution.hpp"
 #include "metal/reflection.hpp"
 #include "metal/runtime_pagination.hpp"
@@ -29,6 +30,7 @@ struct DtoField {
     bool nullable{false};
     bool generated{false};
     bool primary_key{false};
+    bool has_default{false};
 };
 
 struct DtoDescriptor {
@@ -65,12 +67,14 @@ consteval bool validate_dto_members() {
 template <DtoMode Mode, reflect::Entity T, std::meta::info... Excluded>
 DtoDescriptor describe_dto_impl() {
     static_assert(validate_dto_members<T, Excluded...>());
+    static_assert(reflect::validate_column_defaults<T>());
 
     DtoDescriptor out{reflect::table_name<T>(), Mode, {}};
     reflect::for_each_column<T>([&]<std::meta::info Member>() {
         if constexpr (!dto_member_excluded<Member, Excluded...>()) {
             constexpr bool generated = reflect::has<mapping::generated_t>(Member);
             constexpr bool primary = reflect::has<mapping::primary_key_t>(Member);
+            constexpr bool has_default = reflect::has_column_default<Member>();
             using M = reflect::member_type_t<Member>;
             constexpr bool nullable = is_optional_v<M>;
 
@@ -82,10 +86,7 @@ DtoDescriptor describe_dto_impl() {
             if constexpr (Mode == DtoMode::response) {
                 required = !nullable || primary;
             } else if constexpr (Mode == DtoMode::create) {
-                // C++ currently has no reflected column-default metadata. Until the
-                // DDL layer owns that metadata, optional<T> is the canonical signal
-                // that an API create field may be omitted.
-                required = !nullable;
+                required = !nullable && !has_default;
             }
 
             out.fields.push_back(DtoField{
@@ -94,7 +95,8 @@ DtoDescriptor describe_dto_impl() {
                 required,
                 nullable,
                 generated,
-                primary
+                primary,
+                has_default
             });
         }
     });
@@ -104,6 +106,7 @@ DtoDescriptor describe_dto_impl() {
 template <DtoMode Mode, reflect::Entity T, std::meta::info... Excluded>
 Row entity_to_dto_impl(const T& entity) {
     static_assert(validate_dto_members<T, Excluded...>());
+    static_assert(reflect::validate_column_defaults<T>());
 
     Row out;
     const auto* ptr = std::addressof(entity);
