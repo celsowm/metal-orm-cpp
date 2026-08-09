@@ -3,6 +3,7 @@
 #include <sqlite3.h>
 
 #include <cctype>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -11,6 +12,7 @@ namespace metal {
 
 struct SQLiteExecutor::Impl {
     sqlite3* db{};
+    std::mutex mutex;
 };
 
 static void bind_value(sqlite3_stmt* stmt, int index, const Value& value) {
@@ -70,6 +72,8 @@ SQLiteExecutor::SQLiteExecutor(SQLiteExecutor&& other) noexcept = default;
 SQLiteExecutor& SQLiteExecutor::operator=(SQLiteExecutor&& other) noexcept = default;
 
 QueryResult SQLiteExecutor::execute(const std::string& sql, const std::vector<Value>& params) {
+    std::lock_guard lock(impl_->mutex);
+
     sqlite3_stmt* raw_stmt{};
     const int prepare_rc = sqlite3_prepare_v2(impl_->db, sql.c_str(), -1, &raw_stmt, nullptr);
     if (prepare_rc != SQLITE_OK) {
