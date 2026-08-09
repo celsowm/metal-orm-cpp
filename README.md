@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.21`
+**Version:** `0.0.22`
 
 MetalORM C++ deliberately has no C++20/23 compatibility layer. The TypeScript [`metal-orm`](https://github.com/celsowm/metal-orm) repository is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
 
@@ -110,6 +110,54 @@ auto user = metal::save_graph(session, payload);
 ```
 
 `save_graph`, `update_graph`, `patch_graph`, pruning and typed N:N pivot patches reuse the same transactional Session/UoW infrastructure.
+
+## DTO / REST / OpenAPI — 0.0.22
+
+DTO metadata is derived from the entity itself. Public API field names remain C++ member identifiers even when a member maps to a different physical SQL column:
+
+```cpp
+struct [[=metal::mapping::table{"users"}]] User {
+    [[=metal::mapping::primary_key, =metal::mapping::generated]]
+    std::int64_t id{};
+
+    [[=metal::mapping::column{"display_name"}]]
+    std::string displayName;
+
+    std::optional<std::string> bio;
+};
+
+auto response = metal::describe_response_dto<User>();
+auto create = metal::describe_create_dto<User>();
+auto update = metal::describe_update_dto<User>();
+```
+
+`displayName` is the DTO/OpenAPI key while `display_name` remains the SQL column. Generated members are excluded from create/update DTOs, update fields are optional, and `std::optional<T>` drives nullability. C++ currently has no reflected database-default annotation, so create-time requiredness cannot yet reproduce the TypeScript default-value rule without duplicating metadata; that remains an explicit parity edge.
+
+The REST filtering path is allowlisted with reflected members rather than free-form SQL names:
+
+```cpp
+metal::FilterInput filters{{
+    metal::filter_clause(
+        "displayName",
+        metal::FilterOperator::contains,
+        metal::Value{std::string{"cel"}},
+        metal::StringFilterMode::insensitive),
+    metal::filter_clause(
+        "age",
+        metal::FilterOperator::gte,
+        metal::Value{std::int64_t{18}})
+}};
+
+auto query = metal::apply_filter<
+    ^^User::displayName,
+    ^^User::age>(metal::select<User>(), filters);
+```
+
+The filter compiler resolves the public API key back to the reflected member and reuses the shared SELECT AST. It supports equality, `IN`/`NOT IN`, numeric ordering operators, string contains/starts/ends predicates, null checks and case-insensitive matching through `LOWER()`. Unknown fields, disallowed fields, invalid operator/type combinations and incompatible values fail before SQL execution.
+
+Safe runtime sorting uses the same model and appends the reflected primary key as a deterministic tie-breaker. `execute_filtered_paged()` composes reflected filters, allowlisted sorting, the existing Session-level root pagination engine and the enhanced `PagedResponse` metadata.
+
+OpenAPI schemas are framework-independent C++ objects derived from the same reflection metadata. Response/create/update DTO schemas, REST filter schemas, pagination parameters/responses, OpenAPI 3.0 versus 3.1 nullability, route documents and Tree/MPTT result/threaded/list components are covered. Relation filters and nested relation DTO/component generation remain the next DTO/OpenAPI sub-pass, so this area is intentionally marked 🟡 rather than pretending full parity.
 
 ## Tree / MPTT — 0.0.21
 
@@ -285,6 +333,6 @@ MetalORM intentionally refuses older compilers instead of shipping a compatibili
 
 ## Current roadmap
 
-Tree/MPTT is closed in 0.0.21 for the supported SQLite execution model. The next parity pass should re-audit DTO/OpenAPI against the live TypeScript source, followed by cache, procedure calls, pooling and DB-to-entity generation gaps.
+0.0.22 establishes the reflection-native DTO/REST/OpenAPI baseline. The immediate next pass is relation-aware REST filtering and nested relation/component OpenAPI parity, followed by cache, procedure calls, pooling and DB-to-entity generation gaps.
 
 See [`CHANGELOG.md`](CHANGELOG.md) and [`docs/PARITY.md`](docs/PARITY.md) for release-by-release details and remaining gaps.
