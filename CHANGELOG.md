@@ -2,6 +2,21 @@
 
 All releases currently target GCC 16+ C++26 static reflection and intentionally use SQLite as the only executor/dialect.
 
+## 0.0.19 - 2026-08-08
+
+Bulk-operation parity release.
+
+- Added `bulk_insert`, `bulk_update`, `bulk_update_where`, `bulk_delete`, `bulk_delete_where` and `bulk_upsert` for the SQLite execution model.
+- Preserved the TypeScript reference strategies instead of inventing different SQL: multi-row INSERT/UPSERT per chunk, individual identity-aware UPDATEs for `bulk_update`, and `IN (...)` chunks for update/delete-by-ID operations.
+- Added reflection-native `bulk_row<T>().set<^^T::member>(value)` payload construction with compile-time owner/member/value validation.
+- Added reflected `bulk_columns<^^T::member...>()`, `bulk_all_columns<T>()` and `bulk_no_columns()` selections for `by`, conflict, update and RETURNING columns where the TypeScript API uses strings/column objects.
+- Added default chunk size 500, bounded worker concurrency, transactional execution by default, non-transactional partial progress, chunk timings and completion callbacks.
+- Added `BulkResult`/metadata with processed-row count, chunks executed, RETURNING rows and optional timings.
+- Extended the shared UPDATE/DELETE DML AST with `IN` predicates and reusable typed `Expression<T>` filters so the bulk subsystem does not introduce a second SQL compiler.
+- Reused `Session::transaction()` for rollback semantics across chunks; a later chunk failure rolls back earlier chunks when transactional execution is enabled.
+- Serialized access to the single SQLite connection inside `SQLiteExecutor`, allowing bounded bulk workers without racing the underlying SQLite handle.
+- Added a dedicated SQLite E2E suite covering insert, update, update-where, delete, delete-where, upsert/update, upsert/do-nothing, RETURNING, callbacks/timing, concurrency, transaction rollback, non-transactional partial progress and invalid chunk sizes.
+
 ## 0.0.18 - 2026-08-08
 
 SQLite schema introspection/diff/synchronization release.
