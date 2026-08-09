@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.20`
+**Version:** `0.0.21`
 
 MetalORM C++ deliberately has no C++20/23 compatibility layer. The TypeScript [`metal-orm`](https://github.com/celsowm/metal-orm) repository is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
 
@@ -79,7 +79,7 @@ auto query = metal::select<User>()
     .having(metal::count(metal::field<^^Post::id>) > 1);
 ```
 
-The SELECT AST includes reflected JOINs, typed predicates/subqueries, aggregates, CTEs/recursive CTEs, set operations, derived tables, CASE, windows, typed functions, relation predicates and offset/keyset pagination.
+The SELECT AST includes reflected JOINs, typed predicates/subqueries, first-class scalar arithmetic (`+ - * / %`), aggregates, CTEs/recursive CTEs, set operations, derived tables, CASE, windows, typed functions, relation predicates and offset/keyset pagination.
 
 ## Relation wrappers
 
@@ -111,7 +111,7 @@ auto user = metal::save_graph(session, payload);
 
 `save_graph`, `update_graph`, `patch_graph`, pruning and typed N:N pivot patches reuse the same transactional Session/UoW infrastructure.
 
-## Tree / MPTT — 0.0.20
+## Tree / MPTT — 0.0.21
 
 Tree metadata is reflection-native rather than string-configured:
 
@@ -143,11 +143,13 @@ auto root_id = tree.insert_as_child(
         .build());
 ```
 
-The 0.0.20 baseline ports the TypeScript Nested Set/MPTT model with reflected mapping validation, `TreeQuery<T>`, `TreeManager<T>`, ancestor/descendant/path/root/child/sibling/depth queries, leaf discovery, threaded descendants, insert-as-child/root, sibling movement, subtree movement, subtree deletion, recovery and structural validation.
+The 0.0.21 Tree/MPTT pass includes reflected mapping validation, `TreeQuery<T>`, `TreeManager<T>`, ancestor/descendant/path/root/child/sibling/depth/leaf queries, threaded descendants, insert-as-child/root, sibling and subtree movement, `remove_from_tree()`, subtree deletion, recovery and structural validation.
 
-Multi-tree scope is applied to both reads **and boundary-changing mutations**. This intentionally hardens an edge in the current TypeScript manager where raw `lft/rght` shift SQL does not consistently append scope conditions. Subtree moves also isolate the moving range below zero while gaps are closed/opened so the temporary subtree cannot be shifted by its own destination-gap update.
+`TreeQuery::find_leaves()` is now a normal typed SELECT built from scalar arithmetic: `subtract(field<Right>, field<Left>) == 1`. The shared arithmetic AST supports `+`, `-`, `*`, `/` and integral `%`, so Tree no longer needs a special raw SELECT for leaf discovery.
 
-The remaining Tree edge is narrow: the generic SELECT AST still lacks a first-class arithmetic scalar node, so `TreeManager::get_leaves()` currently emits the tiny `(rght - lft) = 1` predicate directly instead of exposing `TreeQuery::find_leaves()` as a normal `SelectQuery<T>`. The questionable TS `removeFromTree()` semantics are also intentionally not copied until that source behavior is clarified/fixed.
+Multi-tree scope is applied to both reads **and boundary-changing mutations**. Subtree moves isolate the moving range below zero while gaps are closed/opened so the temporary subtree cannot be shifted by its own destination-gap update; the E2E suite explicitly moves a width-4 subtree and checks exact boundaries. `remove_from_tree()` promotes direct children to the removed node's parent, compacts the descendant forest by one depth level and retains the detached node as a standalone root with valid boundaries.
+
+Tree/MPTT is now marked **✅ parity for the supported SQLite execution model** in [`docs/PARITY.md`](docs/PARITY.md).
 
 ## Bulk operations — 0.0.19
 
@@ -283,6 +285,6 @@ MetalORM intentionally refuses older compilers instead of shipping a compatibili
 
 ## Current roadmap
 
-Tree/MPTT is now the 0.0.20 baseline. The immediate next pass should close the two explicit Tree edges — arithmetic-expression support so leaves stay inside the generic SELECT AST, and a source-level decision/fix for the current TypeScript `removeFromTree()` behavior — before moving on to DTO/OpenAPI, cache, procedure-call, pooling and DB-to-entity generation gaps.
+Tree/MPTT is closed in 0.0.21 for the supported SQLite execution model. The next parity pass should re-audit DTO/OpenAPI against the live TypeScript source, followed by cache, procedure calls, pooling and DB-to-entity generation gaps.
 
 See [`CHANGELOG.md`](CHANGELOG.md) and [`docs/PARITY.md`](docs/PARITY.md) for release-by-release details and remaining gaps.
