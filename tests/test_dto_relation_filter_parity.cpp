@@ -138,8 +138,8 @@ int main() {
     assert((ids(db->execute(nonempty_sql.sql, nonempty_sql.params).rows) ==
             std::vector<std::int64_t>{1, 3, 4}));
 
-    // Universal semantics: every(P) == NOT EXISTS(related row that does not satisfy P).
-    // Empty collections therefore satisfy every(P) vacuously, matching logical quantification.
+    // TypeScript every() is non-vacuous because it uses an INNER JOIN before
+    // GROUP BY/HAVING: the relation must be non-empty and every row must match.
     metal::WhereInput every_cpp;
     every_cpp.relations.push_back(
         metal::relation_filter("posts").every(
@@ -151,7 +151,7 @@ int main() {
     const auto every_sql = every_query.compile(dialect);
     assert(every_sql.sql.find("NOT EXISTS") != std::string::npos);
     assert((ids(db->execute(every_sql.sql, every_sql.params).rows) ==
-            std::vector<std::int64_t>{2, 3}));
+            std::vector<std::int64_t>{3}));
 
     // Recursive relation filtering: users with some post having some matching comment.
     metal::WhereInput comment_predicate = scalar_where(
