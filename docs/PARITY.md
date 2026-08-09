@@ -289,6 +289,28 @@ The 0.0.22 scalar baseline includes:
 
 DTO/OpenAPI is now ✅ for the supported SQLite execution model.
 
+## Query cache parity — 0.0.25
+
+The TypeScript cache subsystem is an execute-around query-result cache with provider interfaces, duration helpers, tenant-aware keys, conditional caching, TTL and explicit invalidation. The C++ binding keeps that contract while using typed rows instead of forcing JavaScript serialization semantics into the core.
+
+Implemented in 0.0.25:
+
+- segregated `CacheReader`, `CacheWriter`, `CacheInvalidator` and `CacheProvider` interfaces, plus optional tag-registration, clear and statistics capabilities;
+- `CacheCapabilities` for tag/prefix/TTL feature discovery;
+- human-readable duration parsing/formatting for `s`, `m`, `h`, `d` and `w` plus millisecond values;
+- thread-safe bidirectional `TagIndex`;
+- thread-safe `MemoryCacheAdapter` with lazy TTL expiry, tag invalidation, prefix invalidation, clear, statistics and disposal;
+- `DefaultCacheStrategy` with the reference `tenant:<tenantId>:<queryKey>` key shape and condition predicate;
+- `QueryCacheManager` execute-around behavior, default TTL, key/tag/prefix invalidation, clear/stats/dispose and tag registration;
+- generic `CachedQuery` / `cache()` wrappers that do not alter SQL AST compilation and work for ordinary SELECTs and `RelationFilteredQuery`;
+- `CacheSession` composition for Session + cache-manager + tenant context without making the core `Session` own a cache dependency;
+- entity hits cache `QueryResult` rows and re-hydrate through Session/Identity Map, preserving one entity identity rather than returning detached deserialized objects;
+- real SQLite coverage with a counting executor proving hits skip new SELECTs, explicit tag invalidation refreshes stale rows, tenant keys isolate entries and correlated relation queries are cacheable.
+
+`auto_invalidate` remains represented but intentionally inert. That matches the current TypeScript implementation: the option is stored by the cache facet, but `QueryCacheManager` and mutation execution do not consume it. C++ does not invent automatic mutation invalidation and then label the divergence parity.
+
+The cache core is complete for the supported SQLite model. The overall cache row remains 🟡 only because the TypeScript package also ships ecosystem-specific Keyv and ioredis adapters. C++ exposes the same provider extension boundary plus the in-memory provider, but does not yet mandate a particular Redis client dependency.
+
 ## Schema/tooling/ecosystem
 
 | MetalORM capability | C++ status |
@@ -304,15 +326,15 @@ DTO/OpenAPI is now ✅ for the supported SQLite execution model.
 | bulk operations | ✅ |
 | DTO/OpenAPI | ✅ |
 | Tree/MPTT | ✅ |
-| cache layer | ❌ |
+| cache layer | 🟡 |
 | procedure calls | ❌ |
 | pooling | ❌ |
 | DB-to-entity code generation | ❌ |
 
-The 🟡 on schema diff reflects the remaining expected-metadata surface, not the diff engine: reflected defaults are now first-class, while physical FK/check declarations still do not have C++ annotations.
+The 🟡 on schema diff reflects the remaining expected-metadata surface, not the diff engine: reflected defaults are now first-class, while physical FK/check declarations still do not have C++ annotations. The 🟡 on cache is an adapter/ecosystem boundary: the cache core and in-memory implementation are present, while a first-party remote adapter awaits a deliberate C++ Redis dependency policy.
 
 ## Ordered parity roadmap
 
-0.0.24 closes DTO/OpenAPI parity and shared reflected defaults for the supported SQLite model. The next parity pass moves to the cache layer, followed by procedure calls, pooling and DB-to-entity generation. Physical FK/check declaration metadata remains a separate schema-layer gap and should continue to use the same reflection-native, no-compatibility approach.
+0.0.25 closes the query-cache core for the supported SQLite model. The next parity pass moves to procedure calls, followed by pooling and DB-to-entity generation. A first-party remote-cache adapter and physical FK/check declaration metadata remain separate integration/schema decisions and should continue to follow the reflection-native, no-compatibility approach.
 
 A later performance pass may replace in-memory root pagination deduplication with a root-aware SQL page plan, provided it preserves the tested 0.0.13 semantics.
