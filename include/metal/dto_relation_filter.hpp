@@ -205,6 +205,11 @@ void append_relation_clause(
         }
 
         if (clause.every_filter && where_has_conditions(*clause.every_filter)) {
+            // The TypeScript reference uses an INNER JOIN + GROUP BY/HAVING for
+            // every(), so an empty relation does not satisfy the operator.
+            // Preserve that contract as EXISTS(any related) AND no related row
+            // that fails the nested predicate.
+            query.add_filter(make_relation_filter<Relation>(select<Target>(), false));
             auto predicate = build_nested_where_query<Target>(*clause.every_filter);
             query.add_filter(make_every_relation_filter<Relation>(std::move(predicate)));
         }
