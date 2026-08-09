@@ -17,6 +17,7 @@
 #include "metal/mapping.hpp"
 #include "metal/openapi.hpp"
 #include "metal/openapi_relations.hpp"
+#include "metal/openapi_components.hpp"
 #include "metal/polymorphic.hpp"
 #include "metal/reference.hpp"
 #include "metal/reflection.hpp"
