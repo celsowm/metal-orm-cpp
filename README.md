@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.18`
+**Version:** `0.0.19`
 
 MetalORM C++ deliberately has no C++20/23 compatibility layer. The TypeScript [`metal-orm`](https://github.com/celsowm/metal-orm) repository is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
 
@@ -111,6 +111,42 @@ auto user = metal::save_graph(session, payload);
 
 `save_graph`, `update_graph`, `patch_graph`, pruning and typed N:N pivot patches reuse the same transactional Session/UoW infrastructure.
 
+## Bulk operations — 0.0.19
+
+Bulk rows and column selections use reflected members rather than duplicated string column names:
+
+```cpp
+std::vector<metal::BulkRow> rows{
+    metal::bulk_row<User>()
+        .set<^^User::name>("Ada")
+        .build(),
+    metal::bulk_row<User>()
+        .set<^^User::name>("Grace")
+        .build()
+};
+
+metal::BulkInsertOptions options;
+options.chunk_size = 500;
+options.transactional = true;
+options.returning = metal::bulk_columns<^^User::id, ^^User::name>();
+
+auto result = metal::bulk_insert<User>(session, rows, options);
+```
+
+The SQLite binding now mirrors the TypeScript bulk subsystem:
+
+- `bulk_insert<T>()` uses multi-row INSERT chunks;
+- `bulk_update<T>()` preserves the reference strategy of one identity-aware UPDATE per row;
+- `bulk_update_where<T>()` updates ID chunks with `IN (...)`;
+- `bulk_delete<T>()` deletes ID chunks with `IN (...)`;
+- `bulk_delete_where<T>()` executes a single typed predicate delete;
+- `bulk_upsert<T>()` uses multi-row `INSERT ... ON CONFLICT`, including DO NOTHING and `excluded(...)` updates;
+- chunk size, bounded concurrency, transactional/non-transactional execution, chunk timings and completion callbacks are supported;
+- INSERT/UPDATE/UPSERT support reflected RETURNING selections;
+- `by`, conflict, update and RETURNING columns can be selected from `^^T::member` reflections instead of free-form strings.
+
+Bulk operations reuse the existing DML AST and `Session::transaction()` implementation. The SQLite executor serializes access to its single connection so bounded bulk workers cannot race the underlying handle.
+
 ## SQLite schema introspection and synchronization — 0.0.18
 
 Introspect the live database:
@@ -209,6 +245,6 @@ MetalORM intentionally refuses older compilers instead of shipping a compatibili
 
 ## Current roadmap
 
-A fresh audit of the TypeScript repository shows the next concrete subsystem is **bulk operations**. The focused target for **0.0.19** is bulk insert/update/delete/upsert with chunking, transaction controls and RETURNING, reusing the existing DML AST rather than creating a second SQL path.
+Bulk parity is now the 0.0.19 baseline. The next step is a fresh source-level audit of the current TypeScript repository to choose the next concrete subsystem from the remaining DTO/OpenAPI, Tree/MPTT, cache, procedure-call, pooling and DB-to-entity generation gaps instead of assuming an old roadmap is still accurate.
 
 See [`CHANGELOG.md`](CHANGELOG.md) and [`docs/PARITY.md`](docs/PARITY.md) for release-by-release details and remaining gaps.
