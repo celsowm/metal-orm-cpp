@@ -190,6 +190,46 @@ Rows are constructed through `bulk_row<T>().set<^^T::member>(value)`. `by`, conf
 
 The shared DML AST gained reusable typed `Expression<T>` predicates and explicit IN predicates for UPDATE/DELETE, so bulk execution does not create a second SQL compiler. SQLite connection access is serialized inside `SQLiteExecutor`; bounded workers therefore preserve the TypeScript concurrency control contract without data-racing one SQLite handle.
 
+## Tree / MPTT parity — 0.0.20
+
+The TypeScript tree subsystem is based on the Nested Set/MPTT model. The C++ binding keeps the same behavior while replacing free-form tree column strings with reflected annotations:
+
+```cpp
+struct [[=metal::mapping::table{"categories"}]] Category {
+    [[=metal::mapping::primary_key, =metal::mapping::generated]]
+    std::int64_t id{};
+
+    [[=metal::mapping::tree_parent]]
+    std::optional<std::int64_t> parent_id;
+    [[=metal::mapping::tree_left]]
+    std::int64_t lft{};
+    [[=metal::mapping::tree_right]]
+    std::int64_t rght{};
+    [[=metal::mapping::tree_depth]]
+    std::optional<std::int64_t> depth;
+    [[=metal::mapping::tree_scope]]
+    std::int64_t tenant_id{};
+};
+```
+
+`validate_tree_mapping<T>()` requires exactly one parent/left/right member, at most one depth member, a nullable parent key compatible with the reflected PK, integral boundaries/depth and persistent scalar scope members. Invalid nullable-parent shape has dedicated compile-fail coverage.
+
+The current baseline includes:
+
+- pure `NestedSetStrategy` calculations and parent-link recovery;
+- reflected `TreeQuery<T>` for ancestors, descendants, direct children, parent lookup, siblings, roots, subtree, tree list, depth and ID lookup;
+- Session-bound `TreeManager<T>` for node/root/child/descendant/path/sibling/parent reads;
+- threaded descendants, leaf discovery, descendant count and level calculation;
+- root/child insertion with `INSERT ... RETURNING`;
+- move up/down, move to another parent/root and descendant-cycle rejection;
+- subtree deletion;
+- tree recovery and overlap/boundary validation;
+- multiple trees in one table through reflected `tree_scope` values.
+
+Two hardenings intentionally differ from bugs/edges in the current TypeScript source while preserving the documented contract. First, scope conditions are appended to raw boundary-shift mutations, so changing tenant A cannot rewrite `lft/rght` values in tenant B. Second, a moving subtree is isolated below zero before old/new gaps are closed/opened; the current TS positive temporary offset can itself satisfy the destination shift predicate and alter its restore delta.
+
+Tree remains 🟡 for two explicit reasons. `TreeManager::get_leaves()` currently emits the tiny `(rght - lft) = 1` predicate directly because the generic C++ SELECT AST does not yet expose arithmetic binary scalar nodes; once it does, `TreeQuery::find_leaves()` can stay entirely inside the query AST. Also, the TypeScript `removeFromTree()` implementation reparents children and shrinks boundaries but leaves the removed row with stale overlapping bounds; the C++ port does not copy that questionable behavior until the reference semantics are clarified/fixed.
+
 ## Schema/tooling/ecosystem
 
 | MetalORM capability | C++ status |
@@ -203,7 +243,7 @@ The shared DML AST gained reusable typed `Expression<T>` predicates and explicit
 | migration history/versioned migration runner | not present as a distinct TS subsystem |
 | bulk operations | ✅ |
 | DTO/OpenAPI | ❌ |
-| Tree/MPTT | ❌ |
+| Tree/MPTT | 🟡 |
 | cache layer | ❌ |
 | procedure calls | ❌ |
 | pooling | ❌ |
@@ -213,6 +253,6 @@ The 🟡 on schema diff reflects the expected-metadata surface, not the diff eng
 
 ## Ordered parity roadmap
 
-0.0.19 closes the concrete bulk subsystem found in the latest source-level audit. Before naming 0.0.20, re-audit the current TypeScript implementations of DTO/OpenAPI, Tree/MPTT, cache, procedure calls, pooling and DB-to-entity generation and choose the next self-contained subsystem based on the code that actually exists now.
+0.0.20 establishes the Tree/MPTT runtime baseline. The next parity pass should first close its two explicit edges: add arithmetic binary scalar expressions so leaf queries return to `TreeQuery<T>`, and resolve/fix the TypeScript `removeFromTree()` contract rather than blindly porting stale-boundary behavior. After that, re-audit DTO/OpenAPI, cache, procedure calls, pooling and DB-to-entity generation against the live TypeScript source.
 
 A later performance pass may replace in-memory root pagination deduplication with a root-aware SQL page plan, provided it preserves the tested 0.0.13 semantics.
