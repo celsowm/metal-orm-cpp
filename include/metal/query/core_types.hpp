@@ -82,6 +82,7 @@ using type_list_concat_many_t = typename type_list_concat_many<Lists...>::type;
 
 enum class CompareOp { Eq, Ne, Gt, Ge, Lt, Le };
 enum class LogicOp { And, Or };
+enum class ArithmeticOp { Add, Subtract, Multiply, Divide, Modulo };
 enum class AggregateKind { Count, Sum, Avg, Min, Max, Stddev, Variance };
 enum class JoinKind { Inner, Left };
 enum class SetOperationKind { Union, UnionAll, Intersect, Except };
@@ -96,6 +97,17 @@ inline std::string compare_token(CompareOp op) {
         case CompareOp::Le: return "<=";
     }
     return "=";
+}
+
+inline std::string arithmetic_token(ArithmeticOp op) {
+    switch (op) {
+        case ArithmeticOp::Add: return "+";
+        case ArithmeticOp::Subtract: return "-";
+        case ArithmeticOp::Multiply: return "*";
+        case ArithmeticOp::Divide: return "/";
+        case ArithmeticOp::Modulo: return "%";
+    }
+    return "+";
 }
 
 inline std::string aggregate_token(AggregateKind kind) {
@@ -137,6 +149,12 @@ struct ExprNode;
 using ScalarPtr = std::shared_ptr<const ScalarNode>;
 using ExprPtr = std::shared_ptr<const ExprNode>;
 
+struct ArithmeticRef {
+    ScalarPtr left;
+    ArithmeticOp op{ArithmeticOp::Add};
+    ScalarPtr right;
+};
+
 struct FunctionRef {
     std::string name;
     std::vector<ScalarPtr> args;
@@ -165,7 +183,7 @@ struct WindowRef {
 };
 
 struct ScalarNode {
-    std::variant<ColumnRef, Value, AggregateRef, FunctionRef, CaseRef, WindowRef> node;
+    std::variant<ColumnRef, Value, ArithmeticRef, AggregateRef, FunctionRef, CaseRef, WindowRef> node;
 };
 
 struct ComparisonNode {
