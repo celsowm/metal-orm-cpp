@@ -227,4 +227,8 @@ if(METAL_ORM_BUILD_TESTS)
     add_executable(metal-orm-cache-parity-tests tests/test_cache_parity.cpp)
     target_link_libraries(metal-orm-cache-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-cache-parity-tests COMMAND metal-orm-cache-parity-tests)
+
+    add_executable(metal-orm-procedure-parity-tests tests/test_procedure_parity.cpp)
+    target_link_libraries(metal-orm-procedure-parity-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-procedure-parity-tests COMMAND metal-orm-procedure-parity-tests)
 endif()
