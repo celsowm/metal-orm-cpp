@@ -234,6 +234,32 @@ Three hardenings preserve the documented Tree contract instead of copying source
 
 The Tree/MPTT row is now ✅ for the supported SQLite execution model.
 
+## DTO / REST / OpenAPI parity — 0.0.22
+
+The TypeScript DTO subsystem is not just type aliases: it includes response/create/update DTOs, transforms, REST filters, safe sorting/paging helpers and OpenAPI generators. The C++ binding derives the scalar portion directly from C++26 reflection instead of duplicating metadata in a second DTO declaration.
+
+Implemented in the 0.0.22 baseline:
+
+- response/create/update DTO descriptors from persistent reflected members;
+- generated-field exclusion for create/update DTOs;
+- public DTO keys based on C++ member identifiers while physical SQL names remain mapping concerns;
+- reflected compile-time exclusion/pick policies with foreign-member rejection;
+- runtime row transforms equivalent to response merge, defaults, exclude, pick and field mapping;
+- enhanced `PagedResponse` metadata layered over the existing root-aware pagination runtime;
+- allowlisted scalar REST filters resolved from public API names back to reflected members;
+- equality, `IN`/`NOT IN`, numeric ordering, string contains/starts/ends, null checks and case-insensitive string filtering using the shared query AST;
+- allowlisted dynamic sorting with reflected primary-key tie-breaking for deterministic pages;
+- `execute_filtered_paged()` reusing `execute_paged()` rather than introducing a DTO-specific executor;
+- OpenAPI response/create/update DTO schemas;
+- OpenAPI 3.0 `nullable` versus OpenAPI 3.1 null-union handling;
+- OpenAPI scalar filter schemas driven by the same reflected allowlists used at runtime;
+- pagination parameter/response schemas and framework-independent route-document structures;
+- Tree/MPTT result, threaded-node, tree-list and component schemas derived from the existing tree annotations;
+- real SQLite coverage for filtering, physical-column/public-name resolution, safe sorting and paged execution;
+- compile-fail coverage rejecting DTO member policies from another entity.
+
+The area remains 🟡 for explicit reasons rather than hidden TODOs. The TypeScript reference also supports relation-aware filters (`some`/`every`/`none`/`isEmpty`/`isNotEmpty`) and nested relation DTO/component OpenAPI generation; those are the next sub-pass. In addition, TypeScript create-schema requiredness accounts for database defaults, while the C++ mapping layer does not yet own reflected default-value metadata. C++ therefore uses `std::optional<T>` as the current create-time omission signal instead of inventing duplicated API-only defaults.
+
 ## Schema/tooling/ecosystem
 
 | MetalORM capability | C++ status |
@@ -246,7 +272,7 @@ The Tree/MPTT row is now ✅ for the supported SQLite execution model.
 | physical FK/check/default declaration metadata | ❌ |
 | migration history/versioned migration runner | not present as a distinct TS subsystem |
 | bulk operations | ✅ |
-| DTO/OpenAPI | ❌ |
+| DTO/OpenAPI | 🟡 |
 | Tree/MPTT | ✅ |
 | cache layer | ❌ |
 | procedure calls | ❌ |
@@ -257,6 +283,6 @@ The 🟡 on schema diff reflects the expected-metadata surface, not the diff eng
 
 ## Ordered parity roadmap
 
-0.0.21 closes the Tree/MPTT pass and adds reusable scalar arithmetic to the SELECT AST. The next parity pass should re-audit DTO/OpenAPI against the live TypeScript source, then continue through cache, procedure calls, pooling and DB-to-entity generation without introducing compatibility-era abstractions.
+0.0.22 establishes the reflection-native DTO/REST/OpenAPI scalar baseline. The next pass should close relation-aware REST filters and nested relation/component OpenAPI generation, while default-aware create DTO requiredness should be solved at the shared mapping/DDL metadata layer rather than duplicated inside the API layer. After that, continue through cache, procedure calls, pooling and DB-to-entity generation without introducing compatibility-era abstractions.
 
 A later performance pass may replace in-memory root pagination deduplication with a root-aware SQL page plan, provided it preserves the tested 0.0.13 semantics.
