@@ -170,6 +170,48 @@ int main() {
     assert(!update_schema.properties.contains("id"));
     assert(update_schema.required.empty());
 
+    const auto filter_schema = metal::where_input_to_openapi_schema<
+        ApiUser,
+        ^^ApiUser::displayName,
+        ^^ApiUser::bio,
+        ^^ApiUser::active,
+        ^^ApiUser::score>();
+    assert(filter_schema.properties.size() == 4);
+    assert(filter_schema.properties.contains("displayName"));
+    assert(!filter_schema.properties.contains("display_name"));
+    assert(!filter_schema.properties.contains("id"));
+
+    const auto display_filter = filter_schema.properties.at("displayName");
+    assert(display_filter->properties.contains("equals"));
+    assert(display_filter->properties.contains("not"));
+    assert(display_filter->properties.contains("in"));
+    assert(display_filter->properties.contains("notIn"));
+    assert(display_filter->properties.contains("contains"));
+    assert(display_filter->properties.contains("startsWith"));
+    assert(display_filter->properties.contains("endsWith"));
+    assert(display_filter->properties.contains("mode"));
+    assert(!display_filter->properties.contains("gte"));
+
+    const auto active_filter = filter_schema.properties.at("active");
+    assert(active_filter->properties.size() == 2);
+    assert(active_filter->properties.contains("equals"));
+    assert(active_filter->properties.contains("not"));
+
+    const auto score_filter = filter_schema.properties.at("score");
+    assert(score_filter->properties.contains("equals"));
+    assert(score_filter->properties.contains("in"));
+    assert(score_filter->properties.contains("lt"));
+    assert(score_filter->properties.contains("lte"));
+    assert(score_filter->properties.contains("gt"));
+    assert(score_filter->properties.contains("gte"));
+    assert(!score_filter->properties.contains("contains"));
+
+    const auto bio_filter = filter_schema.properties.at("bio");
+    assert(has_type(*bio_filter, metal::OpenApiType::object));
+    assert(has_type(*bio_filter, metal::OpenApiType::null_value));
+    const auto filter30 = metal::where_input_to_openapi_schema<ApiUser>(metal::OpenApiDialect::v3_0);
+    assert(filter30.properties.at("bio")->nullable);
+
     const auto params = metal::pagination_params_schema();
     assert(params.size() == 4);
     assert(params[0].name == "page");
