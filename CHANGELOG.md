@@ -2,6 +2,23 @@
 
 All releases currently target GCC 16+ C++26 static reflection and intentionally use SQLite as the only executor/dialect.
 
+## 0.0.26 - 2026-08-09
+
+Procedure-call parity surface and capability-based execution contract.
+
+- Added first-class `ProcedureCall`, `ProcedureRef`, `ProcedureParam` and `ProcedureDirection` AST types.
+- Added immutable-style `call_procedure(...).in(...).out(...).in_out(...)` construction with optional schema and database-type metadata.
+- Reused typed `ScalarPtr` inputs from the query expression model instead of creating a procedure-only value representation.
+- Added `CompiledProcedureCall` with ordered OUT names and explicit first/last-result-set source metadata.
+- Added segregated `ProcedureCompiler` and `ProcedureExecutor` capabilities rather than adding unsupported procedure methods to every dialect/executor base class.
+- Added `ProcedureExecutionResult` with all result sets plus a typed OUT map.
+- Added case-insensitive OUT-column extraction and explicit failures for missing result sets, empty OUT result sets and absent OUT columns.
+- Added regression coverage for both first-result-set and last-result-set OUT extraction, matching the PostgreSQL versus MySQL/MSSQL split in the TypeScript reference.
+- Added explicit rejection when the active dialect lacks procedure compilation or the executor lacks multi-result procedure execution.
+- Matched the TypeScript SQLite behavior: stored procedures remain unsupported by SQLite and fail at the dialect capability boundary rather than emitting fake `CALL` SQL.
+- Added a synthetic procedure-capable dialect/executor test to prove the vendor-independent AST/compile/execute pipeline while the production backend remains SQLite-only.
+- Marked procedure calls ✅ for the supported SQLite execution model; the next ordered parity target is pooling.
+
 ## 0.0.25 - 2026-08-09
 
 Query-cache core parity release.
