@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.24`
+**Version:** `0.0.25`
 
 MetalORM C++ deliberately has no C++20/23 compatibility layer. The TypeScript [`metal-orm`](https://github.com/celsowm/metal-orm) repository is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
 
@@ -192,6 +192,39 @@ OpenAPI schemas are framework-independent C++ objects derived from the same refl
 
 DTO/OpenAPI is now **✅ parity for the supported SQLite execution model**. `morphTo` filtering remains the same discriminator-dependent relation-query limitation rather than a DTO-specific gap.
 
+## Query cache — 0.0.25
+
+The TypeScript query-cache contract is available without pushing cache state into the SQL AST:
+
+```cpp
+auto provider = std::make_shared<metal::MemoryCacheAdapter>();
+metal::QueryCacheManager cacheManager{provider};
+metal::CacheSession cached{
+    session,
+    cacheManager,
+    metal::CacheTenantId{std::int64_t{42}}
+};
+
+auto query = metal::cache(
+    metal::select<User>(),
+    "active-users",
+    metal::Duration{"30m"},
+    {"users", "dashboard"});
+
+auto users = cached.execute(query);
+cached.invalidate_cache_tags({"users"});
+```
+
+The cache core keeps the TypeScript ISP split with `CacheReader`, `CacheWriter`, `CacheInvalidator` and `CacheProvider`, plus optional tag-registration, clear and statistics capabilities. `MemoryCacheAdapter` provides TTL, tags, prefix invalidation, clear/statistics and thread-safe storage; `TagIndex` maintains bidirectional tag/key membership.
+
+`QueryCacheManager` implements the same execute-around contract: tenant-aware key generation (`tenant:<id>:<key>`), cache hit before execution, conditional caching, TTL, tag registration and key/tag/prefix invalidation. Human-readable durations support `s`, `m`, `h`, `d` and `w` just like the reference API.
+
+C++ caches typed `QueryResult` rows rather than forcing a generic JSON serializer into the core. Entity cache hits are therefore re-hydrated through the existing `Session` path and Identity Map. A cached result does not create a second instance of an already tracked entity. Both ordinary `SelectQuery` and correlated `RelationFilteredQuery` are supported by the same wrapper.
+
+`auto_invalidate` is preserved as cache configuration but is intentionally not given invented behavior: the current TypeScript manager/facet stores that flag without consuming it during mutation execution. Explicit key/tag/prefix invalidation therefore remains the behavioral contract in both bindings.
+
+The **cache core is complete for the supported SQLite model**. Overall cache parity remains 🟡 only at the adapter/ecosystem boundary: the TypeScript package bundles Keyv and ioredis adapters, while the C++ library currently exposes the provider extension point and the in-memory provider without choosing a mandatory Redis client dependency.
+
 ## Tree / MPTT — 0.0.21
 
 Tree metadata is reflection-native rather than string-configured:
@@ -366,6 +399,6 @@ MetalORM intentionally refuses older compilers instead of shipping a compatibili
 
 ## Current roadmap
 
-0.0.24 closes DTO/OpenAPI parity for the supported SQLite execution model by adding shared reflected database defaults. The next parity pass moves to the remaining runtime/tooling gaps: cache, procedure calls, pooling and DB-to-entity generation; physical FK/check declaration metadata remains a separate schema-layer gap.
+0.0.25 closes the query-cache core for the supported SQLite execution model. The next parity pass moves to procedure calls, followed by pooling and DB-to-entity generation. A first-party remote-cache adapter remains an ecosystem decision rather than a reason to couple the core to a specific C++ Redis client; physical FK/check declaration metadata remains a separate schema-layer gap.
 
 See [`CHANGELOG.md`](CHANGELOG.md) and [`docs/PARITY.md`](docs/PARITY.md) for release-by-release details and remaining gaps.
