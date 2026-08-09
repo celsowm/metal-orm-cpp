@@ -1,6 +1,7 @@
 #pragma once
 
 #include "metal/dto.hpp"
+#include "metal/dto_filter.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -164,6 +165,12 @@ OpenApiSchema scalar_openapi_schema(OpenApiDialect dialect) {
     return schema;
 }
 
+template <typename T>
+OpenApiSchema nonnullable_scalar_openapi_schema() {
+    using U = optional_value_t<T>;
+    return scalar_openapi_schema<U>(OpenApiDialect::v3_1);
+}
+
 template <DtoMode Mode, reflect::Entity T, std::meta::info... Excluded>
 OpenApiSchema dto_openapi_schema_impl(OpenApiDialect dialect) {
     static_assert(validate_dto_members<T, Excluded...>());
@@ -200,6 +207,58 @@ OpenApiSchema dto_openapi_schema_impl(OpenApiDialect dialect) {
     return root;
 }
 
+template <typename MemberType>
+OpenApiSchema filter_field_openapi_schema(OpenApiDialect dialect) {
+    using Raw = std::remove_cvref_t<MemberType>;
+    using U = optional_value_t<Raw>;
+    constexpr bool numeric = std::is_arithmetic_v<U> && !std::same_as<U, bool>;
+    constexpr bool string_like = std::same_as<U, std::string>;
+    constexpr bool boolean = std::same_as<U, bool>;
+
+    OpenApiSchema field;
+    field.types = {OpenApiType::object};
+
+    const auto scalar = nonnullable_scalar_openapi_schema<U>();
+    field.properties.emplace("equals", std::make_shared<OpenApiSchema>(scalar));
+    field.properties.emplace("not", std::make_shared<OpenApiSchema>(scalar));
+
+    if constexpr (!boolean) {
+        auto array = std::make_shared<OpenApiSchema>();
+        array->types = {OpenApiType::array};
+        array->items = std::make_shared<OpenApiSchema>(scalar);
+        field.properties.emplace("in", array);
+        field.properties.emplace("notIn", std::make_shared<OpenApiSchema>(*array));
+    }
+
+    if constexpr (numeric) {
+        field.properties.emplace("lt", std::make_shared<OpenApiSchema>(scalar));
+        field.properties.emplace("lte", std::make_shared<OpenApiSchema>(scalar));
+        field.properties.emplace("gt", std::make_shared<OpenApiSchema>(scalar));
+        field.properties.emplace("gte", std::make_shared<OpenApiSchema>(scalar));
+    }
+
+    if constexpr (string_like) {
+        OpenApiSchema string_schema;
+        string_schema.types = {OpenApiType::string};
+        field.properties.emplace("contains", std::make_shared<OpenApiSchema>(string_schema));
+        field.properties.emplace("startsWith", std::make_shared<OpenApiSchema>(string_schema));
+        field.properties.emplace("endsWith", std::make_shared<OpenApiSchema>(string_schema));
+
+        auto mode = std::make_shared<OpenApiSchema>(string_schema);
+        mode->enum_values = {
+            Value{std::string{"default"}},
+            Value{std::string{"insensitive"}}
+        };
+        field.properties.emplace("mode", std::move(mode));
+    }
+
+    if constexpr (is_optional_v<Raw>) {
+        if (dialect == OpenApiDialect::v3_0) field.nullable = true;
+        else field.types.push_back(OpenApiType::null_value);
+    }
+    return field;
+}
+
 } // namespace detail
 
 template <reflect::Entity T, std::meta::info... Excluded>
@@ -215,6 +274,24 @@ OpenApiSchema create_dto_to_openapi_schema(OpenApiDialect dialect = OpenApiDiale
 template <reflect::Entity T, std::meta::info... Excluded>
 OpenApiSchema update_dto_to_openapi_schema(OpenApiDialect dialect = OpenApiDialect::v3_1) {
     return detail::dto_openapi_schema_impl<DtoMode::update, T, Excluded...>(dialect);
+}
+
+template <reflect::Entity T, std::meta::info... Allowed>
+OpenApiSchema where_input_to_openapi_schema(OpenApiDialect dialect = OpenApiDialect::v3_1) {
+    static_assert(detail::validate_dto_members<T, Allowed...>());
+
+    OpenApiSchema root;
+    root.types = {OpenApiType::object};
+    reflect::for_each_column<T>([&]<std::meta::info Member>() {
+        if constexpr (detail::filter_member_allowed<Member, Allowed...>()) {
+            using M = reflect::member_type_t<Member>;
+            root.properties.emplace(
+                detail::dto_member_name<Member>(),
+                std::make_shared<OpenApiSchema>(
+                    detail::filter_field_openapi_schema<M>(dialect)));
+        }
+    });
+    return root;
 }
 
 inline std::vector<OpenApiParameterObject> pagination_params_schema() {
@@ -253,7 +330,7 @@ inline OpenApiSchema paged_response_to_openapi_schema(OpenApiSchema item_schema)
         schema->format = "int64";
         return schema;
     };
-    auto boolean = [] {
+    auto boolean_schema = [] {
         auto schema = std::make_shared<OpenApiSchema>();
         schema->types = {OpenApiType::boolean};
         return schema;
@@ -263,8 +340,8 @@ inline OpenApiSchema paged_response_to_openapi_schema(OpenApiSchema item_schema)
     root.properties.emplace("page", integer());
     root.properties.emplace("pageSize", integer());
     root.properties.emplace("totalPages", integer());
-    root.properties.emplace("hasNextPage", boolean());
-    root.properties.emplace("hasPrevPage", boolean());
+    root.properties.emplace("hasNextPage", boolean_schema());
+    root.properties.emplace("hasPrevPage", boolean_schema());
     root.required = {
         "items", "totalItems", "page", "pageSize", "totalPages",
         "hasNextPage", "hasPrevPage"
