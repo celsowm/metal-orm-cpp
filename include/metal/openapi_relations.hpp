@@ -54,35 +54,36 @@ template <std::size_t Depth, reflect::Entity T>
 OpenApiSchema nested_dto_openapi_impl(OpenApiDialect dialect) {
     OpenApiSchema root;
     root.types = {OpenApiType::object};
-    if constexpr (Depth == 0) return root;
 
-    root = dto_to_openapi_schema<T>(dialect);
+    if constexpr (Depth > 0) {
+        root = dto_to_openapi_schema<T>(dialect);
 
-    template for (constexpr auto Relation : reflect::data_members<T>()) {
-        if constexpr (reflect::has_relation_annotation<Relation>()) {
-            using A = reflect::relation_annotation_t<Relation>;
-            using Traits = mapping::relation_annotation_traits<A>;
-            const auto name = dto_relation_name<Relation>();
+        template for (constexpr auto Relation : reflect::data_members<T>()) {
+            if constexpr (reflect::has_relation_annotation<Relation>()) {
+                using A = reflect::relation_annotation_t<Relation>;
+                using Traits = mapping::relation_annotation_traits<A>;
+                const auto name = dto_relation_name<Relation>();
 
-            if constexpr (Traits::kind == mapping::relation_kind::morph_to) {
-                auto polymorphic = std::make_shared<OpenApiSchema>();
-                polymorphic->types = {OpenApiType::object};
-                polymorphic->description =
-                    "Polymorphic morphTo relation; discriminator-specific oneOf is not inferred";
-                root.properties.emplace(name, std::move(polymorphic));
-            } else {
-                using Target = relation_filter_target_t<Relation>;
-                auto nested = nested_dto_openapi_impl<Depth - 1, Target>(dialect);
+                if constexpr (Traits::kind == mapping::relation_kind::morph_to) {
+                    auto polymorphic = std::make_shared<OpenApiSchema>();
+                    polymorphic->types = {OpenApiType::object};
+                    polymorphic->description =
+                        "Polymorphic morphTo relation; discriminator-specific oneOf is not inferred";
+                    root.properties.emplace(name, std::move(polymorphic));
+                } else {
+                    using Target = relation_filter_target_t<Relation>;
+                    auto nested = nested_dto_openapi_impl<Depth - 1, Target>(dialect);
 
-                if constexpr (openapi_many_relation_v<Traits::kind>) {
-                    auto array = std::make_shared<OpenApiSchema>();
-                    array->types = {OpenApiType::array};
-                    array->items = std::make_shared<OpenApiSchema>(std::move(nested));
-                    root.properties.emplace(name, std::move(array));
-                } else if constexpr (openapi_single_relation_v<Traits::kind>) {
-                    root.properties.emplace(
-                        name,
-                        std::make_shared<OpenApiSchema>(std::move(nested)));
+                    if constexpr (openapi_many_relation_v<Traits::kind>) {
+                        auto array = std::make_shared<OpenApiSchema>();
+                        array->types = {OpenApiType::array};
+                        array->items = std::make_shared<OpenApiSchema>(std::move(nested));
+                        root.properties.emplace(name, std::move(array));
+                    } else if constexpr (openapi_single_relation_v<Traits::kind>) {
+                        root.properties.emplace(
+                            name,
+                            std::make_shared<OpenApiSchema>(std::move(nested)));
+                    }
                 }
             }
         }
@@ -93,44 +94,45 @@ OpenApiSchema nested_dto_openapi_impl(OpenApiDialect dialect) {
 template <std::size_t Depth, reflect::Entity T>
 OpenApiSchema nested_where_openapi_impl(OpenApiDialect dialect) {
     OpenApiSchema root = where_input_to_openapi_schema<T>(dialect);
-    if constexpr (Depth == 0) return root;
 
-    template for (constexpr auto Relation : reflect::data_members<T>()) {
-        if constexpr (reflect::has_relation_annotation<Relation>()) {
-            using A = reflect::relation_annotation_t<Relation>;
-            using Traits = mapping::relation_annotation_traits<A>;
-            const auto name = dto_relation_name<Relation>();
+    if constexpr (Depth > 0) {
+        template for (constexpr auto Relation : reflect::data_members<T>()) {
+            if constexpr (reflect::has_relation_annotation<Relation>()) {
+                using A = reflect::relation_annotation_t<Relation>;
+                using Traits = mapping::relation_annotation_traits<A>;
+                const auto name = dto_relation_name<Relation>();
 
-            if constexpr (Traits::kind == mapping::relation_kind::morph_to) {
-                auto unsupported = std::make_shared<OpenApiSchema>();
-                unsupported->types = {OpenApiType::object};
-                unsupported->description =
-                    "morphTo filtering is discriminator-dependent and unsupported";
-                root.properties.emplace(name, std::move(unsupported));
-            } else {
-                using Target = relation_filter_target_t<Relation>;
-                auto predicate = nested_where_openapi_impl<Depth - 1, Target>(dialect);
+                if constexpr (Traits::kind == mapping::relation_kind::morph_to) {
+                    auto unsupported = std::make_shared<OpenApiSchema>();
+                    unsupported->types = {OpenApiType::object};
+                    unsupported->description =
+                        "morphTo filtering is discriminator-dependent and unsupported";
+                    root.properties.emplace(name, std::move(unsupported));
+                } else {
+                    using Target = relation_filter_target_t<Relation>;
+                    auto predicate = nested_where_openapi_impl<Depth - 1, Target>(dialect);
 
-                OpenApiSchema relation;
-                relation.types = {OpenApiType::object};
-                relation.properties.emplace(
-                    "some", std::make_shared<OpenApiSchema>(predicate));
-                relation.properties.emplace(
-                    "every", std::make_shared<OpenApiSchema>(predicate));
-                relation.properties.emplace(
-                    "none", std::make_shared<OpenApiSchema>(std::move(predicate)));
+                    OpenApiSchema relation;
+                    relation.types = {OpenApiType::object};
+                    relation.properties.emplace(
+                        "some", std::make_shared<OpenApiSchema>(predicate));
+                    relation.properties.emplace(
+                        "every", std::make_shared<OpenApiSchema>(predicate));
+                    relation.properties.emplace(
+                        "none", std::make_shared<OpenApiSchema>(std::move(predicate)));
 
-                auto boolean_schema = [] {
-                    auto schema = std::make_shared<OpenApiSchema>();
-                    schema->types = {OpenApiType::boolean};
-                    return schema;
-                };
-                relation.properties.emplace("isEmpty", boolean_schema());
-                relation.properties.emplace("isNotEmpty", boolean_schema());
+                    auto boolean_schema = [] {
+                        auto schema = std::make_shared<OpenApiSchema>();
+                        schema->types = {OpenApiType::boolean};
+                        return schema;
+                    };
+                    relation.properties.emplace("isEmpty", boolean_schema());
+                    relation.properties.emplace("isNotEmpty", boolean_schema());
 
-                root.properties.emplace(
-                    name,
-                    std::make_shared<OpenApiSchema>(std::move(relation)));
+                    root.properties.emplace(
+                        name,
+                        std::make_shared<OpenApiSchema>(std::move(relation)));
+                }
             }
         }
     }
@@ -140,19 +142,20 @@ OpenApiSchema nested_where_openapi_impl(OpenApiDialect dialect) {
 template <std::size_t Depth, reflect::Entity T>
 OpenApiSchema update_with_relations_impl(OpenApiDialect dialect) {
     auto root = update_dto_to_openapi_schema<T>(dialect);
-    if constexpr (Depth == 0) return root;
 
-    template for (constexpr auto Relation : reflect::data_members<T>()) {
-        if constexpr (reflect::has_relation_annotation<Relation>()) {
-            using A = reflect::relation_annotation_t<Relation>;
-            using Traits = mapping::relation_annotation_traits<A>;
-            if constexpr (Traits::kind != mapping::relation_kind::morph_to &&
-                          openapi_single_relation_v<Traits::kind>) {
-                using Target = relation_filter_target_t<Relation>;
-                root.properties.emplace(
-                    dto_relation_name<Relation>(),
-                    std::make_shared<OpenApiSchema>(
-                        update_with_relations_impl<Depth - 1, Target>(dialect)));
+    if constexpr (Depth > 0) {
+        template for (constexpr auto Relation : reflect::data_members<T>()) {
+            if constexpr (reflect::has_relation_annotation<Relation>()) {
+                using A = reflect::relation_annotation_t<Relation>;
+                using Traits = mapping::relation_annotation_traits<A>;
+                if constexpr (Traits::kind != mapping::relation_kind::morph_to &&
+                              openapi_single_relation_v<Traits::kind>) {
+                    using Target = relation_filter_target_t<Relation>;
+                    root.properties.emplace(
+                        dto_relation_name<Relation>(),
+                        std::make_shared<OpenApiSchema>(
+                            update_with_relations_impl<Depth - 1, Target>(dialect)));
+                }
             }
         }
     }
@@ -180,45 +183,46 @@ OpenApiSchema where_input_with_relations_to_openapi_schema(
     static_assert(detail::validate_dto_relations<T, AllowedRelations...>());
 
     auto root = where_input_to_openapi_schema<T, AllowedFields...>(dialect);
-    if constexpr (Depth == 0) return root;
 
-    template for (constexpr auto Relation : reflect::data_members<T>()) {
-        if constexpr (reflect::has_relation_annotation<Relation>()) {
-            if constexpr (detail::dto_relation_allowed<Relation, AllowedRelations...>()) {
-                using A = reflect::relation_annotation_t<Relation>;
-                using Traits = mapping::relation_annotation_traits<A>;
-                const auto name = detail::dto_relation_name<Relation>();
+    if constexpr (Depth > 0) {
+        template for (constexpr auto Relation : reflect::data_members<T>()) {
+            if constexpr (reflect::has_relation_annotation<Relation>()) {
+                if constexpr (detail::dto_relation_allowed<Relation, AllowedRelations...>()) {
+                    using A = reflect::relation_annotation_t<Relation>;
+                    using Traits = mapping::relation_annotation_traits<A>;
+                    const auto name = detail::dto_relation_name<Relation>();
 
-                if constexpr (Traits::kind == mapping::relation_kind::morph_to) {
-                    auto unsupported = std::make_shared<OpenApiSchema>();
-                    unsupported->types = {OpenApiType::object};
-                    unsupported->description =
-                        "morphTo filtering is discriminator-dependent and unsupported";
-                    root.properties.emplace(name, std::move(unsupported));
-                } else {
-                    using Target = detail::relation_filter_target_t<Relation>;
-                    auto predicate = detail::nested_where_openapi_impl<Depth - 1, Target>(dialect);
+                    if constexpr (Traits::kind == mapping::relation_kind::morph_to) {
+                        auto unsupported = std::make_shared<OpenApiSchema>();
+                        unsupported->types = {OpenApiType::object};
+                        unsupported->description =
+                            "morphTo filtering is discriminator-dependent and unsupported";
+                        root.properties.emplace(name, std::move(unsupported));
+                    } else {
+                        using Target = detail::relation_filter_target_t<Relation>;
+                        auto predicate = detail::nested_where_openapi_impl<Depth - 1, Target>(dialect);
 
-                    OpenApiSchema relation;
-                    relation.types = {OpenApiType::object};
-                    relation.properties.emplace(
-                        "some", std::make_shared<OpenApiSchema>(predicate));
-                    relation.properties.emplace(
-                        "every", std::make_shared<OpenApiSchema>(predicate));
-                    relation.properties.emplace(
-                        "none", std::make_shared<OpenApiSchema>(std::move(predicate)));
+                        OpenApiSchema relation;
+                        relation.types = {OpenApiType::object};
+                        relation.properties.emplace(
+                            "some", std::make_shared<OpenApiSchema>(predicate));
+                        relation.properties.emplace(
+                            "every", std::make_shared<OpenApiSchema>(predicate));
+                        relation.properties.emplace(
+                            "none", std::make_shared<OpenApiSchema>(std::move(predicate)));
 
-                    auto boolean_schema = [] {
-                        auto schema = std::make_shared<OpenApiSchema>();
-                        schema->types = {OpenApiType::boolean};
-                        return schema;
-                    };
-                    relation.properties.emplace("isEmpty", boolean_schema());
-                    relation.properties.emplace("isNotEmpty", boolean_schema());
+                        auto boolean_schema = [] {
+                            auto schema = std::make_shared<OpenApiSchema>();
+                            schema->types = {OpenApiType::boolean};
+                            return schema;
+                        };
+                        relation.properties.emplace("isEmpty", boolean_schema());
+                        relation.properties.emplace("isNotEmpty", boolean_schema());
 
-                    root.properties.emplace(
-                        name,
-                        std::make_shared<OpenApiSchema>(std::move(relation)));
+                        root.properties.emplace(
+                            name,
+                            std::make_shared<OpenApiSchema>(std::move(relation)));
+                    }
                 }
             }
         }
