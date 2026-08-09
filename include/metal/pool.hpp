@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <stop_token>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -167,35 +168,38 @@ public:
             }
 
             if (reserved_idle) {
+                bool valid = true;
                 try {
-                    if (state->adapter.validate && !state->adapter.validate(*resource)) {
-                        {
-                            std::lock_guard lock(state->mutex);
-                            if (state->leased != 0) --state->leased;
-                        }
-                        state->destroy_one(std::move(resource));
-                        state->cv.notify_one();
-                        continue;
-                    }
+                    if (state->adapter.validate) valid = state->adapter.validate(*resource);
                 } catch (...) {
                     {
                         std::lock_guard lock(state->mutex);
-                        if (state->leased != 0) --state->leased;
+                        --state->leased;
                     }
                     state->destroy_one_noexcept(std::move(resource));
                     state->cv.notify_one();
                     throw;
                 }
 
+                if (!valid) {
+                    {
+                        std::lock_guard lock(state->mutex);
+                        --state->leased;
+                    }
+                    state->cv.notify_one();
+                    state->destroy_one(std::move(resource));
+                    continue;
+                }
+
                 bool destroyed = false;
                 {
                     std::lock_guard lock(state->mutex);
                     destroyed = state->destroyed;
-                    if (destroyed && state->leased != 0) --state->leased;
+                    if (destroyed) --state->leased;
                 }
                 if (destroyed) {
-                    state->destroy_one(std::move(resource));
                     state->cv.notify_all();
+                    state->destroy_one(std::move(resource));
                     throw std::runtime_error("MetalORM: pool is destroyed");
                 }
                 return Lease{state, std::move(resource)};
@@ -294,7 +298,7 @@ private:
             bool should_destroy = false;
             {
                 std::lock_guard lock(mutex);
-                if (leased != 0) --leased;
+                --leased;
                 should_destroy = destroyed;
                 if (!should_destroy) {
                     idle.push_back({std::move(resource), std::chrono::steady_clock::now()});
@@ -307,7 +311,7 @@ private:
         void destroy_leased_resource(std::unique_ptr<TResource> resource) {
             {
                 std::lock_guard lock(mutex);
-                if (leased != 0) --leased;
+                --leased;
             }
             destroy_one(std::move(resource));
             cv.notify_one();
