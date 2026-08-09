@@ -19,6 +19,16 @@ std::string sqlite_type_name() {
     else static_assert(!sizeof(U), "MetalORM: unsupported SQLite column type");
 }
 
+template <std::meta::info Member>
+std::string sqlite_column_type_name() {
+    if constexpr (reflect::has<mapping::database_type>(Member)) {
+        constexpr auto declared = reflect::annotation<mapping::database_type>(Member);
+        return std::string(declared.name.view());
+    } else {
+        return sqlite_type_name<reflect::member_type_t<Member>>();
+    }
+}
+
 template <reflect::Mapped T>
 std::string create_table_sql(const Dialect& dialect) {
     static_assert(reflect::validate_mapping<T>());
@@ -35,7 +45,7 @@ std::string create_table_sql(const Dialect& dialect) {
         first = false;
 
         const auto name = reflect::column_name<Member>();
-        sql += dialect.quote_identifier(name) + " " + sqlite_type_name<M>();
+        sql += dialect.quote_identifier(name) + " " + sqlite_column_type_name<Member>();
 
         if constexpr (reflect::has<mapping::primary_key_t>(Member)) {
             primary_keys.push_back(name);
