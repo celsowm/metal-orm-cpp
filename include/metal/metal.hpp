@@ -1,6 +1,13 @@
 #pragma once
 
 #include "metal/bulk.hpp"
+#include "metal/cache_types.hpp"
+#include "metal/cache_provider.hpp"
+#include "metal/cache_tag_index.hpp"
+#include "metal/cache_strategy.hpp"
+#include "metal/cache_memory.hpp"
+#include "metal/query_cache_manager.hpp"
+#include "metal/cache_execute.hpp"
 #include "metal/collection.hpp"
 #include "metal/column_defaults.hpp"
 #include "metal/ddl.hpp"
