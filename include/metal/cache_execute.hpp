@@ -166,4 +166,28 @@ auto cache_query(
     return cache_query(std::move(query), std::move(options));
 }
 
+template <detail::CacheableSelectQuery Query>
+auto cache(
+    Query query,
+    CacheOptions options,
+    std::optional<CacheTenantId> tenant_id = std::nullopt) {
+    return cache_query(
+        std::move(query), std::move(options), std::move(tenant_id));
+}
+
+template <detail::CacheableSelectQuery Query>
+auto cache(
+    Query query,
+    std::string key,
+    Duration ttl,
+    std::vector<std::string> tags = {},
+    bool auto_invalidate = false) {
+    return cache_query(
+        std::move(query),
+        std::move(key),
+        ttl,
+        std::move(tags),
+        auto_invalidate);
+}
+
 } // namespace metal
