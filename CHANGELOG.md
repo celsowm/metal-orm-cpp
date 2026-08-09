@@ -2,6 +2,24 @@
 
 All releases currently target GCC 16+ C++26 static reflection and intentionally use SQLite as the only executor/dialect.
 
+## 0.0.20 - 2026-08-09
+
+Tree/MPTT parity baseline.
+
+- Added reflection-native tree mapping annotations: `tree_parent`, `tree_left`, `tree_right`, optional `tree_depth`, and repeatable `tree_scope` members.
+- Added `validate_tree_mapping<T>()` with compile-time checks for required columns, nullable parent keys, PK compatibility and integral nested-set boundaries/depth.
+- Added pure `NestedSetStrategy` helpers for descendant counts, leaf/root detection, ancestor/descendant checks, subtree width, insertion positions, recovery, threading and structural validation.
+- Added reflected `TreeQuery<T>` for ancestors, descendants, direct children, parent lookup, siblings, roots, subtree/tree-list queries, depth lookup, ID lookup and typed multi-tree scope values.
+- Added Session-bound `TreeManager<T>` for node/root/child/descendant/path/sibling/parent reads, threaded descendants, leaf discovery, depth calculation, root/child insertion, sibling movement, subtree movement/deletion, recovery and validation.
+- Reused the existing SELECT/DML AST wherever it can express the operation; tree boundary shifts remain explicit arithmetic UPDATEs instead of introducing a second query compiler.
+- Applied scope predicates to raw boundary-changing mutations, hardening the current TypeScript edge where scoped trees can otherwise rewrite another scope's `lft/rght` values.
+- Hardened subtree moves by isolating the moving range below zero before closing/opening gaps; a positive temporary range can be shifted by the destination-gap update and corrupt the restore delta.
+- Corrected adjacent sibling swapping so both `move_up` and `move_down` use one symmetric subtree-swap algorithm instead of routing downward movement through an upward-only calculation.
+- Added cycle protection against moving a node beneath itself or one of its descendants.
+- Added a real SQLite E2E suite covering scoped insertion, roots/children/descendants/path/depth/leaves/threading, move up/down/to, subtree deletion, recovery, validation and scope isolation.
+- Added compile-fail coverage rejecting non-nullable tree parent columns.
+- Left two explicit Tree edges for the next pass instead of copying questionable behavior: first-class arithmetic scalar AST support for `TreeQuery::find_leaves()`, and clarification/fix of the TypeScript `removeFromTree()` implementation that currently leaves the removed row with stale overlapping boundaries.
+
 ## 0.0.19 - 2026-08-08
 
 Bulk-operation parity release.
