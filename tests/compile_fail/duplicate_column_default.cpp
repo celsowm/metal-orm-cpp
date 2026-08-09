@@ -6,7 +6,7 @@ struct [[=metal::mapping::table{"bad_defaults"}]] BadDefaults {
     [[=metal::mapping::primary_key]]
     std::int64_t id{};
 
-    [[=metal::mapping::default_value{1}, =metal::mapping::default_value{2}]]
+    [[=metal::mapping::default_value{1}, =metal::mapping::default_sql{"2"}]]
     std::int64_t value{};
 };
 
