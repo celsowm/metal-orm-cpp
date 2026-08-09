@@ -120,6 +120,11 @@ if(METAL_ORM_BUILD_TESTS)
         tests/compile_fail/wrong_dto_member.cpp
         "DTO members must belong to the declared entity"
     )
+    metal_expect_compile_failure(
+        duplicate-column-default
+        tests/compile_fail/duplicate_column_default.cpp
+        "a column can declare at most one default annotation"
+    )
 
     enable_testing()
 
@@ -214,4 +219,8 @@ if(METAL_ORM_BUILD_TESTS)
     add_executable(metal-orm-openapi-relations-parity-tests tests/test_openapi_relations_parity.cpp)
     target_link_libraries(metal-orm-openapi-relations-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-openapi-relations-parity-tests COMMAND metal-orm-openapi-relations-parity-tests)
+
+    add_executable(metal-orm-column-default-parity-tests tests/test_column_defaults_parity.cpp)
+    target_link_libraries(metal-orm-column-default-parity-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-column-default-parity-tests COMMAND metal-orm-column-default-parity-tests)
 endif()
