@@ -7,6 +7,8 @@
 #include "metal/domain_events.hpp"
 #include "metal/dto.hpp"
 #include "metal/dto_filter.hpp"
+#include "metal/dto_sort.hpp"
+#include "metal/dto_execute.hpp"
 #include "metal/execution.hpp"
 #include "metal/identity_map.hpp"
 #include "metal/lifecycle.hpp"
