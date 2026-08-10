@@ -124,10 +124,10 @@ int main() {
     const auto payload_schema = schema.properties.at("payload");
     assert(payload_schema->types.size() == 1);
     assert(payload_schema->types.front() == metal::OpenApiType::string);
-    assert(payload_schema->format == std::optional<std::string>{"binary"});
+    assert(payload_schema->format == std::optional<std::string>{"byte"});
 
     const auto optional_schema = schema.properties.at("optional_payload");
-    assert(optional_schema->format == std::optional<std::string>{"binary"});
+    assert(optional_schema->format == std::optional<std::string>{"byte"});
     assert(std::find(
         optional_schema->types.begin(), optional_schema->types.end(),
         metal::OpenApiType::null_value) != optional_schema->types.end());
