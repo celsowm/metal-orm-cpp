@@ -33,9 +33,10 @@ ExpectedTable expected_table(const Dialect& dialect) {
         }
         column.auto_increment = reflect::has<mapping::generated_t>(Member);
 
-        if constexpr (reflect::has<mapping::reference>(Member)) {
-            constexpr auto reference = reflect::annotation<mapping::reference>(Member);
-            constexpr auto target = reference.target_column;
+        if constexpr (reflect::has_physical_reference<Member>()) {
+            using Reference = reflect::physical_reference_annotation_t<Member>;
+            using Traits = mapping::reference_annotation_traits<Reference>;
+            constexpr auto target = Traits::target_column();
             using Target = reflect::owner_type_t<target>;
 
             ForeignKeyReference foreign_key{
@@ -43,12 +44,12 @@ ExpectedTable expected_table(const Dialect& dialect) {
                 .column = reflect::column_name<target>()
             };
 
-            constexpr auto on_delete = mapping::referential_action_sql(reference.on_delete);
+            constexpr auto on_delete = mapping::referential_action_sql(Traits::on_delete);
             if constexpr (!on_delete.empty()) {
                 foreign_key.on_delete = std::string(on_delete);
             }
 
-            constexpr auto on_update = mapping::referential_action_sql(reference.on_update);
+            constexpr auto on_update = mapping::referential_action_sql(Traits::on_update);
             if constexpr (!on_update.empty()) {
                 foreign_key.on_update = std::string(on_update);
             }
