@@ -18,9 +18,9 @@ struct [[=metal::mapping::table{"actual_posts"}]] SchemaPost {
     [[=metal::mapping::primary_key, =metal::mapping::generated]]
     std::int64_t id{};
 
-    [[=metal::mapping::reference{
+    [[=metal::mapping::reference<
         ^^SchemaUser::id,
-        metal::mapping::referential_action::cascade}]]
+        metal::mapping::referential_action::cascade>{}]]
     std::optional<std::int64_t> user_id;
 
     std::string title;
@@ -33,10 +33,10 @@ struct [[=metal::mapping::table{"audit_log"}]] SchemaAudit {
     [[=metal::mapping::primary_key, =metal::mapping::generated]]
     std::int64_t id{};
 
-    [[=metal::mapping::reference{
+    [[=metal::mapping::reference<
         ^^SchemaUser::id,
         metal::mapping::referential_action::set_null,
-        metal::mapping::referential_action::cascade}]]
+        metal::mapping::referential_action::cascade>{}]]
     std::optional<std::int64_t> user_id;
 
     std::string message;
