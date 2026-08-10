@@ -4,9 +4,11 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <string>
+#include <variant>
 
 struct [[=metal::mapping::table{"blob_records"}]] BlobRecord {
     [[=metal::mapping::primary_key, =metal::mapping::generated]]
