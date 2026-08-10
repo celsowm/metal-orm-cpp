@@ -59,11 +59,22 @@ std::string sqlite_reference_sql(const Dialect& dialect) {
     return sql;
 }
 
+template <std::meta::info Member>
+std::string sqlite_column_check_sql() {
+    static_assert(reflect::validate_column_check<Member>());
+    static_assert(reflect::has_column_check<Member>(),
+                  "MetalORM: sqlite_column_check_sql requires a physical check annotation");
+    using Check = reflect::column_check_annotation_t<Member>;
+    using Traits = mapping::check_annotation_traits<Check>;
+    return " CHECK (" + std::string(Traits::expression.view()) + ")";
+}
+
 template <reflect::Mapped T>
 std::string create_table_sql(const Dialect& dialect) {
     static_assert(reflect::validate_mapping<T>());
     static_assert(reflect::validate_column_defaults<T>());
     static_assert(reflect::validate_physical_references<T>());
+    static_assert(reflect::validate_physical_checks<T>());
 
     std::string sql = "CREATE TABLE IF NOT EXISTS " + dialect.quote_identifier(reflect::table_name<T>()) + " (";
     bool first = true;
@@ -97,6 +108,9 @@ std::string create_table_sql(const Dialect& dialect) {
         if constexpr (reflect::has_column_default<Member>()) {
             sql += " DEFAULT " + reflect::column_default_sql<Member>();
         }
+        if constexpr (reflect::has_column_check<Member>()) {
+            sql += sqlite_column_check_sql<Member>();
+        }
         if constexpr (reflect::has_physical_reference<Member>()) {
             sql += sqlite_reference_sql<Member>(dialect);
         }
@@ -110,6 +124,15 @@ std::string create_table_sql(const Dialect& dialect) {
         }
         sql += ")";
     }
+
+    reflect::for_each_table_check<T>([&]<typename Check>() {
+        using Traits = mapping::table_check_annotation_traits<Check>;
+        sql += ", ";
+        if constexpr (Traits::named) {
+            sql += "CONSTRAINT " + dialect.quote_identifier(std::string(Traits::name.view())) + " ";
+        }
+        sql += "CHECK (" + std::string(Traits::expression.view()) + ")";
+    });
 
     sql += ");";
     return sql;
