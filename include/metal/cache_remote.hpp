@@ -41,6 +41,24 @@ public:
         std::string_view prefix) = 0;
 };
 
+namespace cache_remote_detail {
+
+inline std::optional<QueryResult> decode_or_evict(
+    KeyValueBackend& backend,
+    std::string_view key,
+    const std::string& payload) {
+    try {
+        return decode_query_result(payload);
+    } catch (const CacheCodecError&) {
+        // A stale/corrupt cache entry is a miss, not a database-query failure.
+        // Best-effort eviction also prevents repeated decode failures.
+        try { backend.delete_key(key); } catch (...) {}
+        return std::nullopt;
+    }
+}
+
+} // namespace cache_remote_detail
+
 struct KeyValueCacheAdapterOptions {
     bool dispose_backend{false};
 };
@@ -74,11 +92,11 @@ public:
     [[nodiscard]] std::optional<QueryResult> get(std::string_view key) override {
         const auto payload = backend_->get(key);
         if (!payload) return std::nullopt;
-        return decode_query_result(*payload);
+        return cache_remote_detail::decode_or_evict(*backend_, key, *payload);
     }
 
     [[nodiscard]] bool has(std::string_view key) override {
-        return backend_->get(key).has_value();
+        return get(key).has_value();
     }
 
     void set(
@@ -189,11 +207,11 @@ public:
     [[nodiscard]] std::optional<QueryResult> get(std::string_view key) override {
         const auto payload = backend_->get(key);
         if (!payload) return std::nullopt;
-        return decode_query_result(*payload);
+        return cache_remote_detail::decode_or_evict(*backend_, key, *payload);
     }
 
     [[nodiscard]] bool has(std::string_view key) override {
-        return backend_->get(key).has_value();
+        return get(key).has_value();
     }
 
     void set(
