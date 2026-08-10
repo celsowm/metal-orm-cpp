@@ -151,6 +151,9 @@ OpenApiSchema scalar_openapi_schema(OpenApiDialect dialect) {
     } else if constexpr (std::is_floating_point_v<U>) {
         schema.types.push_back(OpenApiType::number);
         schema.format = "double";
+    } else if constexpr (std::same_as<U, Blob>) {
+        schema.types.push_back(OpenApiType::string);
+        schema.format = "binary";
     } else {
         schema.types.push_back(OpenApiType::string);
     }
