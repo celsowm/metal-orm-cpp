@@ -330,6 +330,109 @@ inline std::vector<std::string_view> split_sqlite_table_body(std::string_view cr
     return result;
 }
 
+inline std::optional<std::string> constraint_name_for_reference(
+    std::string_view segment,
+    std::size_t reference_pos) {
+    std::size_t search = 0;
+    while (search < reference_pos) {
+        const auto constraint_pos = find_sql_keyword_top_level(segment, "CONSTRAINT", search);
+        if (constraint_pos == std::string_view::npos || constraint_pos >= reference_pos) break;
+        auto pos = constraint_pos + std::string_view{"CONSTRAINT"}.size();
+        auto name = read_sql_identifier(segment, pos);
+        if (name) {
+            skip_sql_space(segment, pos);
+            if (pos == reference_pos) return name;
+        }
+        search = constraint_pos + std::string_view{"CONSTRAINT"}.size();
+    }
+    return std::nullopt;
+}
+
+inline bool sqlite_reference_is_deferred(
+    std::string_view segment,
+    std::size_t reference_pos) {
+    const auto deferrable_pos = find_sql_keyword_top_level(
+        segment, "DEFERRABLE", reference_pos + std::string_view{"REFERENCES"}.size());
+    if (deferrable_pos == std::string_view::npos) return false;
+
+    const auto not_pos = find_sql_keyword_top_level(
+        segment, "NOT", reference_pos + std::string_view{"REFERENCES"}.size());
+    if (not_pos != std::string_view::npos && not_pos < deferrable_pos) {
+        auto after_not = not_pos + std::string_view{"NOT"}.size();
+        skip_sql_space(segment, after_not);
+        if (after_not == deferrable_pos) return false;
+    }
+
+    auto pos = deferrable_pos + std::string_view{"DEFERRABLE"}.size();
+    skip_sql_space(segment, pos);
+    if (!sql_keyword_at(segment, pos, "INITIALLY")) return false;
+    pos += std::string_view{"INITIALLY"}.size();
+    skip_sql_space(segment, pos);
+    return sql_keyword_at(segment, pos, "DEFERRED");
+}
+
+inline void apply_sqlite_reference_modifiers(
+    DatabaseTable& table,
+    std::string_view column_name,
+    std::string_view segment,
+    std::size_t reference_pos,
+    std::optional<std::string> constraint_name = std::nullopt) {
+    const auto column = std::find_if(
+        table.columns.begin(), table.columns.end(),
+        [&](const DatabaseColumn& candidate) { return candidate.name == column_name; });
+    if (column == table.columns.end() || !column->references) return;
+
+    if (!constraint_name) {
+        constraint_name = constraint_name_for_reference(segment, reference_pos);
+    }
+    column->references->name = std::move(constraint_name);
+    column->references->deferrable = sqlite_reference_is_deferred(segment, reference_pos);
+}
+
+inline void parse_sqlite_foreign_key_modifiers(std::string_view create_sql, DatabaseTable& table) {
+    for (auto segment : split_sqlite_table_body(create_sql)) {
+        if (segment.empty()) continue;
+        std::size_t pos = 0;
+        skip_sql_space(segment, pos);
+
+        std::optional<std::string> table_constraint_name;
+        if (sql_keyword_at(segment, pos, "CONSTRAINT")) {
+            pos += std::string_view{"CONSTRAINT"}.size();
+            table_constraint_name = read_sql_identifier(segment, pos);
+            skip_sql_space(segment, pos);
+        }
+
+        if (sql_keyword_at(segment, pos, "FOREIGN")) {
+            pos += std::string_view{"FOREIGN"}.size();
+            skip_sql_space(segment, pos);
+            if (!sql_keyword_at(segment, pos, "KEY")) continue;
+            pos += std::string_view{"KEY"}.size();
+            skip_sql_space(segment, pos);
+            if (pos >= segment.size() || segment[pos] != '(') continue;
+            const auto child_close = find_sql_matching_paren(segment, pos);
+            if (child_close == std::string_view::npos) continue;
+            auto child_pos = pos + 1;
+            const auto child_column = read_sql_identifier(segment, child_pos);
+            if (!child_column) continue;
+            skip_sql_space(segment, child_pos);
+            if (child_pos != child_close) continue; // composite FKs are not represented by DatabaseColumn::references
+
+            const auto reference_pos = find_sql_keyword_top_level(segment, "REFERENCES", child_close + 1);
+            if (reference_pos == std::string_view::npos) continue;
+            apply_sqlite_reference_modifiers(
+                table, *child_column, segment, reference_pos, std::move(table_constraint_name));
+            continue;
+        }
+
+        pos = 0;
+        const auto column_name = read_sql_identifier(segment, pos);
+        if (!column_name) continue;
+        const auto reference_pos = find_sql_keyword_top_level(segment, "REFERENCES", pos);
+        if (reference_pos == std::string_view::npos) continue;
+        apply_sqlite_reference_modifiers(table, *column_name, segment, reference_pos);
+    }
+}
+
 inline void parse_sqlite_check_constraints(std::string_view create_sql, DatabaseTable& table) {
     for (auto segment : split_sqlite_table_body(create_sql)) {
         if (segment.empty()) continue;
