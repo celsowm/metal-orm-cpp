@@ -109,6 +109,62 @@ consteval bool validate_physical_references() {
 }
 
 template <info Member>
+consteval info column_unique_annotation_info() {
+    info result{};
+    std::size_t count = 0;
+
+    template for (constexpr auto candidate :
+                  std::define_static_array(std::meta::annotations_of(Member))) {
+        using Raw = [: std::meta::type_of(candidate) :];
+        using A = std::remove_cv_t<Raw>;
+        if constexpr (mapping::is_unique_annotation_v<A>) {
+            result = candidate;
+            ++count;
+        }
+    }
+
+    if (count > 1) {
+        throw "MetalORM: a column can declare at most one physical unique annotation";
+    }
+    return result;
+}
+
+template <info Member>
+consteval bool has_column_unique() {
+    return column_unique_annotation_info<Member>() != info{};
+}
+
+template <info Member>
+using column_unique_annotation_t =
+    std::remove_cv_t<[: std::meta::type_of(column_unique_annotation_info<Member>()) :]>;
+
+template <info Member>
+consteval bool validate_column_unique() {
+    static_assert(std::meta::is_nonstatic_data_member(Member),
+                  "MetalORM: column unique constraints require a reflected data member");
+
+    if constexpr (has_column_unique<Member>()) {
+        static_assert(is_persistent_member<Member>(),
+                      "MetalORM: column unique constraints are valid only on persistent scalar members");
+        using Unique = column_unique_annotation_t<Member>;
+        using Traits = mapping::unique_annotation_traits<Unique>;
+        if constexpr (Traits::named) {
+            static_assert(!Traits::name.view().empty(),
+                          "MetalORM: named unique constraint name cannot be empty");
+        }
+    }
+    return true;
+}
+
+template <Mapped T>
+consteval bool validate_physical_uniques() {
+    template for (constexpr auto member : data_members<T>()) {
+        static_assert(validate_column_unique<member>());
+    }
+    return true;
+}
+
+template <info Member>
 consteval info column_check_annotation_info() {
     info result{};
     std::size_t count = 0;
