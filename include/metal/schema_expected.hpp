@@ -48,8 +48,13 @@ ExpectedTable expected_table(const Dialect& dialect) {
 
             ForeignKeyReference foreign_key{
                 .table = reflect::table_name<Target>(),
-                .column = reflect::column_name<target>()
+                .column = reflect::column_name<target>(),
+                .deferrable = Traits::deferrable
             };
+
+            if constexpr (!Traits::constraint_name.view().empty()) {
+                foreign_key.name = std::string(Traits::constraint_name.view());
+            }
 
             constexpr auto on_delete = mapping::referential_action_sql(Traits::on_delete);
             if constexpr (!on_delete.empty()) {
