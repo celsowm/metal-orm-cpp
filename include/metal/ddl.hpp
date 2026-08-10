@@ -38,7 +38,7 @@ std::string sqlite_reference_sql(const Dialect& dialect) {
 
     using Reference = reflect::physical_reference_annotation_t<Member>;
     using Traits = mapping::reference_annotation_traits<Reference>;
-    constexpr auto target = Traits::target_column();
+    constexpr auto target = reflect::physical_reference_target<Member>();
     using Target = reflect::owner_type_t<target>;
 
     std::string sql = " REFERENCES " + dialect.quote_identifier(reflect::table_name<Target>()) +
