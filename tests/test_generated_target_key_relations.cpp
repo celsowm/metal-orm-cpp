@@ -125,8 +125,8 @@ int main() {
     assert(contains(
         generated.code,
         "metal::mapping::belongs_to_key<^^CycleB::a_code, ^^CycleA, \"code\">{}"));
-    assert(contains(generated.code, "metal::belongs_to_reference<CycleB> b;"));
-    assert(contains(generated.code, "metal::belongs_to_reference<CycleA> a;"));
+    assert(contains(generated.code, "metal::belongs_to_reference<CycleB> cycle_b;"));
+    assert(contains(generated.code, "metal::belongs_to_reference<CycleA> cycle_a;"));
     assert(std::none_of(
         generated.warnings.begin(), generated.warnings.end(),
         [](const std::string& warning) {
