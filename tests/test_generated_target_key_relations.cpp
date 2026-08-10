@@ -136,4 +136,44 @@ int main() {
         [](const std::string& warning) {
             return warning.find("rather than the target's single primary key") != std::string::npos;
         }));
+
+    metal::DatabaseSchema composite_schema;
+
+    metal::DatabaseTable composite_target;
+    composite_target.name = "composite_targets";
+    composite_target.primary_key = {"left_id", "right_id"};
+    composite_target.columns = {
+        metal::DatabaseColumn{.name = "left_id", .type = "INTEGER", .not_null = true},
+        metal::DatabaseColumn{.name = "right_id", .type = "INTEGER", .not_null = true},
+        metal::DatabaseColumn{.name = "code", .type = "TEXT", .not_null = true, .unique = true}
+    };
+    composite_schema.tables.push_back(composite_target);
+
+    metal::DatabaseTable composite_source;
+    composite_source.name = "composite_sources";
+    composite_source.primary_key = {"id"};
+    composite_source.columns = {
+        metal::DatabaseColumn{.name = "id", .type = "INTEGER", .not_null = true},
+        metal::DatabaseColumn{
+            .name = "target_code",
+            .type = "TEXT",
+            .references = metal::ForeignKeyReference{
+                .table = "composite_targets",
+                .column = "code"
+            }
+        }
+    };
+    composite_schema.tables.push_back(composite_source);
+
+    const auto composite_generated = metal::generate_entity_header(composite_schema);
+    assert(!contains(
+        composite_generated.code,
+        "metal::belongs_to_reference<CompositeTarget>"));
+    assert(std::any_of(
+        composite_generated.warnings.begin(), composite_generated.warnings.end(),
+        [](const std::string& warning) {
+            return warning.find(
+                "belongs_to_reference requires a target with exactly one primary key") !=
+                std::string::npos;
+        }));
 }
