@@ -11,6 +11,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace metal {
 
@@ -45,6 +46,18 @@ inline std::optional<std::string> normalize_schema_default(
     return text.substr(first, last - first + 1);
 }
 
+inline std::optional<std::string> normalize_check_expression(
+    const std::optional<std::string>& value) {
+    return normalize_schema_default(value);
+}
+
+inline std::string normalize_check_expression(std::string_view value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string_view::npos) return {};
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return std::string(value.substr(first, last - first + 1));
+}
+
 inline std::string normalize_reference_action(const std::optional<std::string>& value) {
     if (!value || value->empty()) return "NO ACTION";
     std::string result = *value;
@@ -64,6 +77,31 @@ inline bool same_reference(
                normalize_reference_action(actual->on_delete) &&
            normalize_reference_action(expected->on_update) ==
                normalize_reference_action(actual->on_update);
+}
+
+inline bool same_check(const DatabaseCheck& expected, const DatabaseCheck& actual) {
+    return expected.name == actual.name &&
+           normalize_check_expression(expected.expression) ==
+               normalize_check_expression(actual.expression);
+}
+
+inline bool same_checks(
+    const std::vector<DatabaseCheck>& expected,
+    const std::vector<DatabaseCheck>& actual) {
+    if (expected.size() != actual.size()) return false;
+    std::vector<bool> matched(actual.size(), false);
+    for (const auto& check : expected) {
+        bool found = false;
+        for (std::size_t i = 0; i < actual.size(); ++i) {
+            if (!matched[i] && same_check(check, actual[i])) {
+                matched[i] = true;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
 }
 
 inline const DatabaseColumn* find_column(const DatabaseTable& table, std::string_view name) {
@@ -94,6 +132,7 @@ inline std::string render_column_definition(const DatabaseColumn& column, const 
     std::string sql = dialect.quote_identifier(column.name) + " " + column.type;
     if (column.not_null) sql += " NOT NULL";
     if (column.default_value) sql += " DEFAULT " + *column.default_value;
+    if (column.check) sql += " CHECK (" + *column.check + ")";
     if (column.references) sql += render_reference_definition(*column.references, dialect);
     return sql;
 }
@@ -178,12 +217,20 @@ inline SchemaPlan diff_schema(
                 normalize_schema_default(column.default_value) !=
                     normalize_schema_default(actual_column->default_value) ||
                 column.auto_increment != actual_column->auto_increment ||
+                normalize_check_expression(column.check) !=
+                    normalize_check_expression(actual_column->check) ||
                 !same_reference(column.references, actual_column->references);
             if (changed) {
                 plan.warnings.push_back(
                     "SQLite ALTER COLUMN is not supported; rebuild table " +
                     expected_table.name + " to change column " + column.name + ".");
             }
+        }
+
+        if (!same_checks(expected_table.checks, actual_table.checks)) {
+            plan.warnings.push_back(
+                "SQLite table CHECK constraints on " + expected_table.name +
+                " differ from the expected definition; rebuild the table to change them.");
         }
 
         for (const auto& column : actual_table.columns) {
