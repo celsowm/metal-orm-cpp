@@ -34,11 +34,17 @@ constexpr std::string_view referential_action_sql(referential_action action) noe
  *
  * ORM relation annotations such as belongs_to remain independent from this
  * declaration. A relation does not imply a database constraint.
+ *
+ * ConstraintName is the optional physical constraint name. Deferrable follows
+ * the TypeScript ForeignKeyReference boolean contract: true means
+ * DEFERRABLE INITIALLY DEFERRED on dialects that support deferred constraints.
  */
 template <
     std::meta::info TargetColumn,
     referential_action OnDelete = referential_action::unspecified,
-    referential_action OnUpdate = referential_action::unspecified>
+    referential_action OnUpdate = referential_action::unspecified,
+    fixed_text ConstraintName = "",
+    bool Deferrable = false>
 struct reference {};
 
 /**
@@ -54,7 +60,9 @@ template <
     std::meta::info TargetType,
     fixed_text TargetColumn,
     referential_action OnDelete = referential_action::unspecified,
-    referential_action OnUpdate = referential_action::unspecified>
+    referential_action OnUpdate = referential_action::unspecified,
+    fixed_text ConstraintName = "",
+    bool Deferrable = false>
 struct reference_to {};
 
 template <typename T>
@@ -65,12 +73,17 @@ struct reference_annotation_traits {
 template <
     std::meta::info TargetColumn,
     referential_action OnDelete,
-    referential_action OnUpdate>
-struct reference_annotation_traits<reference<TargetColumn, OnDelete, OnUpdate>> {
+    referential_action OnUpdate,
+    fixed_text ConstraintName,
+    bool Deferrable>
+struct reference_annotation_traits<
+    reference<TargetColumn, OnDelete, OnUpdate, ConstraintName, Deferrable>> {
     static constexpr bool value = true;
     static constexpr bool by_member = true;
     static constexpr referential_action on_delete = OnDelete;
     static constexpr referential_action on_update = OnUpdate;
+    static constexpr auto constraint_name = ConstraintName;
+    static constexpr bool deferrable = Deferrable;
     static consteval std::meta::info target_column() { return TargetColumn; }
 };
 
@@ -78,13 +91,18 @@ template <
     std::meta::info TargetType,
     fixed_text TargetColumn,
     referential_action OnDelete,
-    referential_action OnUpdate>
-struct reference_annotation_traits<reference_to<TargetType, TargetColumn, OnDelete, OnUpdate>> {
+    referential_action OnUpdate,
+    fixed_text ConstraintName,
+    bool Deferrable>
+struct reference_annotation_traits<
+    reference_to<TargetType, TargetColumn, OnDelete, OnUpdate, ConstraintName, Deferrable>> {
     static constexpr bool value = true;
     static constexpr bool by_member = false;
     static constexpr referential_action on_delete = OnDelete;
     static constexpr referential_action on_update = OnUpdate;
     static constexpr auto target_column_name = TargetColumn;
+    static constexpr auto constraint_name = ConstraintName;
+    static constexpr bool deferrable = Deferrable;
     static consteval std::meta::info target_type() { return TargetType; }
 };
 
