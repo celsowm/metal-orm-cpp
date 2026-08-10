@@ -37,6 +37,44 @@ template <info Member>
 using physical_reference_annotation_t =
     std::remove_cv_t<[: std::meta::type_of(physical_reference_annotation_info<Member>()) :]>;
 
+template <typename Reference>
+consteval info resolve_physical_reference_target() {
+    using Traits = mapping::reference_annotation_traits<Reference>;
+    if constexpr (Traits::by_member) {
+        return Traits::target_column();
+    } else {
+        constexpr auto target_type = Traits::target_type();
+        static_assert(std::meta::is_type(target_type),
+                      "MetalORM: reference_to target must reflect a mapped type");
+        using Target = [: target_type :];
+        static_assert(Mapped<Target>,
+                      "MetalORM: reference_to target must be a mapped type");
+
+        info result{};
+        std::size_t count = 0;
+        template for (constexpr auto candidate : data_members<Target>()) {
+            if constexpr (is_persistent_member<candidate>()) {
+                if constexpr (column_name_view<candidate>() == Traits::target_column_name.view()) {
+                    result = candidate;
+                    ++count;
+                }
+            }
+        }
+        if (count != 1) {
+            throw "MetalORM: reference_to target column must resolve to exactly one persistent member";
+        }
+        return result;
+    }
+}
+
+template <info Member>
+consteval info physical_reference_target() {
+    static_assert(has_physical_reference<Member>(),
+                  "MetalORM: physical_reference_target requires a physical reference annotation");
+    using Reference = physical_reference_annotation_t<Member>;
+    return resolve_physical_reference_target<Reference>();
+}
+
 template <info Member>
 consteval bool validate_physical_reference() {
     static_assert(std::meta::is_nonstatic_data_member(Member),
@@ -46,9 +84,7 @@ consteval bool validate_physical_reference() {
         static_assert(is_persistent_member<Member>(),
                       "MetalORM: physical references are valid only on persistent scalar members");
 
-        using Reference = physical_reference_annotation_t<Member>;
-        using Traits = mapping::reference_annotation_traits<Reference>;
-        constexpr auto target = Traits::target_column();
+        constexpr auto target = physical_reference_target<Member>();
         static_assert(std::meta::is_nonstatic_data_member(target),
                       "MetalORM: reference target must reflect a data member");
 
