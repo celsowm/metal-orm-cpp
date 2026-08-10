@@ -26,11 +26,37 @@ struct [[=metal::mapping::table{"posts"}]] Post {
 };
 ```
 
-`mapping::reference<TargetColumn, OnDelete, OnUpdate>` is reflection-native. The referenced member must belong to a mapped type, both sides must be persistent scalar columns, and their underlying value types must be compatible. Invalid mappings fail at compile time.
+`mapping::reference<TargetColumn, OnDelete, OnUpdate>` is the direct member-reflection form. The referenced member must belong to a mapped type, both sides must be persistent scalar columns, and their underlying value types must be compatible. Invalid mappings fail at compile time.
 
 Supported referential actions are `unspecified`, `no_action`, `restrict`, `cascade`, `set_null` and `set_default`.
 
 The diff treats an omitted action and SQLite's introspected `NO ACTION` as semantically equivalent, avoiding false rebuild warnings.
+
+### Generated and cyclic foreign keys
+
+Database-to-entity generation uses an equivalent form that does not require the target member to be nameable while the target type is still only forward-declared:
+
+```cpp
+struct User;
+
+struct [[=metal::mapping::table{"posts"}]] Post {
+    [[=metal::mapping::primary_key]]
+    std::int64_t id{};
+
+    [[=metal::mapping::reference_to<
+        ^^User,
+        "id",
+        metal::mapping::referential_action::cascade>{}]]
+    std::optional<std::int64_t> user_id;
+};
+
+struct [[=metal::mapping::table{"users"}]] User {
+    [[=metal::mapping::primary_key]]
+    std::int64_t id{};
+};
+```
+
+`reference_to<TargetType, TargetPhysicalColumn, OnDelete, OnUpdate>` is still reflection-validated. Once the generated types are complete, MetalORM resolves the physical column name to exactly one persistent reflected target member and performs the same type-compatibility validation as `reference<^^Target::member>`. This makes generated self-references and cyclic schemas possible without replacing the C++26 metadata model with a runtime registry.
 
 ## Column CHECK constraints
 
@@ -78,7 +104,8 @@ For SQLite, the same explicit metadata now drives:
 3. reflection-derived expected schema metadata;
 4. `pragma_foreign_key_list` introspection for foreign keys;
 5. `sqlite_master.sql` parsing for column and table CHECK constraints;
-6. schema diff comparison.
+6. schema diff comparison;
+7. database-to-C++ entity generation, including FK actions, column checks and named/unnamed table checks.
 
 SQLite has no dedicated CHECK-introspection PRAGMA. MetalORM therefore parses the stored `CREATE TABLE` statement with a small SQL-aware scanner. It splits only top-level table elements and tracks nested parentheses, quoted strings, quoted identifiers, line comments and block comments. Expressions such as function calls containing commas or literals containing parentheses are preserved rather than being split by a regular expression.
 
