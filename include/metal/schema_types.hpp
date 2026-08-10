@@ -19,6 +19,8 @@ struct DatabaseColumn {
     std::string name;
     std::string type;
     bool not_null{false};
+    bool unique{false};
+    std::optional<std::string> unique_name;
     std::optional<std::string> default_value;
     bool auto_increment{false};
     std::optional<ForeignKeyReference> references;
