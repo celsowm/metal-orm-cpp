@@ -41,6 +41,22 @@ template <
     referential_action OnUpdate = referential_action::unspecified>
 struct reference {};
 
+/**
+ * Code-generation-safe physical reference.
+ *
+ * TargetType is reflected directly while TargetColumn is the target's physical
+ * database column name. This avoids requiring a target data-member expression
+ * while the generated target type may still only be forward-declared. The
+ * column name is resolved back to a persistent reflected member during mapping
+ * validation after all generated types are complete.
+ */
+template <
+    std::meta::info TargetType,
+    fixed_text TargetColumn,
+    referential_action OnDelete = referential_action::unspecified,
+    referential_action OnUpdate = referential_action::unspecified>
+struct reference_to {};
+
 template <typename T>
 struct reference_annotation_traits {
     static constexpr bool value = false;
@@ -52,9 +68,24 @@ template <
     referential_action OnUpdate>
 struct reference_annotation_traits<reference<TargetColumn, OnDelete, OnUpdate>> {
     static constexpr bool value = true;
+    static constexpr bool by_member = true;
     static constexpr referential_action on_delete = OnDelete;
     static constexpr referential_action on_update = OnUpdate;
     static consteval std::meta::info target_column() { return TargetColumn; }
+};
+
+template <
+    std::meta::info TargetType,
+    fixed_text TargetColumn,
+    referential_action OnDelete,
+    referential_action OnUpdate>
+struct reference_annotation_traits<reference_to<TargetType, TargetColumn, OnDelete, OnUpdate>> {
+    static constexpr bool value = true;
+    static constexpr bool by_member = false;
+    static constexpr referential_action on_delete = OnDelete;
+    static constexpr referential_action on_update = OnUpdate;
+    static constexpr auto target_column_name = TargetColumn;
+    static consteval std::meta::info target_type() { return TargetType; }
 };
 
 template <typename T>
