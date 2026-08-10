@@ -17,6 +17,7 @@ ExpectedTable expected_table(const Dialect& dialect) {
     static_assert(reflect::validate_mapping<T>());
     static_assert(reflect::validate_column_defaults<T>());
     static_assert(reflect::validate_physical_references<T>());
+    static_assert(reflect::validate_physical_checks<T>());
 
     ExpectedTable expected;
     expected.table.name = reflect::table_name<T>();
@@ -32,6 +33,12 @@ ExpectedTable expected_table(const Dialect& dialect) {
             column.default_value = reflect::column_default_sql<Member>();
         }
         column.auto_increment = reflect::has<mapping::generated_t>(Member);
+
+        if constexpr (reflect::has_column_check<Member>()) {
+            using Check = reflect::column_check_annotation_t<Member>;
+            using Traits = mapping::check_annotation_traits<Check>;
+            column.check = std::string(Traits::expression.view());
+        }
 
         if constexpr (reflect::has_physical_reference<Member>()) {
             using Reference = reflect::physical_reference_annotation_t<Member>;
@@ -61,6 +68,16 @@ ExpectedTable expected_table(const Dialect& dialect) {
         if constexpr (reflect::has<mapping::primary_key_t>(Member)) {
             expected.table.primary_key.push_back(reflect::column_name<Member>());
         }
+    });
+
+    reflect::for_each_table_check<T>([&]<typename Check>() {
+        using Traits = mapping::table_check_annotation_traits<Check>;
+        DatabaseCheck check;
+        check.expression = std::string(Traits::expression.view());
+        if constexpr (Traits::named) {
+            check.name = std::string(Traits::name.view());
+        }
+        expected.table.checks.push_back(std::move(check));
     });
 
     return expected;
