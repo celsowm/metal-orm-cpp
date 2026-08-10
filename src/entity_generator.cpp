@@ -143,7 +143,7 @@ void append_comment(std::ostringstream& out, const std::optional<std::string>& c
     while (std::getline(input, line)) out << indent << "/// " << line << '\n';
 }
 
-enum class ScalarKind { Integer, Real, Boolean, Text };
+enum class ScalarKind { Integer, Real, Boolean, Text, Blob };
 
 struct CppType {
     ScalarKind kind{ScalarKind::Text};
@@ -163,10 +163,7 @@ CppType map_type(const DatabaseTable& table, const DatabaseColumn& column, std::
     }
     if (type.find("BLOB") != std::string::npos || type.find("BINARY") != std::string::npos ||
         type.find("BYTEA") != std::string::npos) {
-        warnings.push_back(
-            "Column " + table.name + "." + column.name + " uses " + column.type +
-            "; generated as std::string because the current Value/SQLiteExecutor surface has no BLOB value type yet.");
-        return {ScalarKind::Text, "std::string"};
+        return {ScalarKind::Blob, "metal::Blob"};
     }
     if (type.empty() || type.find("CHAR") != std::string::npos || type.find("CLOB") != std::string::npos ||
         type.find("TEXT") != std::string::npos || type.find("DATE") != std::string::npos ||
@@ -247,8 +244,10 @@ std::optional<std::string> default_annotation(
         }
     }
 
-    if (const auto text = unquote_sql_text(value)) {
-        return "metal::mapping::default_text{\"" + cpp_string(*text) + "\"}";
+    if (type.kind != ScalarKind::Blob) {
+        if (const auto text = unquote_sql_text(value)) {
+            return "metal::mapping::default_text{\"" + cpp_string(*text) + "\"}";
+        }
     }
 
     return "metal::mapping::default_sql{\"" + cpp_string(value) + "\"}";
