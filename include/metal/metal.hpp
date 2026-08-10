@@ -21,6 +21,7 @@
 #include "metal/dto_execute.hpp"
 #include "metal/dto_relation_execute.hpp"
 #include "metal/entity_generator.hpp"
+#include "metal/view_generator.hpp"
 #include "metal/execution.hpp"
 #include "metal/pool.hpp"
 #include "metal/pooling.hpp"
@@ -52,4 +53,5 @@
 #include "metal/openapi_tree.hpp"
 #include "metal/unit_of_work.hpp"
 #include "metal/value.hpp"
+#include "metal/view.hpp"
 #include "metal/version.hpp"
