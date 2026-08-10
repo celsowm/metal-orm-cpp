@@ -254,6 +254,23 @@ std::optional<std::string> default_annotation(
     return "metal::mapping::default_sql{\"" + cpp_string(value) + "\"}";
 }
 
+std::string referential_action_annotation(
+    const std::optional<std::string>& action,
+    std::vector<std::string>& warnings,
+    std::string_view context) {
+    if (!action || action->empty()) return "metal::mapping::referential_action::unspecified";
+    const auto normalized = uppercase(trim(*action));
+    if (normalized == "NO ACTION") return "metal::mapping::referential_action::no_action";
+    if (normalized == "RESTRICT") return "metal::mapping::referential_action::restrict";
+    if (normalized == "CASCADE") return "metal::mapping::referential_action::cascade";
+    if (normalized == "SET NULL") return "metal::mapping::referential_action::set_null";
+    if (normalized == "SET DEFAULT") return "metal::mapping::referential_action::set_default";
+    warnings.push_back(
+        "Foreign key " + std::string(context) + " uses unsupported referential action '" + *action +
+        "'; generated as unspecified.");
+    return "metal::mapping::referential_action::unspecified";
+}
+
 std::unordered_map<std::string, std::string> make_class_names(const DatabaseSchema& schema) {
     std::unordered_map<std::string, std::string> result;
     std::unordered_set<std::string> used;
@@ -320,8 +337,27 @@ GeneratedEntityHeader generate_entity_header(
         for (const auto& [_, name] : members) used_members.insert(name);
 
         if (options.emit_comments) append_comment(out, table.comment, "");
-        out << "struct [[=metal::mapping::table{\"" << cpp_string(table.name) << "\"}]] "
-            << type_name << " {\n";
+
+        std::vector<std::string> type_annotations{
+            "metal::mapping::table{\"" + cpp_string(table.name) + "\"}"
+        };
+        for (const auto& check : table.checks) {
+            if (check.name) {
+                type_annotations.push_back(
+                    "metal::mapping::named_table_check<\"" + cpp_string(*check.name) + "\", \"" +
+                    cpp_string(check.expression) + "\">{}");
+            } else {
+                type_annotations.push_back(
+                    "metal::mapping::table_check<\"" + cpp_string(check.expression) + "\">{}");
+            }
+        }
+
+        out << "struct [[";
+        for (std::size_t i = 0; i < type_annotations.size(); ++i) {
+            if (i) out << ", ";
+            out << '=' << type_annotations[i];
+        }
+        out << "]] " << type_name << " {\n";
 
         for (const auto& column : table.columns) {
             const auto cpp_type = map_type(table, column, result.warnings);
@@ -338,6 +374,27 @@ GeneratedEntityHeader generate_entity_header(
                 annotations.push_back("metal::mapping::database_type{\"" + cpp_string(column.type) + "\"}");
             }
             if (const auto def = default_annotation(column, cpp_type)) annotations.push_back(*def);
+            if (column.check) {
+                annotations.push_back(
+                    "metal::mapping::check<\"" + cpp_string(*column.check) + "\">{}");
+            }
+            if (column.references) {
+                const auto* target = find_table(schema, column.references->table);
+                if (target) {
+                    const auto context = table.name + "." + column.name;
+                    const auto on_delete = referential_action_annotation(
+                        column.references->on_delete, result.warnings, context);
+                    const auto on_update = referential_action_annotation(
+                        column.references->on_update, result.warnings, context);
+                    annotations.push_back(
+                        "metal::mapping::reference_to<^^" + classes.at(target->name) + ", \"" +
+                        cpp_string(column.references->column) + "\", " + on_delete + ", " + on_update + ">{}");
+                } else {
+                    result.warnings.push_back(
+                        "Foreign key " + table.name + "." + column.name + " references excluded/unavailable table " +
+                        column.references->table + "; physical reference annotation was not generated.");
+                }
+            }
 
             if (options.emit_comments) append_comment(out, column.comment, "    ");
             if (!annotations.empty()) {
@@ -370,7 +427,7 @@ GeneratedEntityHeader generate_entity_header(
                     result.warnings.push_back(
                         "Foreign key " + table.name + "." + column.name + " targets " + target->name + "." +
                         column.references->column + " rather than the target's single primary key; relation wrapper was not generated "
-                        "because C++ reflection would require a target-member dependency cycle.");
+                        "because the current generated belongs_to surface defaults to the target primary key.");
                     continue;
                 }
 
