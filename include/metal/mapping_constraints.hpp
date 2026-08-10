@@ -4,6 +4,7 @@
 
 #include <meta>
 #include <string_view>
+#include <type_traits>
 
 namespace metal::mapping {
 
@@ -34,18 +35,30 @@ constexpr std::string_view referential_action_sql(referential_action action) noe
  * ORM relation annotations such as belongs_to remain independent from this
  * declaration. A relation does not imply a database constraint.
  */
-struct reference {
-    std::meta::info target_column{};
-    referential_action on_delete{referential_action::unspecified};
-    referential_action on_update{referential_action::unspecified};
+template <
+    std::meta::info TargetColumn,
+    referential_action OnDelete = referential_action::unspecified,
+    referential_action OnUpdate = referential_action::unspecified>
+struct reference {};
 
-    consteval reference(
-        std::meta::info target,
-        referential_action delete_action = referential_action::unspecified,
-        referential_action update_action = referential_action::unspecified)
-        : target_column(target),
-          on_delete(delete_action),
-          on_update(update_action) {}
+template <typename T>
+struct reference_annotation_traits {
+    static constexpr bool value = false;
 };
+
+template <
+    std::meta::info TargetColumn,
+    referential_action OnDelete,
+    referential_action OnUpdate>
+struct reference_annotation_traits<reference<TargetColumn, OnDelete, OnUpdate>> {
+    static constexpr bool value = true;
+    static constexpr referential_action on_delete = OnDelete;
+    static constexpr referential_action on_update = OnUpdate;
+    static consteval std::meta::info target_column() { return TargetColumn; }
+};
+
+template <typename T>
+inline constexpr bool is_reference_annotation_v =
+    reference_annotation_traits<std::remove_cv_t<T>>::value;
 
 } // namespace metal::mapping
