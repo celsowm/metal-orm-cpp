@@ -33,7 +33,7 @@ std::vector<std::string> split_csv(std::string_view value) {
 void usage(std::ostream& out) {
     out <<
         "metal-orm-gen " METAL_ORM_VERSION "\n"
-        "Generate C++26 MetalORM entities from an SQLite database.\n\n"
+        "Generate C++26 MetalORM models from an SQLite database.\n\n"
         "Usage:\n"
         "  metal-orm-gen --db=app.sqlite [--out=entities.hpp] [options]\n\n"
         "Options:\n"
@@ -42,7 +42,7 @@ void usage(std::ostream& out) {
         "  --namespace=NAME      Generated namespace (default: entities)\n"
         "  --include=a,b         Only introspect named tables\n"
         "  --exclude=a,b         Exclude named tables\n"
-        "  --include-views       Introspect views (reported as warnings until mapped-view support lands)\n"
+        "  --include-views       Generate introspected views as read-only mapped models\n"
         "  --no-relations        Do not emit belongs_to relation wrappers from foreign keys\n"
         "  --no-comments         Do not emit schema comments as /// documentation\n"
         "  --version             Print version\n"
@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
     try {
         const auto options = parse(argc, argv);
         metal::SQLiteExecutor executor{options.database};
-        const auto generated = metal::generate_sqlite_entity_header(
+        const auto generated = metal::generate_sqlite_model_header(
             executor,
             options.generator,
             options.introspection);
