@@ -2,6 +2,7 @@
 
 #include "metal/execution.hpp"
 #include "metal/schema_types.hpp"
+#include "metal/sqlite_ddl_parser.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -140,6 +141,8 @@ inline DatabaseSchema introspect_sqlite(
             }
             table.columns.push_back(std::move(column));
         }
+
+        parse_sqlite_check_constraints(create_sql, table);
 
         std::vector<std::pair<std::int64_t, std::string>> primary_key;
         for (const auto& info : columns.rows) {
