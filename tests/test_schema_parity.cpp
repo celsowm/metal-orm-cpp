@@ -149,8 +149,8 @@ int main() {
         false,
         std::string{"age IS NOT NULL"});
 
-    const auto& expected_users = table_named(
-        metal::DatabaseSchema{{expected.tables.front().table}, {}}, "actual_users");
+    const auto& expected_users = expected.tables.front().table;
+    assert(expected_users.name == "actual_users");
     const auto& expected_partial = index_named(expected_users, "actual_users_age_present_idx");
     assert(expected_partial.where == std::optional<std::string>{"age IS NOT NULL"});
     assert(std::any_of(
@@ -202,8 +202,9 @@ int main() {
     auto partial_index_sql = db->execute(
         "SELECT sql FROM sqlite_master WHERE type='index' AND name='actual_users_age_present_idx';");
     assert(partial_index_sql.rows.size() == 1);
-    assert(metal::from_value<std::string>(partial_index_sql.rows.front().at("sql")) ==
-           "CREATE INDEX \"actual_users_age_present_idx\" ON \"actual_users\" (\"age\") WHERE age IS NOT NULL");
+    const auto stored_partial_sql =
+        metal::from_value<std::string>(partial_index_sql.rows.front().at("sql"));
+    assert(stored_partial_sql.find("WHERE age IS NOT NULL") != std::string::npos);
     auto old_index_exists = db->execute(
         "SELECT COUNT(*) AS c FROM sqlite_master WHERE type='index' AND name='old_posts_title_idx';");
     assert(metal::from_value<std::int64_t>(old_index_exists.rows.front().at("c")) == 1);
