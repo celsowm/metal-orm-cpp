@@ -433,6 +433,74 @@ inline void parse_sqlite_foreign_key_modifiers(std::string_view create_sql, Data
     }
 }
 
+inline std::optional<std::string> constraint_name_for_unique(
+    std::string_view segment,
+    std::size_t unique_pos) {
+    std::size_t search = 0;
+    while (search < unique_pos) {
+        const auto constraint_pos = find_sql_keyword_top_level(segment, "CONSTRAINT", search);
+        if (constraint_pos == std::string_view::npos || constraint_pos >= unique_pos) break;
+        auto pos = constraint_pos + std::string_view{"CONSTRAINT"}.size();
+        auto name = read_sql_identifier(segment, pos);
+        if (name) {
+            skip_sql_space(segment, pos);
+            if (pos == unique_pos) return name;
+        }
+        search = constraint_pos + std::string_view{"CONSTRAINT"}.size();
+    }
+    return std::nullopt;
+}
+
+inline void apply_sqlite_column_unique(
+    DatabaseTable& table,
+    std::string_view column_name,
+    std::optional<std::string> constraint_name = std::nullopt) {
+    const auto column = std::find_if(
+        table.columns.begin(), table.columns.end(),
+        [&](const DatabaseColumn& candidate) { return candidate.name == column_name; });
+    if (column == table.columns.end()) return;
+    column->unique = true;
+    column->unique_name = std::move(constraint_name);
+}
+
+inline void parse_sqlite_unique_constraints(std::string_view create_sql, DatabaseTable& table) {
+    for (auto segment : split_sqlite_table_body(create_sql)) {
+        if (segment.empty()) continue;
+        std::size_t pos = 0;
+        skip_sql_space(segment, pos);
+
+        std::optional<std::string> table_constraint_name;
+        if (sql_keyword_at(segment, pos, "CONSTRAINT")) {
+            pos += std::string_view{"CONSTRAINT"}.size();
+            table_constraint_name = read_sql_identifier(segment, pos);
+            skip_sql_space(segment, pos);
+        }
+
+        if (sql_keyword_at(segment, pos, "UNIQUE")) {
+            pos += std::string_view{"UNIQUE"}.size();
+            skip_sql_space(segment, pos);
+            if (pos >= segment.size() || segment[pos] != '(') continue;
+            const auto close = find_sql_matching_paren(segment, pos);
+            if (close == std::string_view::npos) continue;
+            auto column_pos = pos + 1;
+            const auto column_name = read_sql_identifier(segment, column_pos);
+            if (!column_name) continue;
+            skip_sql_space(segment, column_pos);
+            if (column_pos != close) continue; // composite/expression UNIQUE is represented separately from column metadata
+            apply_sqlite_column_unique(table, *column_name, std::move(table_constraint_name));
+            continue;
+        }
+
+        pos = 0;
+        const auto column_name = read_sql_identifier(segment, pos);
+        if (!column_name) continue;
+        const auto unique_pos = find_sql_keyword_top_level(segment, "UNIQUE", pos);
+        if (unique_pos == std::string_view::npos) continue;
+        apply_sqlite_column_unique(
+            table, *column_name, constraint_name_for_unique(segment, unique_pos));
+    }
+}
+
 inline void parse_sqlite_check_constraints(std::string_view create_sql, DatabaseTable& table) {
     for (auto segment : split_sqlite_table_body(create_sql)) {
         if (segment.empty()) continue;
