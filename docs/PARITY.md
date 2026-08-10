@@ -6,7 +6,7 @@ MetalORM C++ intentionally targets C++26 static reflection rather than providing
 
 SQLite is intentionally the only concrete backend while semantic parity is built out.
 
-Current release: **0.0.33**.
+Current release: **0.0.34**.
 
 Legend:
 
@@ -24,10 +24,11 @@ Legend:
 | Primary/generated columns | ✅ | `consteval` validated |
 | Declared database types | ✅ | `database_type` preserved through schema/codegen |
 | Reflected database defaults | ✅ | typed literal/text/null + raw SQL annotations |
-| Identity Map | ✅ | separate runtime component |
+| Native binary scalar values | ✅ | `metal::Blob` (`std::vector<std::byte>`) is a first-class `Value` alternative |
+| Identity Map | ✅ | separate runtime component; binary keys have stable hex identity keys |
 | Unit of Work | ✅ | separate component; shared DML AST |
 | Session coordinator | ✅ | coordinates UoW, Identity Map and relation processor |
-| Dirty snapshots | ✅ | reflection-generated |
+| Dirty snapshots | ✅ | reflection-generated, including binary members |
 | Persist/remove lifecycle | ✅ | aligned with TS semantics |
 | Transactional `commit()` | ✅ | executor capabilities + rollback restoration |
 | Nested transactions/savepoints | ✅ | BEGIN outer; SAVEPOINT/RELEASE inner |
@@ -60,7 +61,7 @@ Raw `std::shared_ptr<T>` is not accepted as the reflected shape for `belongsTo`/
 | MetalORM capability | C++ status | Notes |
 | --- | --- | --- |
 | Typed SELECT AST | ✅ | compile-time entity scope |
-| comparisons/logical predicates | ✅ | typed scalar operands |
+| comparisons/logical predicates | ✅ | typed scalar operands, including BLOB equality/range operands where SQLite supports them |
 | scalar arithmetic `+ - * / %` | ✅ | recursive scalar AST |
 | IN / NULL / LIKE | ✅ | values and subqueries |
 | BETWEEN / NOT BETWEEN | ✅ | first-class expression AST |
@@ -82,6 +83,7 @@ Raw `std::shared_ptr<T>` is not accepted as the reflected shape for `belongsTo`/
 | RETURNING | ✅ | INSERT/UPDATE/DELETE |
 | SQLite UPSERT | ✅ | conflict target, DO NOTHING/UPDATE, `excluded()` |
 | DML typed predicate reuse | ✅ | UPDATE/DELETE reuse `Expression<T>` |
+| SQLite binary parameter/result transport | ✅ | bind/read uses SQLite BLOB APIs; empty BLOB remains distinct from NULL |
 
 ## Relation queries and pagination
 
@@ -132,6 +134,7 @@ Boundary-changing mutations are scope-aware. Moving subtrees are isolated below 
 | safe dynamic sorting | ✅ | reflected allowlist + PK tie-breaker |
 | paged DTO execution | ✅ | reuses Session root pagination |
 | DTO/OpenAPI schemas | ✅ | response/create/update/filter/pagination |
+| binary OpenAPI schema | ✅ | `metal::Blob` -> `type: string`, `format: binary` |
 | nested relation OpenAPI | ✅ | single/collection shapes + components |
 | Tree OpenAPI | ✅ | reflected Tree schemas |
 
@@ -146,7 +149,7 @@ Boundary-changing mutations are scope-aware. Moving subtrees are isolated below 
 | tenant-aware keys | ✅ | same `tenant:<id>:<key>` contract |
 | TTL / tags / prefix invalidation | ✅ | MemoryCacheAdapter |
 | statistics / clear / dispose | ✅ | capability-based |
-| cached entity rehydration | ✅ | reuses Session + Identity Map |
+| cached entity rehydration | ✅ | reuses Session + Identity Map; `QueryResult` can contain BLOB values |
 | relation-query cache wrapper | ✅ | same execute-around path |
 | first-party remote adapter | 🟡 | provider extension exists; no mandatory Redis client dependency yet |
 
@@ -167,7 +170,7 @@ SQLite correctly rejects stored procedures because SQLite has no stored-procedur
 | concurrent selection safety | ✅ | serialized lease selection regression fixed |
 | SQLite integration | ✅ | respects one-handle serialization semantics |
 
-## DB-to-entity generation — 0.0.28 / 0.0.31–0.0.33
+## DB-to-entity generation — 0.0.28 / 0.0.31–0.0.34
 
 | Capability | C++ status | Notes |
 | --- | --- | --- |
@@ -175,6 +178,7 @@ SQLite correctly rejects stored procedures because SQLite has no stored-procedur
 | declared SQL types | ✅ | `database_type` |
 | defaults | ✅ | typed/default_sql annotations |
 | comments | ✅ | optional emitted docs |
+| BLOB/BINARY/BYTEA members | ✅ | generated as `metal::Blob`, no text fallback |
 | belongsTo wrappers from FKs | ✅/🟡 | generated when target can use current relation shape |
 | physical FK preservation | ✅ | `reference_to<^^Target, "physical_column", ...>` |
 | FK ON DELETE / ON UPDATE actions | ✅ | reflected `referential_action` |
@@ -196,6 +200,7 @@ SQLite correctly rejects stored procedures because SQLite has no stored-procedur
 | composite PK DDL | ✅ | validated |
 | column defaults | ✅ | literal/text/null/raw |
 | column UNIQUE declaration | ✅ | unnamed and named reflected annotations |
+| native BLOB affinity | ✅ | `metal::Blob` maps to `BLOB` without custom `database_type` |
 | user indexes | ✅ | expected metadata + introspection |
 | partial indexes | ✅ | `WHERE` round-trip |
 | schema comments convention | ✅ | optional `schema_comments` metadata |
@@ -265,6 +270,24 @@ struct [[
 
 The stored-DDL scanner tracks nested parentheses, strings, quoted identifiers and comments, and only splits table elements on top-level commas. FK/UNIQUE/CHECK mismatches on existing tables produce explicit rebuild warnings rather than fake ALTER SQL. A missing UNIQUE column also requires rebuild because SQLite rejects `ALTER TABLE ADD COLUMN ... UNIQUE`.
 
+## Native binary values — 0.0.34
+
+Binary columns use a distinct public scalar instead of overloading `std::string`:
+
+```cpp
+struct [[=metal::mapping::table{"files"}]] File {
+    [[=metal::mapping::primary_key, =metal::mapping::generated]]
+    std::int64_t id{};
+
+    metal::Blob contents;
+    std::optional<metal::Blob> thumbnail;
+};
+```
+
+`metal::Blob` is `std::vector<std::byte>` and participates in `Value`, reflection persistence, snapshots, typed query operands, DTO rows and cached `QueryResult`s. SQLite uses the BLOB binding/result APIs rather than text conversion, so embedded zero bytes and arbitrary octets are preserved. Empty BLOB is intentionally bound with a non-null pointer and zero length, keeping it distinct from SQL `NULL`.
+
+DB-to-C++ generation maps `BLOB`, `BINARY`, `VARBINARY` and `BYTEA` declarations to `metal::Blob`. OpenAPI describes it as a binary string. Raw SQL defaults such as SQLite `X'...'` remain representable through the existing `default_sql` annotation rather than pretending binary defaults are text literals.
+
 ## Schema/tooling/ecosystem summary
 
 | MetalORM capability | C++ status |
@@ -273,6 +296,7 @@ The stored-DDL scanner tracks nested parentheses, strings, quoted identifiers an
 | composite PK DDL | ✅ |
 | reflected column defaults | ✅ |
 | column UNIQUE metadata | ✅ |
+| native BLOB/binary values | ✅ |
 | partial indexes | ✅ |
 | SQLite schema introspection | ✅ |
 | schema diff / plan execution | ✅ |
@@ -308,14 +332,15 @@ The stored-DDL scanner tracks nested parentheses, strings, quoted identifiers an
 - **0.0.31** — column/table CHECK round-trip, SQL-aware CHECK introspection, and constraint-preserving entity generation.
 - **0.0.32** — named physical FKs, deferred-FK semantics, DDL introspection/diff and codegen preservation.
 - **0.0.33** — unnamed/named column UNIQUE metadata, DDL/introspection/diff/codegen round-trip, and safe SQLite rebuild diagnostics.
+- **0.0.34** — native `metal::Blob` values, SQLite binary bind/read, BLOB mapping/codegen, binary predicates and OpenAPI metadata.
 
 ## Next parity targets
 
-The highest-value remaining gaps are now outside the basic SQLite physical-column contract:
+The highest-value remaining gaps are now outside the basic SQLite scalar/physical-column contract:
 
-1. **First-party remote cache adapter policy** without forcing a Redis client into the core library.
-2. **Generated relation wrappers for alternate target keys/cyclic relation shapes** beyond physical-FK preservation.
-3. **Native BLOB/binary `Value` support**, so DB-to-C++ generation does not need the current `std::string` fallback for binary columns.
-4. **Read-only mapped-view runtime support**, allowing introspected SQLite views to become usable generated entities rather than warnings.
+1. **Generated relation wrappers for alternate target keys/cyclic relation shapes** beyond physical-FK preservation.
+2. **Read-only mapped-view runtime support**, allowing introspected SQLite views to become usable generated entities rather than warnings.
+3. **First-party remote cache adapter policy** without forcing a Redis client into the core library.
+4. Future database backends should implement existing capability boundaries rather than expanding the SQLite core with vendor-specific switches.
 
 A later performance pass may replace in-memory root pagination deduplication with a root-aware SQL page plan, provided it preserves the tested 0.0.13 semantics.
