@@ -386,9 +386,16 @@ GeneratedEntityHeader generate_entity_header(
                         column.references->on_delete, result.warnings, context);
                     const auto on_update = referential_action_annotation(
                         column.references->on_update, result.warnings, context);
-                    annotations.push_back(
+                    std::string reference_annotation =
                         "metal::mapping::reference_to<^^" + classes.at(target->name) + ", \"" +
-                        cpp_string(column.references->column) + "\", " + on_delete + ", " + on_update + ">{}");
+                        cpp_string(column.references->column) + "\", " + on_delete + ", " + on_update;
+                    if (column.references->name || column.references->deferrable) {
+                        reference_annotation += ", \"" +
+                            cpp_string(column.references->name.value_or("")) + "\", " +
+                            (column.references->deferrable ? "true" : "false");
+                    }
+                    reference_annotation += ">{}";
+                    annotations.push_back(std::move(reference_annotation));
                 } else {
                     result.warnings.push_back(
                         "Foreign key " + table.name + "." + column.name + " references excluded/unavailable table " +
