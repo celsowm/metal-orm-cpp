@@ -110,6 +110,36 @@ template <typename T>
 inline constexpr bool is_reference_annotation_v =
     reference_annotation_traits<std::remove_cv_t<T>>::value;
 
+/** Unnamed physical UNIQUE constraint for one persistent scalar column. */
+struct unique_t {};
+inline constexpr unique_t unique{};
+
+/** Named physical UNIQUE constraint for one persistent scalar column. */
+template <fixed_text Name>
+struct named_unique {};
+
+template <typename T>
+struct unique_annotation_traits {
+    static constexpr bool value = false;
+};
+
+template <>
+struct unique_annotation_traits<unique_t> {
+    static constexpr bool value = true;
+    static constexpr bool named = false;
+};
+
+template <fixed_text Name>
+struct unique_annotation_traits<named_unique<Name>> {
+    static constexpr bool value = true;
+    static constexpr bool named = true;
+    static constexpr auto name = Name;
+};
+
+template <typename T>
+inline constexpr bool is_unique_annotation_v =
+    unique_annotation_traits<std::remove_cv_t<T>>::value;
+
 /** Inline physical CHECK constraint for one persistent scalar column. */
 template <fixed_text Expression>
 struct check {};
