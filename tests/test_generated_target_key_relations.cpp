@@ -50,8 +50,12 @@ int main() {
     using ATraits = metal::mapping::relation_annotation_traits<ARelation>;
     using BTraits = metal::mapping::relation_annotation_traits<BRelation>;
 
-    static_assert(ATraits::target_key() == ^^CycleB::code);
-    static_assert(BTraits::target_key() == ^^CycleA::code);
+    constexpr auto a_target_key = ATraits::target_key();
+    constexpr auto b_target_key = BTraits::target_key();
+    static_assert(std::same_as<metal::reflect::owner_type_t<a_target_key>, CycleB>);
+    static_assert(std::same_as<metal::reflect::owner_type_t<b_target_key>, CycleA>);
+    static_assert(metal::reflect::column_name_view<a_target_key>() == "code");
+    static_assert(metal::reflect::column_name_view<b_target_key>() == "code");
 
     auto db = std::make_shared<metal::SQLiteExecutor>(":memory:");
     auto dialect = std::make_shared<metal::SQLiteDialect>();
