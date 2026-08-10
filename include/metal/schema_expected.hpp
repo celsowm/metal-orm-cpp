@@ -16,6 +16,7 @@ template <reflect::Entity T>
 ExpectedTable expected_table(const Dialect& dialect) {
     static_assert(reflect::validate_mapping<T>());
     static_assert(reflect::validate_column_defaults<T>());
+    static_assert(reflect::validate_physical_references<T>());
 
     ExpectedTable expected;
     expected.table.name = reflect::table_name<T>();
@@ -31,6 +32,30 @@ ExpectedTable expected_table(const Dialect& dialect) {
             column.default_value = reflect::column_default_sql<Member>();
         }
         column.auto_increment = reflect::has<mapping::generated_t>(Member);
+
+        if constexpr (reflect::has<mapping::reference>(Member)) {
+            constexpr auto reference = reflect::annotation<mapping::reference>(Member);
+            constexpr auto target = reference.target_column;
+            using Target = reflect::owner_type_t<target>;
+
+            ForeignKeyReference foreign_key{
+                .table = reflect::table_name<Target>(),
+                .column = reflect::column_name<target>()
+            };
+
+            constexpr auto on_delete = mapping::referential_action_sql(reference.on_delete);
+            if constexpr (!on_delete.empty()) {
+                foreign_key.on_delete = std::string(on_delete);
+            }
+
+            constexpr auto on_update = mapping::referential_action_sql(reference.on_update);
+            if constexpr (!on_update.empty()) {
+                foreign_key.on_update = std::string(on_update);
+            }
+
+            column.references = std::move(foreign_key);
+        }
+
         expected.table.columns.push_back(std::move(column));
         if constexpr (reflect::has<mapping::primary_key_t>(Member)) {
             expected.table.primary_key.push_back(reflect::column_name<Member>());
