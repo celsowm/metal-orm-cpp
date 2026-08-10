@@ -437,13 +437,6 @@ GeneratedEntityHeader generate_entity_header(
                         column.references->table + "; relation wrapper was not generated.");
                     continue;
                 }
-                if (!reference_targets_single_primary_key(*target, *column.references)) {
-                    result.warnings.push_back(
-                        "Foreign key " + table.name + "." + column.name + " targets " + target->name + "." +
-                        column.references->column + " rather than the target's single primary key; relation wrapper was not generated "
-                        "because the current generated belongs_to surface defaults to the target primary key.");
-                    continue;
-                }
 
                 auto property = relation_name(column, target->name);
                 if (used_members.contains(property)) property += "_relation";
@@ -453,7 +446,14 @@ GeneratedEntityHeader generate_entity_header(
                 used_members.insert(property);
 
                 out << '\n';
-                out << "    [[=metal::mapping::belongs_to<^^" << type_name << "::" << members.at(column.name) << ">{}]]\n";
+                if (reference_targets_single_primary_key(*target, *column.references)) {
+                    out << "    [[=metal::mapping::belongs_to<^^" << type_name << "::"
+                        << members.at(column.name) << ">{}]]\n";
+                } else {
+                    out << "    [[=metal::mapping::belongs_to_key<^^" << type_name << "::"
+                        << members.at(column.name) << ", ^^" << classes.at(target->name) << ", \""
+                        << cpp_string(column.references->column) << "\">{}]]\n";
+                }
                 out << "    metal::belongs_to_reference<" << classes.at(target->name) << "> " << property << ";\n";
             }
         }
