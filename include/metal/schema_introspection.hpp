@@ -173,6 +173,7 @@ inline DatabaseSchema introspect_sqlite(
                 .on_update = normalize_action(row_string(fk, "on_update"))
             };
         }
+        parse_sqlite_foreign_key_modifiers(create_sql, table);
 
         const auto index_list = executor.execute(
             "SELECT seq, name, \"unique\", origin, partial "
