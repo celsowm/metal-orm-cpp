@@ -373,6 +373,14 @@ GeneratedEntityHeader generate_entity_header(
             if (!column.type.empty()) {
                 annotations.push_back("metal::mapping::database_type{\"" + cpp_string(column.type) + "\"}");
             }
+            if (column.unique) {
+                if (column.unique_name) {
+                    annotations.push_back(
+                        "metal::mapping::named_unique<\"" + cpp_string(*column.unique_name) + "\">{}");
+                } else {
+                    annotations.push_back("metal::mapping::unique");
+                }
+            }
             if (const auto def = default_annotation(column, cpp_type)) annotations.push_back(*def);
             if (column.check) {
                 annotations.push_back(
