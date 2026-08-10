@@ -6,6 +6,8 @@
 #include "metal/cache_tag_index.hpp"
 #include "metal/cache_strategy.hpp"
 #include "metal/cache_memory.hpp"
+#include "metal/cache_codec.hpp"
+#include "metal/cache_remote.hpp"
 #include "metal/query_cache_manager.hpp"
 #include "metal/cache_execute.hpp"
 #include "metal/cache_session.hpp"
