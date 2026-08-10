@@ -208,6 +208,10 @@ int main() {
     assert_rich_result(*key_value.get("tenant:1:a"), 1);
     assert(key_value.has("tenant:1:a"));
 
+    key_value_backend->values["corrupt"] = "not-a-metalorm-cache-payload";
+    assert(!key_value.get("corrupt").has_value());
+    assert(!key_value_backend->values.contains("corrupt"));
+
     key_value.set("tenant:1:b", rich_result(2), std::chrono::milliseconds{0});
     assert(!key_value_backend->last_ttl.has_value());
     key_value.set("tenant:2:a", rich_result(3), 1h);
