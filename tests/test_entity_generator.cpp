@@ -150,13 +150,13 @@ int main() {
         assert(contains(generated.code,
             "=metal::mapping::reference_to<^^User, \"id\", metal::mapping::referential_action::cascade, metal::mapping::referential_action::restrict>{}"));
         assert(contains(generated.code, "std::optional<std::string> bio;"));
+        assert(contains(generated.code, "std::optional<metal::Blob> avatar;"));
         assert(contains(generated.code, "[[=metal::mapping::belongs_to<^^Post::user_id>{}]]"));
         assert(contains(generated.code, "metal::belongs_to_reference<User> user;"));
         assert(contains(generated.code, "/// Application users"));
         assert(contains(generated.code, "/// Public display name"));
-        assert(generated.warnings.size() == 2);
-        assert(contains(generated.warnings[0], "BLOB") || contains(generated.warnings[1], "BLOB"));
-        assert(contains(generated.warnings[0], "View") || contains(generated.warnings[1], "View"));
+        assert(generated.warnings.size() == 1);
+        assert(contains(generated.warnings.front(), "View"));
     }
 
     {
