@@ -18,7 +18,10 @@ struct [[=metal::mapping::table{"posts"}]] Post {
 
     [[=metal::mapping::reference<
         ^^User::id,
-        metal::mapping::referential_action::cascade>{}]]
+        metal::mapping::referential_action::cascade,
+        metal::mapping::referential_action::restrict,
+        "fk_posts_user",
+        true>{}]]
     std::optional<std::int64_t> user_id;
 
     [[=metal::mapping::belongs_to<^^Post::user_id>{}]]
@@ -26,11 +29,13 @@ struct [[=metal::mapping::table{"posts"}]] Post {
 };
 ```
 
-`mapping::reference<TargetColumn, OnDelete, OnUpdate>` is the direct member-reflection form. The referenced member must belong to a mapped type, both sides must be persistent scalar columns, and their underlying value types must be compatible. Invalid mappings fail at compile time.
+`mapping::reference<TargetColumn, OnDelete, OnUpdate, ConstraintName, Deferrable>` is the direct member-reflection form. The referenced member must belong to a mapped type, both sides must be persistent scalar columns, and their underlying value types must be compatible. Invalid mappings fail at compile time.
+
+`ConstraintName` defaults to the empty string. `Deferrable` defaults to `false`; when true the SQLite DDL is emitted as `DEFERRABLE INITIALLY DEFERRED`, matching the boolean `ForeignKeyReference.deferrable` contract in the TypeScript reference.
 
 Supported referential actions are `unspecified`, `no_action`, `restrict`, `cascade`, `set_null` and `set_default`.
 
-The diff treats an omitted action and SQLite's introspected `NO ACTION` as semantically equivalent, avoiding false rebuild warnings.
+The diff treats an omitted action and SQLite's introspected `NO ACTION` as semantically equivalent, avoiding false rebuild warnings. Constraint name and deferred/immediate behavior are compared as physical schema metadata too.
 
 ### Generated and cyclic foreign keys
 
@@ -46,7 +51,10 @@ struct [[=metal::mapping::table{"posts"}]] Post {
     [[=metal::mapping::reference_to<
         ^^User,
         "id",
-        metal::mapping::referential_action::cascade>{}]]
+        metal::mapping::referential_action::cascade,
+        metal::mapping::referential_action::restrict,
+        "fk_posts_user",
+        true>{}]]
     std::optional<std::int64_t> user_id;
 };
 
@@ -56,7 +64,7 @@ struct [[=metal::mapping::table{"users"}]] User {
 };
 ```
 
-`reference_to<TargetType, TargetPhysicalColumn, OnDelete, OnUpdate>` is still reflection-validated. Once the generated types are complete, MetalORM resolves the physical column name to exactly one persistent reflected target member and performs the same type-compatibility validation as `reference<^^Target::member>`. This makes generated self-references and cyclic schemas possible without replacing the C++26 metadata model with a runtime registry.
+`reference_to<TargetType, TargetPhysicalColumn, OnDelete, OnUpdate, ConstraintName, Deferrable>` is still reflection-validated. Once the generated types are complete, MetalORM resolves the physical column name to exactly one persistent reflected target member and performs the same type-compatibility validation as `reference<^^Target::member>`. This makes generated self-references and cyclic schemas possible without replacing the C++26 metadata model with a runtime registry.
 
 ## Column CHECK constraints
 
@@ -100,15 +108,17 @@ This corresponds to the TypeScript table-level `{ name?, expression }` CHECK met
 For SQLite, the same explicit metadata now drives:
 
 1. `CREATE TABLE` foreign-key and CHECK clauses;
-2. `ALTER TABLE ... ADD` column rendering, including column CHECK and FK metadata;
-3. reflection-derived expected schema metadata;
-4. `pragma_foreign_key_list` introspection for foreign keys;
-5. `sqlite_master.sql` parsing for column and table CHECK constraints;
-6. schema diff comparison;
-7. database-to-C++ entity generation, including FK actions, column checks and named/unnamed table checks.
+2. named inline foreign-key constraints;
+3. `DEFERRABLE INITIALLY DEFERRED` foreign-key behavior;
+4. `ALTER TABLE ... ADD` column rendering, including column CHECK and FK metadata;
+5. reflection-derived expected schema metadata;
+6. `pragma_foreign_key_list` introspection for FK target and referential actions;
+7. `sqlite_master.sql` parsing for FK names/deferrability and column/table CHECK constraints;
+8. schema diff comparison;
+9. database-to-C++ entity generation, including FK name/actions/deferrability, column checks and named/unnamed table checks.
 
-SQLite has no dedicated CHECK-introspection PRAGMA. MetalORM therefore parses the stored `CREATE TABLE` statement with a small SQL-aware scanner. It splits only top-level table elements and tracks nested parentheses, quoted strings, quoted identifiers, line comments and block comments. Expressions such as function calls containing commas or literals containing parentheses are preserved rather than being split by a regular expression.
+SQLite's FK PRAGMA does not expose the physical constraint name or whether the declaration is deferred, so MetalORM complements PRAGMA data by parsing the stored `CREATE TABLE` statement. The same SQL-aware scanner already used for CHECK constraints tracks nested parentheses, quoted strings, quoted identifiers, line comments and block comments. It also handles named single-column table-level foreign keys encountered in external SQLite schemas; composite FKs remain outside the current per-column `ForeignKeyReference` model.
 
-Existing SQLite tables cannot alter column or table CHECK constraints in place through the supported synchronization path. A mismatch is therefore reported as an explicit rebuild warning instead of emitting unsafe fake ALTER SQL.
+Only `DEFERRABLE INITIALLY DEFERRED` maps to `deferrable=true`. `NOT DEFERRABLE`, `DEFERRABLE INITIALLY IMMEDIATE`, bare `DEFERRABLE` and the other immediate SQLite forms remain `false`.
 
-Named foreign-key constraints and deferrability remain separate future extensions; they are not inferred from ORM relationship annotations.
+Existing SQLite tables cannot alter FK modifiers or CHECK constraints in place through the supported synchronization path. A mismatch is therefore reported as an explicit rebuild warning instead of emitting unsafe fake ALTER SQL.
