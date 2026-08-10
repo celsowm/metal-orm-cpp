@@ -72,4 +72,85 @@ consteval bool validate_physical_references() {
     return true;
 }
 
+template <info Member>
+consteval info column_check_annotation_info() {
+    info result{};
+    std::size_t count = 0;
+
+    template for (constexpr auto candidate :
+                  std::define_static_array(std::meta::annotations_of(Member))) {
+        using Raw = [: std::meta::type_of(candidate) :];
+        using A = std::remove_cv_t<Raw>;
+        if constexpr (mapping::is_check_annotation_v<A>) {
+            result = candidate;
+            ++count;
+        }
+    }
+
+    if (count > 1) {
+        throw "MetalORM: a column can declare at most one physical check annotation";
+    }
+    return result;
+}
+
+template <info Member>
+consteval bool has_column_check() {
+    return column_check_annotation_info<Member>() != info{};
+}
+
+template <info Member>
+using column_check_annotation_t =
+    std::remove_cv_t<[: std::meta::type_of(column_check_annotation_info<Member>()) :]>;
+
+template <info Member>
+consteval bool validate_column_check() {
+    static_assert(std::meta::is_nonstatic_data_member(Member),
+                  "MetalORM: column checks require a reflected data member");
+
+    if constexpr (has_column_check<Member>()) {
+        static_assert(is_persistent_member<Member>(),
+                      "MetalORM: column checks are valid only on persistent scalar members");
+        using Check = column_check_annotation_t<Member>;
+        using Traits = mapping::check_annotation_traits<Check>;
+        static_assert(!Traits::expression.view().empty(),
+                      "MetalORM: column check expression cannot be empty");
+    }
+    return true;
+}
+
+template <Mapped T, typename F>
+constexpr void for_each_table_check(F&& fn) {
+    template for (constexpr auto candidate :
+                  std::define_static_array(std::meta::annotations_of(^^T))) {
+        using Raw = [: std::meta::type_of(candidate) :];
+        using A = std::remove_cv_t<Raw>;
+        if constexpr (mapping::is_table_check_annotation_v<A>) {
+            fn.template operator()<A>();
+        }
+    }
+}
+
+template <Mapped T>
+consteval bool validate_physical_checks() {
+    template for (constexpr auto member : data_members<T>()) {
+        static_assert(validate_column_check<member>());
+    }
+
+    template for (constexpr auto candidate :
+                  std::define_static_array(std::meta::annotations_of(^^T))) {
+        using Raw = [: std::meta::type_of(candidate) :];
+        using A = std::remove_cv_t<Raw>;
+        if constexpr (mapping::is_table_check_annotation_v<A>) {
+            using Traits = mapping::table_check_annotation_traits<A>;
+            static_assert(!Traits::expression.view().empty(),
+                          "MetalORM: table check expression cannot be empty");
+            if constexpr (Traits::named) {
+                static_assert(!Traits::name.view().empty(),
+                              "MetalORM: named table check constraint name cannot be empty");
+            }
+        }
+    }
+    return true;
+}
+
 } // namespace metal::reflect
