@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -8,10 +9,12 @@
 #include <string_view>
 #include <type_traits>
 #include <variant>
+#include <vector>
 
 namespace metal {
 
-using Value = std::variant<std::nullptr_t, std::int64_t, double, std::string, bool>;
+using Blob = std::vector<std::byte>;
+using Value = std::variant<std::nullptr_t, std::int64_t, double, std::string, bool, Blob>;
 
 template <typename T>
 struct is_optional : std::false_type {};
@@ -35,7 +38,8 @@ template <typename T>
 inline constexpr bool PersistableValue = [] {
     using U = optional_value_t<T>;
     return std::is_integral_v<U> || std::is_floating_point_v<U> ||
-           std::is_same_v<U, std::string> || std::is_same_v<U, bool>;
+           std::is_same_v<U, std::string> || std::is_same_v<U, bool> ||
+           std::is_same_v<U, Blob>;
 }();
 
 template <typename T>
@@ -44,6 +48,8 @@ Value to_value(const T& value) {
     if constexpr (is_optional_v<U>) {
         return value ? to_value(*value) : Value{nullptr};
     } else if constexpr (std::is_same_v<U, std::string>) {
+        return value;
+    } else if constexpr (std::is_same_v<U, Blob>) {
         return value;
     } else if constexpr (std::is_same_v<U, std::string_view>) {
         return std::string(value);
@@ -71,6 +77,8 @@ T from_value(const Value& value) {
         return U{from_value<Inner>(value)};
     } else if constexpr (std::is_same_v<U, std::string>) {
         if (const auto* p = std::get_if<std::string>(&value)) return *p;
+    } else if constexpr (std::is_same_v<U, Blob>) {
+        if (const auto* p = std::get_if<Blob>(&value)) return *p;
     } else if constexpr (std::is_same_v<U, bool>) {
         if (const auto* p = std::get_if<bool>(&value)) return *p;
         if (const auto* p = std::get_if<std::int64_t>(&value)) return *p != 0;
@@ -88,10 +96,23 @@ T from_value(const Value& value) {
 inline std::string value_key(const Value& value) {
     return std::visit([](const auto& v) -> std::string {
         using U = std::decay_t<decltype(v)>;
-        if constexpr (std::is_same_v<U, std::nullptr_t>) return "null";
-        else if constexpr (std::is_same_v<U, std::string>) return "s:" + v;
-        else if constexpr (std::is_same_v<U, bool>) return v ? "b:1" : "b:0";
-        else {
+        if constexpr (std::is_same_v<U, std::nullptr_t>) {
+            return "null";
+        } else if constexpr (std::is_same_v<U, std::string>) {
+            return "s:" + v;
+        } else if constexpr (std::is_same_v<U, bool>) {
+            return v ? "b:1" : "b:0";
+        } else if constexpr (std::is_same_v<U, Blob>) {
+            static constexpr char hex[] = "0123456789abcdef";
+            std::string out{"x:"};
+            out.reserve(2 + v.size() * 2);
+            for (const auto byte : v) {
+                const auto n = std::to_integer<unsigned int>(byte);
+                out.push_back(hex[(n >> 4) & 0x0f]);
+                out.push_back(hex[n & 0x0f]);
+            }
+            return out;
+        } else {
             std::ostringstream out;
             out << v;
             return out.str();
