@@ -58,6 +58,16 @@ static const metal::DatabaseColumn& column_named(
     return *found;
 }
 
+static const metal::DatabaseIndex& index_named(
+    const metal::DatabaseTable& table,
+    const std::string& name) {
+    const auto found = std::find_if(
+        table.indexes.begin(), table.indexes.end(),
+        [&](const metal::DatabaseIndex& index) { return index.name == name; });
+    assert(found != table.indexes.end());
+    return *found;
+}
+
 static bool has_change(const metal::SchemaPlan& plan, metal::SchemaChangeKind kind) {
     return std::any_of(
         plan.changes.begin(), plan.changes.end(),
@@ -132,6 +142,23 @@ int main() {
     auto expected = metal::expected_schema<SchemaUser, SchemaPost, SchemaAudit>(dialect);
     metal::add_expected_index<SchemaUser, ^^SchemaUser::name>(
         expected, dialect, "actual_users_name_idx");
+    metal::add_expected_index<SchemaUser, ^^SchemaUser::age>(
+        expected,
+        dialect,
+        "actual_users_age_present_idx",
+        false,
+        std::string{"age IS NOT NULL"});
+
+    const auto& expected_users = table_named(
+        metal::DatabaseSchema{{expected.tables.front().table}, {}}, "actual_users");
+    const auto& expected_partial = index_named(expected_users, "actual_users_age_present_idx");
+    assert(expected_partial.where == std::optional<std::string>{"age IS NOT NULL"});
+    assert(std::any_of(
+        expected.tables.front().create_index_sql.begin(),
+        expected.tables.front().create_index_sql.end(),
+        [](const std::string& sql) {
+            return sql.find("WHERE age IS NOT NULL") != std::string::npos;
+        }));
 
     metal::IntrospectOptions sync_introspection{
         .exclude_tables = {"schema_comments", "mismatch"}
@@ -172,12 +199,23 @@ int main() {
     auto expected_index_exists = db->execute(
         "SELECT COUNT(*) AS c FROM sqlite_master WHERE type='index' AND name='actual_users_name_idx';");
     assert(metal::from_value<std::int64_t>(expected_index_exists.rows.front().at("c")) == 1);
+    auto partial_index_sql = db->execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='actual_users_age_present_idx';");
+    assert(partial_index_sql.rows.size() == 1);
+    assert(metal::from_value<std::string>(partial_index_sql.rows.front().at("sql")) ==
+           "CREATE INDEX \"actual_users_age_present_idx\" ON \"actual_users\" (\"age\") WHERE age IS NOT NULL");
     auto old_index_exists = db->execute(
         "SELECT COUNT(*) AS c FROM sqlite_master WHERE type='index' AND name='old_posts_title_idx';");
     assert(metal::from_value<std::int64_t>(old_index_exists.rows.front().at("c")) == 1);
     auto extra_exists = db->execute(
         "SELECT COUNT(*) AS c FROM sqlite_master WHERE type='table' AND name='extra_table';");
     assert(metal::from_value<std::int64_t>(extra_exists.rows.front().at("c")) == 1);
+
+    const auto synchronized = metal::introspect_sqlite(*db, sync_introspection);
+    const auto& synchronized_users = table_named(synchronized, "actual_users");
+    const auto& synchronized_partial = index_named(
+        synchronized_users, "actual_users_age_present_idx");
+    assert(synchronized_partial.where == std::optional<std::string>{"age IS NOT NULL"});
 
     const auto destructive_plan = metal::synchronize_schema(
         expected,
