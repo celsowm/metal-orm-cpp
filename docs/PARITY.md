@@ -6,7 +6,7 @@ MetalORM C++ intentionally targets C++26 static reflection rather than providing
 
 SQLite is intentionally the only concrete backend while semantic parity is built out.
 
-Current release: **0.0.31**.
+Current release: **0.0.32**.
 
 Legend:
 
@@ -167,7 +167,7 @@ SQLite correctly rejects stored procedures because SQLite has no stored-procedur
 | concurrent selection safety | ✅ | serialized lease selection regression fixed |
 | SQLite integration | ✅ | respects one-handle serialization semantics |
 
-## DB-to-entity generation — 0.0.28 / 0.0.31
+## DB-to-entity generation — 0.0.28 / 0.0.31 / 0.0.32
 
 | Capability | C++ status | Notes |
 | --- | --- | --- |
@@ -178,12 +178,14 @@ SQLite correctly rejects stored procedures because SQLite has no stored-procedur
 | belongsTo wrappers from FKs | ✅/🟡 | generated when target can use current relation shape |
 | physical FK preservation | ✅ | `reference_to<^^Target, "physical_column", ...>` |
 | FK ON DELETE / ON UPDATE actions | ✅ | reflected `referential_action` |
+| FK constraint names | ✅ | preserved in `reference_to` |
+| FK deferrability | ✅ | `DEFERRABLE INITIALLY DEFERRED` round-trip |
 | column CHECK preservation | ✅ | `mapping::check` |
 | table CHECK preservation | ✅ | named and unnamed annotations |
 | self/cyclic physical FK representation | ✅ | target type can be only forward-declared |
 | excluded external target FK | 🟡 | warns because target type is unavailable to reflection |
 
-`reference_to<^^Target, "physical_column", ...>` exists specifically so generated physical FKs do not require `^^Target::member` while the target is incomplete. Mapping validation later resolves the physical name to exactly one persistent reflected member and checks value-type compatibility.
+`reference_to<^^Target, "physical_column", ...>` exists specifically so generated physical FKs do not require `^^Target::member` while the target is incomplete. Mapping validation later resolves the physical name to exactly one persistent reflected member and checks value-type compatibility. Constraint names, actions and deferred behavior travel through the same generated annotation.
 
 ## SQLite schema / DDL
 
@@ -196,30 +198,43 @@ SQLite correctly rejects stored procedures because SQLite has no stored-procedur
 | partial indexes | ✅ | `WHERE` round-trip |
 | schema comments convention | ✅ | optional `schema_comments` metadata |
 | schema introspection | ✅ | table/column/PK/index/view/FK/CHECK metadata |
-| schema diff / plan execution | 🟡 | complete for represented SQLite metadata; FK name/deferrability remain unmodeled |
+| schema diff / plan execution | 🟡 | represented metadata converges; physical UNIQUE metadata is the next schema gap |
 | synchronize / dry-run / destructive policy | ✅ | safe/destructive split |
-| physical FK declaration | 🟡 | target + actions complete; named FK constraints/deferrability pending |
+| physical FK declaration | ✅ | target, name, actions and deferred behavior |
 | column CHECK declaration | ✅ | `mapping::check` |
 | table CHECK declaration | ✅ | named/unnamed |
 | CHECK introspection | ✅ | SQL-aware `sqlite_master.sql` parser |
+| FK name/deferrability introspection | ✅ | PRAGMA target/actions enriched from stored DDL |
+| column UNIQUE declaration metadata | ❌ | TypeScript `ColumnDef.unique` is not reflection-mapped yet |
 
-### Physical constraints — 0.0.30 / 0.0.31
+### Physical constraints — 0.0.30–0.0.32
 
 ORM relation metadata never implies a physical database constraint. Physical FKs use either:
 
 ```cpp
-[[=metal::mapping::reference<^^User::id,
-    metal::mapping::referential_action::cascade>{}]]
+[[=metal::mapping::reference<
+    ^^User::id,
+    metal::mapping::referential_action::cascade,
+    metal::mapping::referential_action::restrict,
+    "fk_posts_user",
+    true>{}]]
 std::optional<std::int64_t> user_id;
 ```
 
 or the codegen/cycle-safe equivalent:
 
 ```cpp
-[[=metal::mapping::reference_to<^^User, "id",
-    metal::mapping::referential_action::cascade>{}]]
+[[=metal::mapping::reference_to<
+    ^^User,
+    "id",
+    metal::mapping::referential_action::cascade,
+    metal::mapping::referential_action::restrict,
+    "fk_posts_user",
+    true>{}]]
 std::optional<std::int64_t> user_id;
 ```
+
+The last boolean maps to `DEFERRABLE INITIALLY DEFERRED`. SQLite's FK PRAGMA supplies target/actions; the SQL-aware stored-DDL parser complements it with the physical constraint name and deferred/immediate mode. Only the actually deferred SQLite spelling is treated as `deferrable=true`.
 
 Column and table checks use:
 
@@ -234,7 +249,7 @@ struct [[
 ]] Order { /* ... */ };
 ```
 
-SQLite exposes no dedicated CHECK-introspection PRAGMA. MetalORM parses the stored CREATE TABLE statement with a scanner that tracks nested parentheses, strings, quoted identifiers and comments, and only splits table elements on top-level commas. CHECK mismatches on existing tables produce explicit rebuild warnings rather than fake ALTER SQL.
+SQLite exposes no dedicated CHECK-introspection PRAGMA. MetalORM parses the stored CREATE TABLE statement with a scanner that tracks nested parentheses, strings, quoted identifiers and comments, and only splits table elements on top-level commas. FK/CHECK mismatches on existing tables produce explicit rebuild warnings rather than fake ALTER SQL.
 
 ## Schema/tooling/ecosystem summary
 
@@ -247,8 +262,9 @@ SQLite exposes no dedicated CHECK-introspection PRAGMA. MetalORM parses the stor
 | SQLite schema introspection | ✅ |
 | schema diff / plan execution | 🟡 |
 | schema synchronize / dry-run / destructive policy | ✅ |
-| physical FK declaration metadata | 🟡 |
+| physical FK declaration metadata | ✅ |
 | physical CHECK declaration metadata | ✅ |
+| physical UNIQUE declaration metadata | ❌ |
 | migration history/versioned migration runner | N/A |
 | bulk operations | ✅ |
 | DTO/OpenAPI | ✅ |
@@ -276,12 +292,13 @@ SQLite exposes no dedicated CHECK-introspection PRAGMA. MetalORM parses the stor
 - **0.0.29** — reflected SQLite partial indexes.
 - **0.0.30** — explicit reflected physical foreign keys + actions.
 - **0.0.31** — column/table CHECK round-trip, SQL-aware CHECK introspection, and constraint-preserving entity generation.
+- **0.0.32** — named physical FKs, deferred-FK semantics, DDL introspection/diff and codegen preservation.
 
 ## Next parity targets
 
 The highest-value remaining gaps are deliberately narrower now:
 
-1. **Foreign-key constraint name and deferrability metadata** where the TypeScript schema contract exposes them and the backend can preserve them safely.
+1. **Column UNIQUE metadata** (`unique?: boolean | string` in the TypeScript schema contract), including named UNIQUE constraints, SQLite introspection/diff and DB-to-C++ preservation.
 2. **Remote cache adapter policy** without forcing a Redis client into the core library.
 3. **Generated relation wrappers for alternate target keys/cyclic relation shapes** beyond physical-FK preservation.
 4. Future database backends should implement existing capability boundaries rather than expanding the SQLite core with vendor-specific switches.
