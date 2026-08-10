@@ -33,23 +33,24 @@ std::string sqlite_column_type_name() {
 template <std::meta::info Member>
 std::string sqlite_reference_sql(const Dialect& dialect) {
     static_assert(reflect::validate_physical_reference<Member>());
-    static_assert(reflect::has<mapping::reference>(Member),
+    static_assert(reflect::has_physical_reference<Member>(),
                   "MetalORM: sqlite_reference_sql requires a physical reference annotation");
 
-    constexpr auto reference = reflect::annotation<mapping::reference>(Member);
-    constexpr auto target = reference.target_column;
+    using Reference = reflect::physical_reference_annotation_t<Member>;
+    using Traits = mapping::reference_annotation_traits<Reference>;
+    constexpr auto target = Traits::target_column();
     using Target = reflect::owner_type_t<target>;
 
     std::string sql = " REFERENCES " + dialect.quote_identifier(reflect::table_name<Target>()) +
                       " (" + dialect.quote_identifier(reflect::column_name<target>()) + ")";
 
-    constexpr auto on_delete = mapping::referential_action_sql(reference.on_delete);
+    constexpr auto on_delete = mapping::referential_action_sql(Traits::on_delete);
     if constexpr (!on_delete.empty()) {
         sql += " ON DELETE ";
         sql += on_delete;
     }
 
-    constexpr auto on_update = mapping::referential_action_sql(reference.on_update);
+    constexpr auto on_update = mapping::referential_action_sql(Traits::on_update);
     if constexpr (!on_update.empty()) {
         sql += " ON UPDATE ";
         sql += on_update;
@@ -96,7 +97,7 @@ std::string create_table_sql(const Dialect& dialect) {
         if constexpr (reflect::has_column_default<Member>()) {
             sql += " DEFAULT " + reflect::column_default_sql<Member>();
         }
-        if constexpr (reflect::has<mapping::reference>(Member)) {
+        if constexpr (reflect::has_physical_reference<Member>()) {
             sql += sqlite_reference_sql<Member>(dialect);
         }
     });
