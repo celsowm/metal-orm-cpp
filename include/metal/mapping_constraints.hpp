@@ -61,4 +61,55 @@ template <typename T>
 inline constexpr bool is_reference_annotation_v =
     reference_annotation_traits<std::remove_cv_t<T>>::value;
 
+/** Inline physical CHECK constraint for one persistent scalar column. */
+template <fixed_text Expression>
+struct check {};
+
+template <typename T>
+struct check_annotation_traits {
+    static constexpr bool value = false;
+};
+
+template <fixed_text Expression>
+struct check_annotation_traits<check<Expression>> {
+    static constexpr bool value = true;
+    static constexpr auto expression = Expression;
+};
+
+template <typename T>
+inline constexpr bool is_check_annotation_v =
+    check_annotation_traits<std::remove_cv_t<T>>::value;
+
+/** Unnamed table-level CHECK constraint. */
+template <fixed_text Expression>
+struct table_check {};
+
+/** Named table-level CHECK constraint. */
+template <fixed_text Name, fixed_text Expression>
+struct named_table_check {};
+
+template <typename T>
+struct table_check_annotation_traits {
+    static constexpr bool value = false;
+};
+
+template <fixed_text Expression>
+struct table_check_annotation_traits<table_check<Expression>> {
+    static constexpr bool value = true;
+    static constexpr bool named = false;
+    static constexpr auto expression = Expression;
+};
+
+template <fixed_text Name, fixed_text Expression>
+struct table_check_annotation_traits<named_table_check<Name, Expression>> {
+    static constexpr bool value = true;
+    static constexpr bool named = true;
+    static constexpr auto name = Name;
+    static constexpr auto expression = Expression;
+};
+
+template <typename T>
+inline constexpr bool is_table_check_annotation_v =
+    table_check_annotation_traits<std::remove_cv_t<T>>::value;
+
 } // namespace metal::mapping
