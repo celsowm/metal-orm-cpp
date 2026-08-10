@@ -90,6 +90,16 @@ template <
     std::meta::info TargetKey = std::meta::info{}>
 struct belongs_to {};
 
+// Cycle-safe alternate-target-key form. Target may be only forward declared when
+// the annotation is formed; the physical target column is resolved later when
+// relation metadata is instantiated and the mapped type is complete.
+template <
+    std::meta::info ForeignKey,
+    std::meta::info Target,
+    fixed_text TargetColumn,
+    cascade_mode Cascade = cascade_mode::none>
+struct belongs_to_key {};
+
 template <
     std::meta::info TargetForeignKey,
     cascade_mode Cascade = cascade_mode::none,
@@ -170,6 +180,53 @@ struct relation_annotation_traits<belongs_to<ForeignKey, Cascade, TargetKey>> {
     static constexpr cascade_mode cascade = Cascade;
     static consteval std::meta::info foreign_key() { return ForeignKey; }
     static consteval std::meta::info target_key() { return TargetKey; }
+};
+
+template <
+    std::meta::info ForeignKey,
+    std::meta::info Target,
+    fixed_text TargetColumn,
+    cascade_mode Cascade>
+struct relation_annotation_traits<belongs_to_key<ForeignKey, Target, TargetColumn, Cascade>> {
+    static constexpr bool value = true;
+    static constexpr relation_kind kind = relation_kind::belongs_to;
+    static constexpr cascade_mode cascade = Cascade;
+    static consteval std::meta::info foreign_key() { return ForeignKey; }
+
+    static consteval std::meta::info target_key() {
+        if (!std::meta::is_type(Target)) {
+            throw "MetalORM: belongs_to_key target must reflect a mapped type";
+        }
+        if (TargetColumn.view().empty()) {
+            throw "MetalORM: belongs_to_key target column cannot be empty";
+        }
+
+        const auto ctx = std::meta::access_context::current();
+        std::meta::info result{};
+        std::size_t count = 0;
+        template for (constexpr auto candidate :
+                      std::define_static_array(std::meta::nonstatic_data_members_of(Target, ctx))) {
+            std::string_view physical_name = std::meta::identifier_of(candidate);
+            constexpr auto mapped_columns =
+                std::define_static_array(std::meta::annotations_of_with_type(candidate, ^^column));
+            if constexpr (mapped_columns.size() > 1) {
+                throw "MetalORM: belongs_to_key target has duplicate column annotations";
+            } else if constexpr (mapped_columns.size() == 1) {
+                constexpr auto mapped = std::meta::extract<column>(mapped_columns.front());
+                physical_name = mapped.name.view();
+            }
+
+            if (physical_name == TargetColumn.view()) {
+                result = candidate;
+                ++count;
+            }
+        }
+
+        if (count != 1) {
+            throw "MetalORM: belongs_to_key target column must resolve to exactly one member";
+        }
+        return result;
+    }
 };
 
 template <std::meta::info TargetForeignKey, cascade_mode Cascade, std::meta::info LocalKey>
