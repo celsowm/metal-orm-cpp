@@ -5,6 +5,7 @@
 #include "metal/schema_types.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -52,7 +53,8 @@ void add_expected_index(
     ExpectedSchema& schema,
     const Dialect& dialect,
     std::string name,
-    bool unique = false) {
+    bool unique = false,
+    std::optional<std::string> where = std::nullopt) {
     static_assert(sizeof...(Members) > 0,
                   "MetalORM: schema index requires at least one reflected column");
     static_assert((std::same_as<reflect::owner_type_t<Members>, T> && ...),
@@ -71,6 +73,7 @@ void add_expected_index(
     DatabaseIndex index;
     index.name = std::move(name);
     index.unique = unique;
+    index.where = std::move(where);
     (index.columns.push_back(DatabaseIndexColumn{reflect::column_name<Members>()}), ...);
 
     std::string sql = "CREATE ";
@@ -81,7 +84,9 @@ void add_expected_index(
         if (i) sql += ", ";
         sql += dialect.quote_identifier(index.columns[i].column);
     }
-    sql += ");";
+    sql += ")";
+    if (index.where) sql += " WHERE " + *index.where;
+    sql += ";";
 
     table->table.indexes.push_back(index);
     table->create_index_sql.push_back(std::move(sql));
