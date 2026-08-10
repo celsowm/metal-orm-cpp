@@ -3,6 +3,8 @@
 #include <sqlite3.h>
 
 #include <cctype>
+#include <cstddef>
+#include <cstring>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -29,6 +31,17 @@ static void bind_value(sqlite3_stmt* stmt, int index, const Value& value) {
             rc = sqlite3_bind_text(stmt, index, v.c_str(), static_cast<int>(v.size()), SQLITE_TRANSIENT);
         } else if constexpr (std::is_same_v<T, bool>) {
             rc = sqlite3_bind_int(stmt, index, v ? 1 : 0);
+        } else if constexpr (std::is_same_v<T, Blob>) {
+            static const std::byte empty_blob{};
+            const void* data = v.empty()
+                ? static_cast<const void*>(&empty_blob)
+                : static_cast<const void*>(v.data());
+            rc = sqlite3_bind_blob64(
+                stmt,
+                index,
+                data,
+                static_cast<sqlite3_uint64>(v.size()),
+                SQLITE_TRANSIENT);
         }
         if (rc != SQLITE_OK) throw std::runtime_error("MetalORM: failed to bind SQLite parameter");
     }, value);
@@ -47,8 +60,18 @@ static Value column_value(sqlite3_stmt* stmt, int column) {
             const int bytes = sqlite3_column_bytes(stmt, column);
             return std::string(text ? text : "", static_cast<std::size_t>(bytes));
         }
-        case SQLITE_BLOB:
-            throw std::runtime_error("MetalORM: BLOB columns are not supported yet");
+        case SQLITE_BLOB: {
+            const int bytes = sqlite3_column_bytes(stmt, column);
+            Blob blob(static_cast<std::size_t>(bytes));
+            if (bytes > 0) {
+                const void* data = sqlite3_column_blob(stmt, column);
+                if (!data) {
+                    throw std::runtime_error("MetalORM: SQLite returned a null BLOB pointer for non-empty data");
+                }
+                std::memcpy(blob.data(), data, static_cast<std::size_t>(bytes));
+            }
+            return blob;
+        }
         default:
             throw std::runtime_error("MetalORM: unsupported SQLite column type");
     }
