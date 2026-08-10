@@ -3,6 +3,7 @@
 #include "metal/column_defaults.hpp"
 #include "metal/reference_traits.hpp"
 #include "metal/query.hpp"
+#include "metal/schema_constraints.hpp"
 
 #include <string>
 #include <type_traits>
@@ -29,10 +30,39 @@ std::string sqlite_column_type_name() {
     }
 }
 
+template <std::meta::info Member>
+std::string sqlite_reference_sql(const Dialect& dialect) {
+    static_assert(reflect::validate_physical_reference<Member>());
+    static_assert(reflect::has<mapping::reference>(Member),
+                  "MetalORM: sqlite_reference_sql requires a physical reference annotation");
+
+    constexpr auto reference = reflect::annotation<mapping::reference>(Member);
+    constexpr auto target = reference.target_column;
+    using Target = reflect::owner_type_t<target>;
+
+    std::string sql = " REFERENCES " + dialect.quote_identifier(reflect::table_name<Target>()) +
+                      " (" + dialect.quote_identifier(reflect::column_name<target>()) + ")";
+
+    constexpr auto on_delete = mapping::referential_action_sql(reference.on_delete);
+    if constexpr (!on_delete.empty()) {
+        sql += " ON DELETE ";
+        sql += on_delete;
+    }
+
+    constexpr auto on_update = mapping::referential_action_sql(reference.on_update);
+    if constexpr (!on_update.empty()) {
+        sql += " ON UPDATE ";
+        sql += on_update;
+    }
+
+    return sql;
+}
+
 template <reflect::Mapped T>
 std::string create_table_sql(const Dialect& dialect) {
     static_assert(reflect::validate_mapping<T>());
     static_assert(reflect::validate_column_defaults<T>());
+    static_assert(reflect::validate_physical_references<T>());
 
     std::string sql = "CREATE TABLE IF NOT EXISTS " + dialect.quote_identifier(reflect::table_name<T>()) + " (";
     bool first = true;
@@ -65,6 +95,9 @@ std::string create_table_sql(const Dialect& dialect) {
         }
         if constexpr (reflect::has_column_default<Member>()) {
             sql += " DEFAULT " + reflect::column_default_sql<Member>();
+        }
+        if constexpr (reflect::has<mapping::reference>(Member)) {
+            sql += sqlite_reference_sql<Member>(dialect);
         }
     });
 
