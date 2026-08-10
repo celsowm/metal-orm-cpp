@@ -20,6 +20,7 @@ struct DatabaseColumn {
     std::optional<std::string> default_value;
     bool auto_increment{false};
     std::optional<ForeignKeyReference> references;
+    std::optional<std::string> check;
     std::optional<std::string> comment;
 };
 
@@ -34,11 +35,17 @@ struct DatabaseIndex {
     std::optional<std::string> where;
 };
 
+struct DatabaseCheck {
+    std::optional<std::string> name;
+    std::string expression;
+};
+
 struct DatabaseTable {
     std::string name;
     std::vector<DatabaseColumn> columns;
     std::vector<std::string> primary_key;
     std::vector<DatabaseIndex> indexes;
+    std::vector<DatabaseCheck> checks;
     std::optional<std::string> comment;
 };
 
