@@ -134,7 +134,7 @@ Boundary-changing mutations are scope-aware. Moving subtrees are isolated below 
 | safe dynamic sorting | ✅ | reflected allowlist + PK tie-breaker |
 | paged DTO execution | ✅ | reuses Session root pagination |
 | DTO/OpenAPI schemas | ✅ | response/create/update/filter/pagination |
-| binary OpenAPI schema | ✅ | `metal::Blob` -> `type: string`, `format: binary` |
+| binary OpenAPI schema | ✅ | `metal::Blob` -> `type: string`, `format: byte`, matching TypeScript |
 | nested relation OpenAPI | ✅ | single/collection shapes + components |
 | Tree OpenAPI | ✅ | reflected Tree schemas |
 
@@ -286,7 +286,7 @@ struct [[=metal::mapping::table{"files"}]] File {
 
 `metal::Blob` is `std::vector<std::byte>` and participates in `Value`, reflection persistence, snapshots, typed query operands, DTO rows and cached `QueryResult`s. SQLite uses the BLOB binding/result APIs rather than text conversion, so embedded zero bytes and arbitrary octets are preserved. Empty BLOB is intentionally bound with a non-null pointer and zero length, keeping it distinct from SQL `NULL`.
 
-DB-to-C++ generation maps `BLOB`, `BINARY`, `VARBINARY` and `BYTEA` declarations to `metal::Blob`. OpenAPI describes it as a binary string. Raw SQL defaults such as SQLite `X'...'` remain representable through the existing `default_sql` annotation rather than pretending binary defaults are text literals.
+DB-to-C++ generation maps `BLOB`, `BINARY`, `VARBINARY` and `BYTEA` declarations to `metal::Blob`. OpenAPI matches the TypeScript binary contract as `type: string`, `format: byte`. Raw SQL defaults such as SQLite `X'...'` remain representable through the existing `default_sql` annotation rather than pretending binary defaults are text literals.
 
 ## Schema/tooling/ecosystem summary
 
