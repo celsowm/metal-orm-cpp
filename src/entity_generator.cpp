@@ -437,6 +437,12 @@ GeneratedEntityHeader generate_entity_header(
                         column.references->table + "; relation wrapper was not generated.");
                     continue;
                 }
+                if (target->primary_key.size() != 1) {
+                    result.warnings.push_back(
+                        "Foreign key " + table.name + "." + column.name + " references " + target->name +
+                        "; relation wrapper was not generated because belongs_to_reference requires a target with exactly one primary key.");
+                    continue;
+                }
 
                 auto property = relation_name(column, target->name);
                 if (used_members.contains(property)) property += "_relation";
