@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <meta>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -78,7 +79,8 @@ consteval bool validate_view_mapping() {
     template for (constexpr auto left : data_members<T>()) {
         if constexpr (is_view_column<left>()) {
             template for (constexpr auto right : data_members<T>()) {
-                if constexpr (left != right && is_view_column<right>()) {
+                if constexpr (std::meta::identifier_of(left) != std::meta::identifier_of(right) &&
+                              is_view_column<right>()) {
                     static_assert(column_name_view<left>() != column_name_view<right>(),
                                   "MetalORM: duplicate mapped view column name");
                 }
