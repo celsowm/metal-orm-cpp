@@ -41,8 +41,12 @@ std::string sqlite_reference_sql(const Dialect& dialect) {
     constexpr auto target = reflect::physical_reference_target<Member>();
     using Target = reflect::owner_type_t<target>;
 
-    std::string sql = " REFERENCES " + dialect.quote_identifier(reflect::table_name<Target>()) +
-                      " (" + dialect.quote_identifier(reflect::column_name<target>()) + ")";
+    std::string sql;
+    if constexpr (!Traits::constraint_name.view().empty()) {
+        sql += " CONSTRAINT " + dialect.quote_identifier(std::string(Traits::constraint_name.view()));
+    }
+    sql += " REFERENCES " + dialect.quote_identifier(reflect::table_name<Target>()) +
+           " (" + dialect.quote_identifier(reflect::column_name<target>()) + ")";
 
     constexpr auto on_delete = mapping::referential_action_sql(Traits::on_delete);
     if constexpr (!on_delete.empty()) {
@@ -54,6 +58,10 @@ std::string sqlite_reference_sql(const Dialect& dialect) {
     if constexpr (!on_update.empty()) {
         sql += " ON UPDATE ";
         sql += on_update;
+    }
+
+    if constexpr (Traits::deferrable) {
+        sql += " DEFERRABLE INITIALLY DEFERRED";
     }
 
     return sql;
