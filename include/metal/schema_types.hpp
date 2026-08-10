@@ -9,8 +9,10 @@ namespace metal {
 struct ForeignKeyReference {
     std::string table;
     std::string column;
+    std::optional<std::string> name;
     std::optional<std::string> on_delete;
     std::optional<std::string> on_update;
+    bool deferrable{false};
 };
 
 struct DatabaseColumn {
