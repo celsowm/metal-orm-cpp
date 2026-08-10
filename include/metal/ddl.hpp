@@ -17,6 +17,7 @@ std::string sqlite_type_name() {
     if constexpr (std::is_integral_v<U> || std::is_same_v<U, bool>) return "INTEGER";
     else if constexpr (std::is_floating_point_v<U>) return "REAL";
     else if constexpr (std::is_same_v<U, std::string>) return "TEXT";
+    else if constexpr (std::is_same_v<U, Blob>) return "BLOB";
     else static_assert(!sizeof(U), "MetalORM: unsupported SQLite column type");
 }
 
