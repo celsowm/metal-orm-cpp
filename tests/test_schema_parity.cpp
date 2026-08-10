@@ -7,18 +7,6 @@
 #include <optional>
 #include <string>
 
-struct SchemaUser;
-
-struct [[=metal::mapping::table{"actual_posts"}]] SchemaPost {
-    [[=metal::mapping::primary_key, =metal::mapping::generated]]
-    std::int64_t id{};
-    std::optional<std::int64_t> user_id;
-    std::string title;
-
-    [[=metal::mapping::belongs_to<^^SchemaPost::user_id>{}]]
-    metal::belongs_to_reference<SchemaUser> user;
-};
-
 struct [[=metal::mapping::table{"actual_users"}]] SchemaUser {
     [[=metal::mapping::primary_key, =metal::mapping::generated]]
     std::int64_t id{};
@@ -26,9 +14,31 @@ struct [[=metal::mapping::table{"actual_users"}]] SchemaUser {
     std::optional<std::int64_t> age;
 };
 
+struct [[=metal::mapping::table{"actual_posts"}]] SchemaPost {
+    [[=metal::mapping::primary_key, =metal::mapping::generated]]
+    std::int64_t id{};
+
+    [[=metal::mapping::reference{
+        ^^SchemaUser::id,
+        metal::mapping::referential_action::cascade}]]
+    std::optional<std::int64_t> user_id;
+
+    std::string title;
+
+    [[=metal::mapping::belongs_to<^^SchemaPost::user_id>{}]]
+    metal::belongs_to_reference<SchemaUser> user;
+};
+
 struct [[=metal::mapping::table{"audit_log"}]] SchemaAudit {
     [[=metal::mapping::primary_key, =metal::mapping::generated]]
     std::int64_t id{};
+
+    [[=metal::mapping::reference{
+        ^^SchemaUser::id,
+        metal::mapping::referential_action::set_null,
+        metal::mapping::referential_action::cascade}]]
+    std::optional<std::int64_t> user_id;
+
     std::string message;
 };
 
@@ -160,6 +170,19 @@ int main() {
             return sql.find("WHERE age IS NOT NULL") != std::string::npos;
         }));
 
+    const auto& expected_posts = expected.tables[1].table;
+    const auto& expected_post_user = column_named(expected_posts, "user_id");
+    assert(expected_post_user.references);
+    assert(expected_post_user.references->table == "actual_users");
+    assert(expected_post_user.references->column == "id");
+    assert(expected_post_user.references->on_delete == std::optional<std::string>{"CASCADE"});
+    assert(!expected_post_user.references->on_update);
+
+    const auto& expected_audit = expected.tables[2];
+    assert(expected_audit.create_table_sql.find(
+        "REFERENCES \"actual_users\" (\"id\") ON DELETE SET NULL ON UPDATE CASCADE") !=
+        std::string::npos);
+
     metal::IntrospectOptions sync_introspection{
         .exclude_tables = {"schema_comments", "mismatch"}
     };
@@ -217,6 +240,16 @@ int main() {
     const auto& synchronized_partial = index_named(
         synchronized_users, "actual_users_age_present_idx");
     assert(synchronized_partial.where == std::optional<std::string>{"age IS NOT NULL"});
+
+    const auto& synchronized_audit = table_named(synchronized, "audit_log");
+    const auto& synchronized_audit_user = column_named(synchronized_audit, "user_id");
+    assert(synchronized_audit_user.references);
+    assert(synchronized_audit_user.references->table == "actual_users");
+    assert(synchronized_audit_user.references->column == "id");
+    assert(synchronized_audit_user.references->on_delete ==
+           std::optional<std::string>{"SET NULL"});
+    assert(synchronized_audit_user.references->on_update ==
+           std::optional<std::string>{"CASCADE"});
 
     const auto destructive_plan = metal::synchronize_schema(
         expected,
