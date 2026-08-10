@@ -4,7 +4,7 @@
 
 > A C++26-native port of MetalORM built around static reflection, annotations, splicing and expansion statements.
 
-**Version:** `0.0.26`
+**Version:** `0.0.34`
 
 MetalORM C++ deliberately has no C++20/23 compatibility layer. The TypeScript [`metal-orm`](https://github.com/celsowm/metal-orm) repository is the behavioral and architectural reference; C++26 changes the mechanism, not the ORM semantics.
 
@@ -110,6 +110,22 @@ auto user = metal::save_graph(session, payload);
 ```
 
 `save_graph`, `update_graph`, `patch_graph`, pruning and typed N:N pivot patches reuse the same transactional Session/UoW infrastructure.
+
+## Native binary values — 0.0.34
+
+Binary data is a first-class scalar rather than a text fallback:
+
+```cpp
+struct [[=metal::mapping::table{"files"}]] File {
+    [[=metal::mapping::primary_key, =metal::mapping::generated]]
+    std::int64_t id{};
+
+    metal::Blob contents;
+    std::optional<metal::Blob> thumbnail;
+};
+```
+
+`metal::Blob` is `std::vector<std::byte>`. It participates in `Value`, persistence, dirty snapshots, typed predicates, DTO rows and cached query results. SQLite binds and reads it through the BLOB APIs, preserving embedded zero bytes and keeping an empty BLOB distinct from SQL `NULL`. Database-to-C++ generation maps `BLOB`, `BINARY`, `VARBINARY` and `BYTEA` to `metal::Blob`; OpenAPI mirrors the TypeScript contract as `type: string`, `format: byte`.
 
 ## DTO / REST / OpenAPI — 0.0.24
 
@@ -368,26 +384,9 @@ auto plan = metal::synchronize_schema(
     });
 ```
 
-The SQLite introspector reads:
+The SQLite introspector reads tables/columns, ordered primary keys, type/nullability/default values, AUTOINCREMENT, physical foreign keys, UNIQUE/CHECK metadata, user indexes, views and optional `schema_comments` comments. The diff/synchronizer keeps destructive/rebuild-only changes explicit instead of inventing unsupported SQLite ALTER operations.
 
-- tables and columns;
-- ordered primary keys;
-- type/nullability/default values;
-- AUTOINCREMENT;
-- physical foreign keys and referential actions;
-- user indexes;
-- views;
-- optional `schema_comments` table/column comments.
-
-The diff/synchronizer follows the current TypeScript safety policy:
-
-- create table / add column / add index are safe;
-- drop table / drop index require `allow_destructive=true`;
-- SQLite ALTER COLUMN emits a warning instead of fake SQL;
-- SQLite DROP COLUMN emits a rebuild warning and no automatic rebuild;
-- `dry_run=true` executes nothing.
-
-Reflected defaults now feed the expected schema and diff engine directly. ORM relation metadata is still not silently converted into physical FK constraints; the TypeScript reference also keeps relation definitions separate from schema `references` metadata.
+Reflected defaults, physical FK/UNIQUE/CHECK declarations and native BLOB affinity feed the same expected-schema and introspection/diff model. ORM relation metadata is still not silently converted into physical constraints.
 
 ## Transactions
 
@@ -418,6 +417,6 @@ MetalORM intentionally refuses older compilers instead of shipping a compatibili
 
 ## Current roadmap
 
-0.0.26 closes procedure-call parity for the supported SQLite execution model by matching the reference's explicit SQLite rejection while providing the vendor-independent AST and capability execution contract. The next parity pass moves to pooling, followed by DB-to-entity generation. A first-party remote-cache adapter remains an ecosystem decision rather than a reason to couple the core to a specific C++ Redis client; physical FK/check declaration metadata remains a separate schema-layer gap.
+The basic SQLite scalar and physical-column contract is now closed through 0.0.34, including defaults, FK/UNIQUE/CHECK metadata and native binary values. The next high-value parity work is generated relation wrappers for alternate target keys/cyclic relation shapes, followed by read-only mapped-view runtime support. A first-party remote-cache adapter remains an ecosystem decision rather than a reason to couple the core to one Redis client.
 
 See [`CHANGELOG.md`](CHANGELOG.md) and [`docs/PARITY.md`](docs/PARITY.md) for release-by-release details and remaining gaps.
