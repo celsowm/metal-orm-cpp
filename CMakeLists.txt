@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(metal-orm VERSION 0.0.35 LANGUAGES CXX)
+project(metal-orm VERSION 0.0.36 LANGUAGES CXX)
 
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    message(FATAL_ERROR "MetalORM 0.0.35 is intentionally C++26-native and currently requires GCC 16+ reflection support")
+    message(FATAL_ERROR "MetalORM 0.0.36 is intentionally C++26-native and currently requires GCC 16+ reflection support")
 endif()
 
 if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
-    message(FATAL_ERROR "MetalORM 0.0.35 requires GCC 16 or newer")
+    message(FATAL_ERROR "MetalORM 0.0.36 requires GCC 16 or newer")
 endif()
 
 find_package(SQLite3 REQUIRED)
@@ -16,6 +16,7 @@ add_library(metal-orm STATIC
     src/sqlite_executor.cpp
     src/pooled_executor.cpp
     src/entity_generator.cpp
+    src/view_generator.cpp
 )
 add_library(metal::orm ALIAS metal-orm)
 
@@ -215,6 +216,10 @@ if(METAL_ORM_BUILD_TESTS)
     add_executable(metal-orm-blob-parity-tests tests/test_blob_parity.cpp)
     target_link_libraries(metal-orm-blob-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-blob-parity-tests COMMAND metal-orm-blob-parity-tests)
+
+    add_executable(metal-orm-view-parity-tests tests/test_view_parity.cpp)
+    target_link_libraries(metal-orm-view-parity-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-view-parity-tests COMMAND metal-orm-view-parity-tests)
 
     add_executable(metal-orm-bulk-parity-tests tests/test_bulk_parity.cpp)
     target_link_libraries(metal-orm-bulk-parity-tests PRIVATE metal::orm)
