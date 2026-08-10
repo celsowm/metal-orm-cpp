@@ -43,7 +43,7 @@ ExpectedTable expected_table(const Dialect& dialect) {
         if constexpr (reflect::has_physical_reference<Member>()) {
             using Reference = reflect::physical_reference_annotation_t<Member>;
             using Traits = mapping::reference_annotation_traits<Reference>;
-            constexpr auto target = Traits::target_column();
+            constexpr auto target = reflect::physical_reference_target<Member>();
             using Target = reflect::owner_type_t<target>;
 
             ForeignKeyReference foreign_key{
