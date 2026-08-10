@@ -138,6 +138,12 @@ inline std::string render_reference_definition(
 inline std::string render_column_definition(const DatabaseColumn& column, const Dialect& dialect) {
     std::string sql = dialect.quote_identifier(column.name) + " " + column.type;
     if (column.not_null) sql += " NOT NULL";
+    if (column.unique) {
+        if (column.unique_name) {
+            sql += " CONSTRAINT " + dialect.quote_identifier(*column.unique_name);
+        }
+        sql += " UNIQUE";
+    }
     if (column.default_value) sql += " DEFAULT " + *column.default_value;
     if (column.check) sql += " CHECK (" + *column.check + ")";
     if (column.references) sql += render_reference_definition(*column.references, dialect);
@@ -205,22 +211,37 @@ inline SchemaPlan diff_schema(
         for (const auto& column : expected_table.columns) {
             const auto* actual_column = find_column(actual_table, column.name);
             if (!actual_column) {
-                plan.changes.push_back(SchemaChange{
-                    .kind = SchemaChangeKind::AddColumn,
-                    .table = expected_table.name,
-                    .description = "Add column " + column.name + " to " + expected_table.name,
-                    .statements = {
-                        "ALTER TABLE " + dialect.quote_identifier(expected_table.name) +
-                        " ADD " + render_column_definition(column, dialect) + ";"
-                    },
-                    .safe = true
-                });
+                if (column.unique) {
+                    plan.changes.push_back(SchemaChange{
+                        .kind = SchemaChangeKind::AddColumn,
+                        .table = expected_table.name,
+                        .description = "Add unique column " + column.name + " to " + expected_table.name,
+                        .statements = {},
+                        .safe = false
+                    });
+                    plan.warnings.push_back(
+                        "SQLite ADD COLUMN does not permit UNIQUE constraints; rebuild table " +
+                        expected_table.name + " to add unique column " + column.name + ".");
+                } else {
+                    plan.changes.push_back(SchemaChange{
+                        .kind = SchemaChangeKind::AddColumn,
+                        .table = expected_table.name,
+                        .description = "Add column " + column.name + " to " + expected_table.name,
+                        .statements = {
+                            "ALTER TABLE " + dialect.quote_identifier(expected_table.name) +
+                            " ADD " + render_column_definition(column, dialect) + ";"
+                        },
+                        .safe = true
+                    });
+                }
                 continue;
             }
 
             const bool changed =
                 normalize_schema_type(column.type) != normalize_schema_type(actual_column->type) ||
                 column.not_null != actual_column->not_null ||
+                column.unique != actual_column->unique ||
+                column.unique_name != actual_column->unique_name ||
                 normalize_schema_default(column.default_value) !=
                     normalize_schema_default(actual_column->default_value) ||
                 column.auto_increment != actual_column->auto_increment ||
@@ -266,7 +287,7 @@ inline SchemaPlan diff_schema(
                 });
             } else if (!same_index(index, *actual_index)) {
                 plan.warnings.push_back(
-                    "SQLite index " + index.name + " on " + expected_table.name +
+                    "SQLite index " + index.name + " on " + expected_table.name+
                     " differs from the expected definition; drop/recreate it explicitly.");
             }
         }
