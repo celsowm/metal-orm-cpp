@@ -13,7 +13,28 @@ struct [[=metal::mapping::table{"declared_types"}]] DeclaredType {
     std::string name;
 };
 
+struct GeneratedReferenceTarget;
+
+struct [[=metal::mapping::table{"generated_reference_sources"}]] GeneratedReferenceSource {
+    [[=metal::mapping::primary_key]]
+    std::int64_t id{};
+
+    [[=metal::mapping::reference_to<
+        ^^GeneratedReferenceTarget,
+        "id",
+        metal::mapping::referential_action::cascade>{}]]
+    std::optional<std::int64_t> target_id;
+};
+
+struct [[=metal::mapping::table{"generated_reference_targets"}]] GeneratedReferenceTarget {
+    [[=metal::mapping::primary_key]]
+    std::int64_t id{};
+};
+
 static_assert(metal::reflect::validate_mapping<DeclaredType>());
+static_assert(metal::reflect::validate_mapping<GeneratedReferenceSource>());
+static_assert(metal::reflect::validate_mapping<GeneratedReferenceTarget>());
+static_assert(metal::reflect::validate_physical_references<GeneratedReferenceSource>());
 
 static bool contains(const std::string& value, const std::string& needle) {
     return value.find(needle) != std::string::npos;
@@ -39,6 +60,7 @@ int main() {
                 .type = "VARCHAR(80)",
                 .not_null = true,
                 .default_value = "'guest'",
+                .check = "length(\"display-name\") > 0",
                 .comment = "Public display name"
             },
             metal::DatabaseColumn{
@@ -65,6 +87,10 @@ int main() {
                 .not_null = false
             }
         };
+        users.checks.push_back(metal::DatabaseCheck{
+            .name = "user_enabled",
+            .expression = "enabled IN (0, 1)"
+        });
         schema.tables.push_back(users);
 
         metal::DatabaseTable posts;
@@ -76,9 +102,19 @@ int main() {
                 .name = "user_id",
                 .type = "INTEGER",
                 .not_null = true,
-                .references = metal::ForeignKeyReference{.table = "users", .column = "id"}
+                .references = metal::ForeignKeyReference{
+                    .table = "users",
+                    .column = "id",
+                    .on_delete = "CASCADE",
+                    .on_update = "RESTRICT"
+                }
             },
-            metal::DatabaseColumn{.name = "title", .type = "TEXT", .not_null = true}
+            metal::DatabaseColumn{
+                .name = "title",
+                .type = "TEXT",
+                .not_null = true,
+                .check = "length(title) > 0"
+            }
         };
         schema.tables.push_back(posts);
 
@@ -97,7 +133,8 @@ int main() {
             metal::EntityGeneratorOptions{.namespace_name = "app_model"});
 
         assert(contains(generated.code, "namespace app_model {"));
-        assert(contains(generated.code, "struct [[=metal::mapping::table{\"users\"}]] User"));
+        assert(contains(generated.code, "=metal::mapping::table{\"users\"}"));
+        assert(contains(generated.code, "=metal::mapping::named_table_check<\"user_enabled\", \"enabled IN (0, 1)\">{}"));
         assert(contains(generated.code, "struct [[=metal::mapping::table{\"status\"}]] Status"));
         assert(contains(generated.code, "=metal::mapping::generated"));
         assert(contains(generated.code, "=metal::mapping::column{\"display-name\"}"));
@@ -106,6 +143,12 @@ int main() {
         assert(contains(generated.code, "=metal::mapping::default_value{true}"));
         assert(contains(generated.code, "=metal::mapping::default_null"));
         assert(contains(generated.code, "=metal::mapping::default_sql{\"NULL\"}"));
+        assert(contains(generated.code,
+            "=metal::mapping::check<\"length(\\\"display-name\\\") > 0\">{}"));
+        assert(contains(generated.code,
+            "=metal::mapping::check<\"length(title) > 0\">{}"));
+        assert(contains(generated.code,
+            "=metal::mapping::reference_to<^^User, \"id\", metal::mapping::referential_action::cascade, metal::mapping::referential_action::restrict>{}"));
         assert(contains(generated.code, "std::optional<std::string> bio;"));
         assert(contains(generated.code, "[[=metal::mapping::belongs_to<^^Post::user_id>{}]]"));
         assert(contains(generated.code, "metal::belongs_to_reference<User> user;"));
@@ -121,24 +164,33 @@ int main() {
         db.execute(
             "CREATE TABLE parents ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "label VARCHAR(40) NOT NULL DEFAULT 'root'"
+            "label VARCHAR(40) NOT NULL DEFAULT 'root' CHECK (length(label) > 0), "
+            "CONSTRAINT label_shape CHECK (instr(label, ',)') >= 0)"
             ");");
         db.execute(
             "CREATE TABLE children ("
             "id INTEGER PRIMARY KEY, "
-            "parent_id INTEGER NOT NULL REFERENCES parents(id), "
-            "enabled BOOLEAN NOT NULL DEFAULT 1, "
+            "parent_id INTEGER NOT NULL REFERENCES parents(id) ON DELETE CASCADE, "
+            "enabled BOOLEAN NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)), "
             "note TEXT DEFAULT NULL"
             ");");
 
         const auto generated = metal::generate_sqlite_entity_header(db);
         assert(generated.warnings.empty());
-        assert(contains(generated.code, "struct [[=metal::mapping::table{\"parents\"}]] Parent"));
-        assert(contains(generated.code, "struct [[=metal::mapping::table{\"children\"}]] Child"));
+        assert(contains(generated.code, "=metal::mapping::table{\"parents\"}"));
+        assert(contains(generated.code,
+            "=metal::mapping::named_table_check<\"label_shape\", \"instr(label, ',)') >= 0\">{}"));
+        assert(contains(generated.code, "=metal::mapping::table{\"children\"}"));
         assert(contains(generated.code, "=metal::mapping::database_type{\"VARCHAR(40)\"}"));
         assert(contains(generated.code, "=metal::mapping::default_text{\"root\"}"));
         assert(contains(generated.code, "=metal::mapping::default_value{true}"));
         assert(contains(generated.code, "=metal::mapping::default_null"));
+        assert(contains(generated.code,
+            "=metal::mapping::check<\"length(label) > 0\">{}"));
+        assert(contains(generated.code,
+            "=metal::mapping::check<\"enabled IN (0, 1)\">{}"));
+        assert(contains(generated.code,
+            "=metal::mapping::reference_to<^^Parent, \"id\", metal::mapping::referential_action::cascade, metal::mapping::referential_action::no_action>{}"));
         assert(contains(generated.code, "metal::belongs_to_reference<Parent> parent;"));
     }
 
@@ -152,5 +204,15 @@ int main() {
         assert(expected.table.columns.size() == 2);
         assert(expected.table.columns[0].type == "BIGINT");
         assert(expected.table.columns[1].type == "VARCHAR(80)");
+    }
+
+    {
+        metal::SQLiteDialect dialect;
+        const auto expected = metal::expected_table<GeneratedReferenceSource>(dialect);
+        assert(expected.table.columns[1].references);
+        assert(expected.table.columns[1].references->table == "generated_reference_targets");
+        assert(expected.table.columns[1].references->column == "id");
+        assert(expected.table.columns[1].references->on_delete ==
+               std::optional<std::string>{"CASCADE"});
     }
 }
