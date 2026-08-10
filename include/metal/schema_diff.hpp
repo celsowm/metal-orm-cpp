@@ -45,6 +45,27 @@ inline std::optional<std::string> normalize_schema_default(
     return text.substr(first, last - first + 1);
 }
 
+inline std::string normalize_reference_action(const std::optional<std::string>& value) {
+    if (!value || value->empty()) return "NO ACTION";
+    std::string result = *value;
+    std::transform(
+        result.begin(), result.end(), result.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+    return result;
+}
+
+inline bool same_reference(
+    const std::optional<ForeignKeyReference>& expected,
+    const std::optional<ForeignKeyReference>& actual) {
+    if (!expected || !actual) return !expected && !actual;
+    return expected->table == actual->table &&
+           expected->column == actual->column &&
+           normalize_reference_action(expected->on_delete) ==
+               normalize_reference_action(actual->on_delete) &&
+           normalize_reference_action(expected->on_update) ==
+               normalize_reference_action(actual->on_update);
+}
+
 inline const DatabaseColumn* find_column(const DatabaseTable& table, std::string_view name) {
     const auto found = std::find_if(
         table.columns.begin(), table.columns.end(),
@@ -59,10 +80,21 @@ inline const DatabaseIndex* find_index(const DatabaseTable& table, std::string_v
     return found == table.indexes.end() ? nullptr : &*found;
 }
 
+inline std::string render_reference_definition(
+    const ForeignKeyReference& reference,
+    const Dialect& dialect) {
+    std::string sql = " REFERENCES " + dialect.quote_identifier(reference.table) +
+                      " (" + dialect.quote_identifier(reference.column) + ")";
+    if (reference.on_delete) sql += " ON DELETE " + *reference.on_delete;
+    if (reference.on_update) sql += " ON UPDATE " + *reference.on_update;
+    return sql;
+}
+
 inline std::string render_column_definition(const DatabaseColumn& column, const Dialect& dialect) {
     std::string sql = dialect.quote_identifier(column.name) + " " + column.type;
     if (column.not_null) sql += " NOT NULL";
     if (column.default_value) sql += " DEFAULT " + *column.default_value;
+    if (column.references) sql += render_reference_definition(*column.references, dialect);
     return sql;
 }
 
@@ -145,7 +177,8 @@ inline SchemaPlan diff_schema(
                 column.not_null != actual_column->not_null ||
                 normalize_schema_default(column.default_value) !=
                     normalize_schema_default(actual_column->default_value) ||
-                column.auto_increment != actual_column->auto_increment;
+                column.auto_increment != actual_column->auto_increment ||
+                !same_reference(column.references, actual_column->references);
             if (changed) {
                 plan.warnings.push_back(
                     "SQLite ALTER COLUMN is not supported; rebuild table " +
