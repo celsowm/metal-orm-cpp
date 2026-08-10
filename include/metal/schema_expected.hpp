@@ -17,6 +17,7 @@ ExpectedTable expected_table(const Dialect& dialect) {
     static_assert(reflect::validate_mapping<T>());
     static_assert(reflect::validate_column_defaults<T>());
     static_assert(reflect::validate_physical_references<T>());
+    static_assert(reflect::validate_physical_uniques<T>());
     static_assert(reflect::validate_physical_checks<T>());
 
     ExpectedTable expected;
@@ -29,6 +30,14 @@ ExpectedTable expected_table(const Dialect& dialect) {
         column.name = reflect::column_name<Member>();
         column.type = sqlite_column_type_name<Member>();
         column.not_null = !is_optional_v<M>;
+        if constexpr (reflect::has_column_unique<Member>()) {
+            using Unique = reflect::column_unique_annotation_t<Member>;
+            using Traits = mapping::unique_annotation_traits<Unique>;
+            column.unique = true;
+            if constexpr (Traits::named) {
+                column.unique_name = std::string(Traits::name.view());
+            }
+        }
         if constexpr (reflect::has_column_default<Member>()) {
             column.default_value = reflect::column_default_sql<Member>();
         }
