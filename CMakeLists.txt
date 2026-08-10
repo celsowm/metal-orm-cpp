@@ -81,8 +81,8 @@ if(METAL_ORM_BUILD_TESTS)
     )
     metal_expect_compile_failure(
         raw-shared-ptr-has-one
-        tests/compile_fail/raw_shared_ptr_single_relation.cpp
-        "belongs_to member must be metal::belongs_to_reference<T>"
+        tests/compile_fail/raw_shared_ptr_has_one.cpp
+        "has_one member must be metal::has_one_reference<T>"
     )
     metal_expect_compile_failure(
         wrong-pivot-collection
