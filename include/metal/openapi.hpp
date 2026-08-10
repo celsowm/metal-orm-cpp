@@ -153,7 +153,7 @@ OpenApiSchema scalar_openapi_schema(OpenApiDialect dialect) {
         schema.format = "double";
     } else if constexpr (std::same_as<U, Blob>) {
         schema.types.push_back(OpenApiType::string);
-        schema.format = "binary";
+        schema.format = "byte";
     } else {
         schema.types.push_back(OpenApiType::string);
     }
