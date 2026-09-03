@@ -107,6 +107,31 @@ int main() {
         "WHERE \"id\" IN (SELECT \"user_id\" FROM \"q_posts\" WHERE \"title\" LIKE ?);");
     assert(subquery.params.size() == 1);
 
+    metal::PostgresDialect postgres;
+    auto nested_users = metal::select<QueryUser>()
+        .project(metal::field<^^QueryUser::id>)
+        .where(metal::field<^^QueryUser::name> == "Celso");
+    auto nested_posts = metal::select<QueryPost>()
+        .project(metal::field<^^QueryPost::user_id>)
+        .where(
+            metal::in(metal::field<^^QueryPost::user_id>, nested_users) &&
+            metal::like(metal::field<^^QueryPost::title>, "%C++%"));
+    auto postgres_nested = metal::select<QueryUser>()
+        .where(
+            (metal::field<^^QueryUser::name> != "Levi") &&
+            metal::in(metal::field<^^QueryUser::id>, nested_posts))
+        .compile(postgres);
+
+    assert(postgres_nested.sql ==
+        "SELECT \"id\", \"name\", \"nickname\" FROM \"q_users\" "
+        "WHERE (\"name\" <> $1 AND \"id\" IN (SELECT \"user_id\" FROM \"q_posts\" "
+        "WHERE (\"user_id\" IN (SELECT \"id\" FROM \"q_users\" WHERE \"name\" = $2) "
+        "AND \"title\" LIKE $3)));" );
+    assert(postgres_nested.params.size() == 3);
+    assert(metal::from_value<std::string>(postgres_nested.params[0]) == "Levi");
+    assert(metal::from_value<std::string>(postgres_nested.params[1]) == "Celso");
+    assert(metal::from_value<std::string>(postgres_nested.params[2]) == "%C++%");
+
     auto empty_in = metal::select<QueryUser>()
         .where(metal::in(metal::field<^^QueryUser::id>, std::vector<std::int64_t>{}))
         .compile(dialect);
