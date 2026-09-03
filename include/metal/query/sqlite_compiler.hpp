@@ -1,6 +1,7 @@
 #pragma once
 
 #include "metal/query/core_types.hpp"
+#include "metal/query/postgres_function_compiler.hpp"
 
 #include <cctype>
 
@@ -56,6 +57,10 @@ inline std::string join_sql(const std::vector<std::string>& values, std::string_
 inline std::string compile_function(const FunctionRef& fn, CompileContext& ctx) {
     validate_function_identifier(fn.name);
     const auto name = upper_ascii(fn.name);
+
+    if (ctx.dialect.family() == DialectFamily::PostgreSQL) {
+        return compile_postgres_function(fn, ctx);
+    }
 
     // These renderers need to compile one logical argument more than once. Compile
     // them before the generic argument pass so each SQL placeholder gets its own binding.
@@ -180,6 +185,9 @@ inline std::string compile_function(const FunctionRef& fn, CompileContext& ctx) 
     if (name.starts_with("DATE_TRUNC_")) {
         if (args.size() != 1) throw std::logic_error("MetalORM: DATE_TRUNC expects one date argument");
         const auto part = lower_ascii(name.substr(std::string_view{"DATE_TRUNC_"}.size()));
+        if (part != "year" && part != "month" && part != "day") {
+            throw std::logic_error("MetalORM: SQLite DATE_TRUNC supports year, month and day");
+        }
         if (part == "day") return "date(" + args[0] + ")";
         return "date(" + args[0] + ", 'start of " + part + "')";
     }
