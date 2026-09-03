@@ -604,6 +604,183 @@ inline void diff_postgres_reference_constraint(
     });
 }
 
+inline std::string postgres_primary_key_constraint_name(const DatabaseTable& table) {
+    return table.primary_key_name.value_or(table.name + "_pkey");
+}
+
+inline std::string postgres_add_primary_key_constraint(
+    const DatabaseTable& table,
+    const Dialect& dialect) {
+    const auto name = postgres_primary_key_constraint_name(table);
+    std::string sql = "ALTER TABLE " + dialect.quote_identifier(table.name) +
+        " ADD CONSTRAINT " + dialect.quote_identifier(name) + " PRIMARY KEY (";
+    for (std::size_t i = 0; i < table.primary_key.size(); ++i) {
+        if (i) sql += ", ";
+        sql += dialect.quote_identifier(table.primary_key[i]);
+    }
+    sql += ");";
+    return sql;
+}
+
+inline void diff_postgres_primary_key(
+    const DatabaseTable& expected,
+    const DatabaseTable& actual,
+    const Dialect& dialect,
+    const SchemaDiffOptions& options,
+    SchemaPlan& plan) {
+    if (expected.primary_key == actual.primary_key) return;
+
+    if (actual.primary_key.empty()) {
+        if (expected.primary_key.empty()) return;
+        plan.changes.push_back(SchemaChange{
+            .kind = SchemaChangeKind::AlterTable,
+            .table = expected.name,
+            .description = "Add primary key on " + expected.name,
+            .statements = {postgres_add_primary_key_constraint(expected, dialect)},
+            .safe = true
+        });
+        return;
+    }
+
+    const auto drop = postgres_drop_constraint(
+        actual, postgres_primary_key_constraint_name(actual), dialect);
+    if (expected.primary_key.empty()) {
+        plan.changes.push_back(SchemaChange{
+            .kind = SchemaChangeKind::AlterTable,
+            .table = expected.name,
+            .description = "Drop primary key on " + expected.name,
+            .statements = options.allow_destructive
+                ? std::vector<std::string>{drop}
+                : std::vector<std::string>{},
+            .safe = false
+        });
+        return;
+    }
+
+    plan.changes.push_back(SchemaChange{
+        .kind = SchemaChangeKind::AlterTable,
+        .table = expected.name,
+        .description = "Replace primary key on " + expected.name,
+        .statements = options.allow_destructive
+            ? std::vector<std::string>{
+                drop,
+                postgres_add_primary_key_constraint(expected, dialect)}
+            : std::vector<std::string>{},
+        .safe = false
+    });
+}
+
+inline std::string postgres_table_check_constraint_name(
+    const DatabaseTable& table,
+    const DatabaseCheck& check) {
+    return check.name.value_or(table.name + "_check");
+}
+
+inline std::string postgres_add_table_check_constraint(
+    const DatabaseTable& table,
+    const DatabaseCheck& check,
+    const Dialect& dialect) {
+    std::string sql = "ALTER TABLE " + dialect.quote_identifier(table.name) + " ADD ";
+    if (check.name) {
+        sql += "CONSTRAINT " + dialect.quote_identifier(*check.name) + " ";
+    }
+    sql += "CHECK (" + check.expression + ");";
+    return sql;
+}
+
+inline void diff_postgres_table_checks(
+    const DatabaseTable& expected,
+    const DatabaseTable& actual,
+    const Dialect& dialect,
+    const SchemaDiffOptions& options,
+    SchemaPlan& plan) {
+    std::vector<bool> matched(actual.checks.size(), false);
+
+    for (const auto& wanted : expected.checks) {
+        const auto wanted_expression = normalize_check_expression(wanted.expression);
+        std::optional<std::size_t> same_name;
+        std::optional<std::size_t> same_expression;
+
+        for (std::size_t i = 0; i < actual.checks.size(); ++i) {
+            if (matched[i]) continue;
+            const auto& candidate = actual.checks[i];
+            if (wanted.name && candidate.name == wanted.name) {
+                same_name = i;
+                break;
+            }
+            if (!same_expression &&
+                normalize_check_expression(candidate.expression) == wanted_expression) {
+                same_expression = i;
+            }
+        }
+
+        if (same_name) {
+            const auto& candidate = actual.checks[*same_name];
+            matched[*same_name] = true;
+            if (normalize_check_expression(candidate.expression) == wanted_expression) continue;
+
+            plan.changes.push_back(SchemaChange{
+                .kind = SchemaChangeKind::AlterTable,
+                .table = expected.name,
+                .description = "Replace table CHECK constraint " + *wanted.name +
+                    " on " + expected.name,
+                .statements = {
+                    postgres_drop_constraint(
+                        actual, postgres_table_check_constraint_name(actual, candidate), dialect),
+                    postgres_add_table_check_constraint(expected, wanted, dialect)
+                },
+                .safe = true
+            });
+            continue;
+        }
+
+        if (same_expression) {
+            const auto& candidate = actual.checks[*same_expression];
+            matched[*same_expression] = true;
+            if (!wanted.name) continue;
+
+            const auto actual_name = postgres_table_check_constraint_name(actual, candidate);
+            if (actual_name != *wanted.name) {
+                plan.changes.push_back(SchemaChange{
+                    .kind = SchemaChangeKind::AlterTable,
+                    .table = expected.name,
+                    .description = "Rename table CHECK constraint on " + expected.name,
+                    .statements = {
+                        "ALTER TABLE " + dialect.quote_identifier(expected.name) +
+                        " RENAME CONSTRAINT " + dialect.quote_identifier(actual_name) +
+                        " TO " + dialect.quote_identifier(*wanted.name) + ";"
+                    },
+                    .safe = true
+                });
+            }
+            continue;
+        }
+
+        plan.changes.push_back(SchemaChange{
+            .kind = SchemaChangeKind::AlterTable,
+            .table = expected.name,
+            .description = "Add table CHECK constraint on " + expected.name,
+            .statements = {postgres_add_table_check_constraint(expected, wanted, dialect)},
+            .safe = true
+        });
+    }
+
+    for (std::size_t i = 0; i < actual.checks.size(); ++i) {
+        if (matched[i]) continue;
+        const auto& check = actual.checks[i];
+        const auto name = postgres_table_check_constraint_name(actual, check);
+        plan.changes.push_back(SchemaChange{
+            .kind = SchemaChangeKind::AlterTable,
+            .table = expected.name,
+            .description = "Drop table CHECK constraint " + name + " from " + expected.name,
+            .statements = options.allow_destructive
+                ? std::vector<std::string>{postgres_drop_constraint(actual, name, dialect)}
+                : std::vector<std::string>{},
+            .safe = false
+        });
+    }
+}
+
 inline void diff_postgres_table(
     const DatabaseTable& expected_table,
     const DatabaseTable& actual_table,
@@ -654,11 +831,8 @@ inline void diff_postgres_table(
             expected_table, column, *actual_column, diff, dialect, options, plan);
     }
 
-    if (!same_checks(expected_table.checks, actual_table.checks)) {
-        plan.warnings.push_back(
-            "PostgreSQL table CHECK constraints on " + expected_table.name +
-            " differ from the expected schema; table-level constraint migration is not yet automatic.");
-    }
+    diff_postgres_primary_key(expected_table, actual_table, dialect, options, plan);
+    diff_postgres_table_checks(expected_table, actual_table, dialect, options, plan);
 
     for (const auto& column : actual_table.columns) {
         if (find_column(expected_table, column.name)) continue;
