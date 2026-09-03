@@ -47,7 +47,7 @@ inline std::optional<std::string> normalize_schema_default(
     return text.substr(first, last - first + 1);
 }
 
-inline std::optional<std::string> normalize_check_expression(
+inline std::optional<std::string> normalize_optional_check_expression(
     const std::optional<std::string>& value) {
     return normalize_schema_default(value);
 }
@@ -234,8 +234,8 @@ inline ColumnDiff diff_column(
         .default_changed = normalize_schema_default(expected.default_value) !=
             normalize_schema_default(actual.default_value),
         .auto_increment_changed = expected.auto_increment != actual.auto_increment,
-        .check_changed = normalize_check_expression(expected.check) !=
-            normalize_check_expression(actual.check),
+        .check_changed = normalize_optional_check_expression(expected.check) !=
+            normalize_optional_check_expression(actual.check),
         .reference_changed = !same_reference(expected.references, actual.references)
     };
 }
