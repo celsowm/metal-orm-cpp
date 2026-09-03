@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -188,6 +189,305 @@ inline bool same_index(const DatabaseIndex& expected, const DatabaseIndex& actua
     return expected.where == actual.where;
 }
 
+struct ColumnDiff {
+    bool type_changed{false};
+    bool nullability_changed{false};
+    bool unique_changed{false};
+    bool unique_name_changed{false};
+    bool default_changed{false};
+    bool auto_increment_changed{false};
+    bool check_changed{false};
+    bool reference_changed{false};
+
+    [[nodiscard]] bool any() const noexcept {
+        return type_changed || nullability_changed || unique_changed ||
+               unique_name_changed || default_changed || auto_increment_changed ||
+               check_changed || reference_changed;
+    }
+
+    [[nodiscard]] bool postgres_scalar_mutation() const noexcept {
+        return type_changed || nullability_changed || default_changed || auto_increment_changed;
+    }
+};
+
+inline ColumnDiff diff_column(
+    const DatabaseColumn& expected,
+    const DatabaseColumn& actual) {
+    return ColumnDiff{
+        .type_changed = normalize_schema_type(expected.type) != normalize_schema_type(actual.type),
+        .nullability_changed = expected.not_null != actual.not_null,
+        .unique_changed = expected.unique != actual.unique,
+        .unique_name_changed = expected.unique_name != actual.unique_name,
+        .default_changed = normalize_schema_default(expected.default_value) !=
+            normalize_schema_default(actual.default_value),
+        .auto_increment_changed = expected.auto_increment != actual.auto_increment,
+        .check_changed = normalize_check_expression(expected.check) !=
+            normalize_check_expression(actual.check),
+        .reference_changed = !same_reference(expected.references, actual.references)
+    };
+}
+
+inline void diff_sqlite_table(
+    const DatabaseTable& expected_table,
+    const DatabaseTable& actual_table,
+    const Dialect& dialect,
+    const SchemaDiffOptions& options,
+    SchemaPlan& plan) {
+    for (const auto& column : expected_table.columns) {
+        const auto* actual_column = find_column(actual_table, column.name);
+        if (!actual_column) {
+            if (column.unique) {
+                plan.changes.push_back(SchemaChange{
+                    .kind = SchemaChangeKind::AddColumn,
+                    .table = expected_table.name,
+                    .description = "Add unique column " + column.name + " to " + expected_table.name,
+                    .statements = {},
+                    .safe = false
+                });
+                plan.warnings.push_back(
+                    "SQLite ADD COLUMN does not permit UNIQUE constraints; rebuild table " +
+                    expected_table.name + " to add unique column " + column.name + ".");
+            } else {
+                plan.changes.push_back(SchemaChange{
+                    .kind = SchemaChangeKind::AddColumn,
+                    .table = expected_table.name,
+                    .description = "Add column " + column.name + " to " + expected_table.name,
+                    .statements = {
+                        "ALTER TABLE " + dialect.quote_identifier(expected_table.name) +
+                        " ADD " + render_column_definition(column, dialect) + ";"
+                    },
+                    .safe = true
+                });
+            }
+            continue;
+        }
+
+        if (diff_column(column, *actual_column).any()) {
+            plan.warnings.push_back(
+                "SQLite ALTER COLUMN is not supported; rebuild table " +
+                expected_table.name + " to change column " + column.name + ".");
+        }
+    }
+
+    if (!same_checks(expected_table.checks, actual_table.checks)) {
+        plan.warnings.push_back(
+            "SQLite table CHECK constraints on " + expected_table.name +
+            " differ from the expected definition; rebuild the table to change them.");
+    }
+
+    for (const auto& column : actual_table.columns) {
+        if (find_column(expected_table, column.name)) continue;
+        plan.changes.push_back(SchemaChange{
+            .kind = SchemaChangeKind::DropColumn,
+            .table = expected_table.name,
+            .description = "Drop column " + column.name + " from " + expected_table.name,
+            .statements = {},
+            .safe = false
+        });
+        plan.warnings.push_back(
+            "Dropping columns on SQLite requires table rebuild (column " +
+            column.name + " on " + expected_table.name + ").");
+    }
+
+    for (const auto& index : expected_table.indexes) {
+        const auto* actual_index = find_index(actual_table, index.name);
+        if (!actual_index) {
+            plan.changes.push_back(SchemaChange{
+                .kind = SchemaChangeKind::AddIndex,
+                .table = expected_table.name,
+                .description = "Create index " + index.name + " on " + expected_table.name,
+                .statements = {render_index(expected_table, index, dialect)},
+                .safe = true
+            });
+        } else if (!same_index(index, *actual_index)) {
+            plan.warnings.push_back(
+                "SQLite index " + index.name + " on " + expected_table.name +
+                " differs from the expected definition; drop/recreate it explicitly.");
+        }
+    }
+
+    for (const auto& index : actual_table.indexes) {
+        if (find_index(expected_table, index.name)) continue;
+        plan.changes.push_back(SchemaChange{
+            .kind = SchemaChangeKind::DropIndex,
+            .table = expected_table.name,
+            .description = "Drop index " + index.name + " on " + expected_table.name,
+            .statements = options.allow_destructive
+                ? std::vector<std::string>{
+                    "DROP INDEX IF EXISTS " + dialect.quote_identifier(index.name) + ";"}
+                : std::vector<std::string>{},
+            .safe = false
+        });
+    }
+}
+
+inline std::vector<std::string> render_postgres_scalar_alterations(
+    const DatabaseTable& table,
+    const DatabaseColumn& expected,
+    const ColumnDiff& diff,
+    const Dialect& dialect) {
+    std::vector<std::string> statements;
+    const auto table_name = dialect.quote_identifier(table.name);
+    const auto column_name = dialect.quote_identifier(expected.name);
+    const auto prefix = "ALTER TABLE " + table_name + " ALTER COLUMN " + column_name + " ";
+
+    if (diff.type_changed) {
+        statements.push_back(prefix + "TYPE " + expected.type + ";");
+    }
+    if (diff.default_changed) {
+        statements.push_back(
+            expected.default_value
+                ? prefix + "SET DEFAULT " + *expected.default_value + ";"
+                : prefix + "DROP DEFAULT;");
+    }
+    if (diff.nullability_changed) {
+        statements.push_back(prefix + (expected.not_null ? "SET" : "DROP") + " NOT NULL;");
+    }
+    if (diff.auto_increment_changed) {
+        statements.push_back(
+            expected.auto_increment
+                ? prefix + "ADD GENERATED BY DEFAULT AS IDENTITY;"
+                : prefix + "DROP IDENTITY IF EXISTS;");
+    }
+    return statements;
+}
+
+inline void diff_postgres_table(
+    const DatabaseTable& expected_table,
+    const DatabaseTable& actual_table,
+    const Dialect& dialect,
+    const SchemaDiffOptions& options,
+    SchemaPlan& plan) {
+    for (const auto& column : expected_table.columns) {
+        const auto* actual_column = find_column(actual_table, column.name);
+        if (!actual_column) {
+            plan.changes.push_back(SchemaChange{
+                .kind = SchemaChangeKind::AddColumn,
+                .table = expected_table.name,
+                .description = "Add column " + column.name + " to " + expected_table.name,
+                .statements = {
+                    "ALTER TABLE " + dialect.quote_identifier(expected_table.name) +
+                    " ADD " + render_column_definition(column, dialect) + ";"
+                },
+                .safe = true
+            });
+            continue;
+        }
+
+        const auto diff = diff_column(column, *actual_column);
+        if (diff.postgres_scalar_mutation()) {
+            auto statements = render_postgres_scalar_alterations(
+                expected_table, column, diff, dialect);
+            if (!statements.empty()) {
+                plan.changes.push_back(SchemaChange{
+                    .kind = SchemaChangeKind::AlterColumn,
+                    .table = expected_table.name,
+                    .description = "Alter column " + column.name + " on " + expected_table.name,
+                    .statements = std::move(statements),
+                    .safe = true
+                });
+            }
+            if (diff.auto_increment_changed) {
+                plan.warnings.push_back(
+                    "Altering PostgreSQL identity properties on " + expected_table.name + "." +
+                    column.name + " may fail if an existing sequence is attached; verify generated column state.");
+            }
+        }
+
+        if (diff.unique_changed || diff.unique_name_changed) {
+            plan.warnings.push_back(
+                "PostgreSQL UNIQUE constraint on " + expected_table.name + "." + column.name +
+                " differs from the expected schema; constraint migration is not yet automatic.");
+        }
+        if (diff.check_changed) {
+            plan.warnings.push_back(
+                "PostgreSQL CHECK constraint on " + expected_table.name + "." + column.name +
+                " differs from the expected schema; constraint migration is not yet automatic.");
+        }
+        if (diff.reference_changed) {
+            plan.warnings.push_back(
+                "PostgreSQL foreign key on " + expected_table.name + "." + column.name +
+                " differs from the expected schema; constraint migration is not yet automatic.");
+        }
+    }
+
+    if (!same_checks(expected_table.checks, actual_table.checks)) {
+        plan.warnings.push_back(
+            "PostgreSQL table CHECK constraints on " + expected_table.name +
+            " differ from the expected schema; constraint migration is not yet automatic.");
+    }
+
+    for (const auto& column : actual_table.columns) {
+        if (find_column(expected_table, column.name)) continue;
+        plan.changes.push_back(SchemaChange{
+            .kind = SchemaChangeKind::DropColumn,
+            .table = expected_table.name,
+            .description = "Drop column " + column.name + " from " + expected_table.name,
+            .statements = options.allow_destructive
+                ? std::vector<std::string>{
+                    "ALTER TABLE " + dialect.quote_identifier(expected_table.name) +
+                    " DROP COLUMN " + dialect.quote_identifier(column.name) + ";"}
+                : std::vector<std::string>{},
+            .safe = false
+        });
+    }
+
+    for (const auto& index : expected_table.indexes) {
+        const auto* actual_index = find_index(actual_table, index.name);
+        if (!actual_index) {
+            plan.changes.push_back(SchemaChange{
+                .kind = SchemaChangeKind::AddIndex,
+                .table = expected_table.name,
+                .description = "Create index " + index.name + " on " + expected_table.name,
+                .statements = {render_index(expected_table, index, dialect)},
+                .safe = true
+            });
+        } else if (!same_index(index, *actual_index)) {
+            plan.changes.push_back(SchemaChange{
+                .kind = SchemaChangeKind::AddIndex,
+                .table = expected_table.name,
+                .description = "Recreate index " + index.name + " on " + expected_table.name,
+                .statements = {
+                    "DROP INDEX IF EXISTS " + dialect.quote_identifier(index.name) + ";",
+                    render_index(expected_table, index, dialect)
+                },
+                .safe = true
+            });
+        }
+    }
+
+    for (const auto& index : actual_table.indexes) {
+        if (find_index(expected_table, index.name)) continue;
+        plan.changes.push_back(SchemaChange{
+            .kind = SchemaChangeKind::DropIndex,
+            .table = expected_table.name,
+            .description = "Drop index " + index.name + " on " + expected_table.name,
+            .statements = options.allow_destructive
+                ? std::vector<std::string>{
+                    "DROP INDEX IF EXISTS " + dialect.quote_identifier(index.name) + ";"}
+                : std::vector<std::string>{},
+            .safe = false
+        });
+    }
+}
+
+inline void diff_existing_table(
+    const DatabaseTable& expected_table,
+    const DatabaseTable& actual_table,
+    const Dialect& dialect,
+    const SchemaDiffOptions& options,
+    SchemaPlan& plan) {
+    switch (dialect.family()) {
+        case DialectFamily::PostgreSQL:
+            diff_postgres_table(expected_table, actual_table, dialect, options, plan);
+            return;
+        case DialectFamily::SQLite:
+        case DialectFamily::Generic:
+            diff_sqlite_table(expected_table, actual_table, dialect, options, plan);
+            return;
+    }
+}
+
 } // namespace schema_detail
 
 inline SchemaPlan diff_schema(
@@ -219,104 +519,12 @@ inline SchemaPlan diff_schema(
             continue;
         }
 
-        const auto& actual_table = *actual_it->second;
-        for (const auto& column : expected_table.columns) {
-            const auto* actual_column = find_column(actual_table, column.name);
-            if (!actual_column) {
-                if (column.unique) {
-                    plan.changes.push_back(SchemaChange{
-                        .kind = SchemaChangeKind::AddColumn,
-                        .table = expected_table.name,
-                        .description = "Add unique column " + column.name + " to " + expected_table.name,
-                        .statements = {},
-                        .safe = false
-                    });
-                    plan.warnings.push_back(
-                        "SQLite ADD COLUMN does not permit UNIQUE constraints; rebuild table " +
-                        expected_table.name + " to add unique column " + column.name + ".");
-                } else {
-                    plan.changes.push_back(SchemaChange{
-                        .kind = SchemaChangeKind::AddColumn,
-                        .table = expected_table.name,
-                        .description = "Add column " + column.name + " to " + expected_table.name,
-                        .statements = {
-                            "ALTER TABLE " + dialect.quote_identifier(expected_table.name) +
-                            " ADD " + render_column_definition(column, dialect) + ";"
-                        },
-                        .safe = true
-                    });
-                }
-                continue;
-            }
-
-            const bool changed =
-                normalize_schema_type(column.type) != normalize_schema_type(actual_column->type) ||
-                column.not_null != actual_column->not_null ||
-                column.unique != actual_column->unique ||
-                column.unique_name != actual_column->unique_name ||
-                normalize_schema_default(column.default_value) !=
-                    normalize_schema_default(actual_column->default_value) ||
-                column.auto_increment != actual_column->auto_increment ||
-                normalize_check_expression(column.check) !=
-                    normalize_check_expression(actual_column->check) ||
-                !same_reference(column.references, actual_column->references);
-            if (changed) {
-                plan.warnings.push_back(
-                    "SQLite ALTER COLUMN is not supported; rebuild table " +
-                    expected_table.name + " to change column " + column.name + ".");
-            }
-        }
-
-        if (!same_checks(expected_table.checks, actual_table.checks)) {
-            plan.warnings.push_back(
-                "SQLite table CHECK constraints on " + expected_table.name +
-                " differ from the expected definition; rebuild the table to change them.");
-        }
-
-        for (const auto& column : actual_table.columns) {
-            if (find_column(expected_table, column.name)) continue;
-            plan.changes.push_back(SchemaChange{
-                .kind = SchemaChangeKind::DropColumn,
-                .table = expected_table.name,
-                .description = "Drop column " + column.name + " from " + expected_table.name,
-                .statements = {},
-                .safe = false
-            });
-            plan.warnings.push_back(
-                "Dropping columns on SQLite requires table rebuild (column " +
-                column.name + " on " + expected_table.name + ").");
-        }
-
-        for (const auto& index : expected_table.indexes) {
-            const auto* actual_index = find_index(actual_table, index.name);
-            if (!actual_index) {
-                plan.changes.push_back(SchemaChange{
-                    .kind = SchemaChangeKind::AddIndex,
-                    .table = expected_table.name,
-                    .description = "Create index " + index.name + " on " + expected_table.name,
-                    .statements = {render_index(expected_table, index, dialect)},
-                    .safe = true
-                });
-            } else if (!same_index(index, *actual_index)) {
-                plan.warnings.push_back(
-                    "SQLite index " + index.name + " on " + expected_table.name+
-                    " differs from the expected definition; drop/recreate it explicitly.");
-            }
-        }
-
-        for (const auto& index : actual_table.indexes) {
-            if (find_index(expected_table, index.name)) continue;
-            plan.changes.push_back(SchemaChange{
-                .kind = SchemaChangeKind::DropIndex,
-                .table = expected_table.name,
-                .description = "Drop index " + index.name + " on " + expected_table.name,
-                .statements = options.allow_destructive
-                    ? std::vector<std::string>{
-                        "DROP INDEX IF EXISTS " + dialect.quote_identifier(index.name) + ";"}
-                    : std::vector<std::string>{},
-                .safe = false
-            });
-        }
+        diff_existing_table(
+            expected_table,
+            *actual_it->second,
+            dialect,
+            options,
+            plan);
     }
 
     for (const auto& actual_table : actual.tables) {
