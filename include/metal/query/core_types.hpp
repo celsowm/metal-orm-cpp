@@ -27,19 +27,61 @@ public:
     virtual std::string placeholder(std::size_t index) const = 0;
 };
 
+inline std::string quote_ansi_identifier(std::string_view id) {
+    std::string out = "\"";
+    for (char c : id) {
+        if (c == '"') out += "\"\"";
+        else out += c;
+    }
+    out += '"';
+    return out;
+}
+
+class PlaceholderOffsetDialect final : public Dialect {
+public:
+    PlaceholderOffsetDialect(const Dialect& dialect, std::size_t offset)
+        : dialect_(dialect), offset_(offset) {}
+
+    std::string quote_identifier(std::string_view id) const override {
+        return dialect_.quote_identifier(id);
+    }
+
+    std::string placeholder(std::size_t index) const override {
+        return dialect_.placeholder(offset_ + index);
+    }
+
+private:
+    const Dialect& dialect_;
+    std::size_t offset_{};
+};
+
+inline PlaceholderOffsetDialect offset_placeholders(
+    const Dialect& dialect,
+    std::size_t offset) {
+    return PlaceholderOffsetDialect{dialect, offset};
+}
+
 class SQLiteDialect final : public Dialect {
 public:
     std::string quote_identifier(std::string_view id) const override {
-        std::string out = "\"";
-        for (char c : id) {
-            if (c == '"') out += "\"\"";
-            else out += c;
-        }
-        out += '"';
-        return out;
+        return quote_ansi_identifier(id);
     }
 
     std::string placeholder(std::size_t) const override { return "?"; }
+};
+
+class PostgresDialect final : public Dialect {
+public:
+    std::string quote_identifier(std::string_view id) const override {
+        return quote_ansi_identifier(id);
+    }
+
+    std::string placeholder(std::size_t index) const override {
+        if (index == 0) {
+            throw std::invalid_argument("MetalORM: PostgreSQL placeholder indexes are one-based");
+        }
+        return "$" + std::to_string(index);
+    }
 };
 
 struct CompiledQuery {
