@@ -35,7 +35,7 @@ consteval bool has_physical_reference() {
 
 template <info Member>
 using physical_reference_annotation_t =
-    std::remove_cv_t<[: std::meta::type_of(physical_reference_annotation_info<Member>()) :]>;
+    std::remove_cv_t<typename [: std::meta::type_of(physical_reference_annotation_info<Member>()) :]>;
 
 template <typename Reference>
 consteval info resolve_physical_reference_target() {
@@ -136,7 +136,7 @@ consteval bool has_column_unique() {
 
 template <info Member>
 using column_unique_annotation_t =
-    std::remove_cv_t<[: std::meta::type_of(column_unique_annotation_info<Member>()) :]>;
+    std::remove_cv_t<typename [: std::meta::type_of(column_unique_annotation_info<Member>()) :]>;
 
 template <info Member>
 consteval bool validate_column_unique() {
@@ -192,7 +192,7 @@ consteval bool has_column_check() {
 
 template <info Member>
 using column_check_annotation_t =
-    std::remove_cv_t<[: std::meta::type_of(column_check_annotation_info<Member>()) :]>;
+    std::remove_cv_t<typename [: std::meta::type_of(column_check_annotation_info<Member>()) :]>;
 
 template <info Member>
 consteval bool validate_column_check() {
