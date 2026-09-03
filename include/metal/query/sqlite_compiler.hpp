@@ -319,11 +319,13 @@ inline std::string compile_expression(const ExprPtr& expression, CompileContext&
             return out + ")";
         } else if constexpr (std::same_as<N, InSubqueryNode>) {
             const auto left = compile_scalar(node.operand, ctx);
-            auto sub = node.compile_subquery(ctx.dialect);
+            const auto nested_dialect = offset_placeholders(ctx.dialect, ctx.params.size());
+            auto sub = node.compile_subquery(nested_dialect);
             ctx.params.insert(ctx.params.end(), sub.params.begin(), sub.params.end());
             return left + (node.negated ? " NOT IN (" : " IN (") + sub.sql + ")";
         } else if constexpr (std::same_as<N, ExistsNode>) {
-            auto sub = node.compile_subquery(ctx.dialect);
+            const auto nested_dialect = offset_placeholders(ctx.dialect, ctx.params.size());
+            auto sub = node.compile_subquery(nested_dialect);
             ctx.params.insert(ctx.params.end(), sub.params.begin(), sub.params.end());
             return std::string(node.negated ? "NOT EXISTS (" : "EXISTS (") + sub.sql + ")";
         } else if constexpr (std::same_as<N, LogicalNode>) {
