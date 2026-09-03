@@ -12,6 +12,11 @@ endif()
 find_package(SQLite3 REQUIRED)
 find_package(Threads REQUIRED)
 
+option(METAL_ORM_BUILD_POSTGRESQL "Build the optional libpq PostgreSQL executor" ON)
+if(METAL_ORM_BUILD_POSTGRESQL)
+    find_package(PostgreSQL QUIET)
+endif()
+
 add_library(metal-orm STATIC
     src/sqlite_executor.cpp
     src/pooled_executor.cpp
@@ -26,6 +31,19 @@ target_include_directories(metal-orm PUBLIC
 )
 target_link_libraries(metal-orm PUBLIC SQLite::SQLite3 Threads::Threads)
 target_compile_options(metal-orm PUBLIC -std=c++26 -freflection)
+
+if(METAL_ORM_BUILD_POSTGRESQL AND PostgreSQL_FOUND)
+    add_library(metal-orm-postgres STATIC src/postgres_executor.cpp)
+    add_library(metal::orm-postgres ALIAS metal-orm-postgres)
+    target_include_directories(metal-orm-postgres PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+    )
+    target_link_libraries(metal-orm-postgres PUBLIC metal::orm PostgreSQL::PostgreSQL)
+    target_compile_options(metal-orm-postgres PUBLIC -std=c++26 -freflection)
+elseif(METAL_ORM_BUILD_POSTGRESQL)
+    message(STATUS "PostgreSQL development files not found; skipping metal-orm-postgres")
+endif()
 
 option(METAL_ORM_BUILD_EXAMPLES "Build MetalORM examples" ON)
 option(METAL_ORM_BUILD_TOOLS "Build MetalORM command-line tools" ON)
@@ -276,4 +294,10 @@ if(METAL_ORM_BUILD_TESTS)
     add_executable(metal-orm-entity-generator-tests tests/test_entity_generator.cpp)
     target_link_libraries(metal-orm-entity-generator-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-entity-generator-tests COMMAND metal-orm-entity-generator-tests)
+
+    if(TARGET metal-orm-postgres)
+        add_executable(metal-orm-postgres-executor-tests tests/test_postgres_executor.cpp)
+        target_link_libraries(metal-orm-postgres-executor-tests PRIVATE metal::orm-postgres)
+        add_test(NAME metal-orm-postgres-executor-tests COMMAND metal-orm-postgres-executor-tests)
+    endif()
 endif()
