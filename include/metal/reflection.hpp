@@ -78,7 +78,7 @@ consteval bool has_relation_annotation() {
 
 template <info Member>
 using relation_annotation_t =
-    std::remove_cv_t<[: std::meta::type_of(relation_annotation_info<Member>()) :]>;
+    std::remove_cv_t<typename [: std::meta::type_of(relation_annotation_info<Member>()) :]>;
 
 template <info Member>
 consteval bool is_persistent_member() {
@@ -101,7 +101,8 @@ consteval std::string_view column_name_view() {
 
 template <info Member>
 std::string column_name() {
-    return std::string(column_name_view<Member>());
+    constexpr auto name = column_name_view<Member>();
+    return std::string(name);
 }
 
 template <Mapped T, typename F>
