@@ -13,6 +13,7 @@ struct ForeignKeyReference {
     std::optional<std::string> on_delete;
     std::optional<std::string> on_update;
     bool deferrable{false};
+    std::optional<std::string> schema;
 };
 
 struct DatabaseColumn {
