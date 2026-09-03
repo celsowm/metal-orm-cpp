@@ -249,13 +249,26 @@ int main() {
             .name = "email",
             .type = "TEXT",
             .not_null = true,
-            .default_value = std::string{"'unknown'"}
+            .unique = true,
+            .unique_name = std::string{"uq_planner_users_email"},
+            .default_value = std::string{"'unknown'"},
+            .check = std::string{"length(email) > 0"}
         },
         metal::DatabaseColumn{
             .name = "active",
             .type = "BOOLEAN",
             .not_null = true,
             .default_value = std::string{"false"}
+        },
+        metal::DatabaseColumn{
+            .name = "owner_id",
+            .type = "BIGINT",
+            .references = metal::ForeignKeyReference{
+                .table = "accounts",
+                .column = "id",
+                .on_delete = std::string{"CASCADE"},
+                .schema = std::string{"identity"}
+            }
         }
     };
     desired_users.table.indexes = {
@@ -284,7 +297,14 @@ int main() {
         metal::DatabaseColumn{
             .name = "email",
             .type = "TEXT",
-            .not_null = false
+            .not_null = false,
+            .unique = true,
+            .default_value = std::nullopt,
+            .check = std::string{"length(email) > 1"}
+        },
+        metal::DatabaseColumn{
+            .name = "owner_id",
+            .type = "BIGINT"
         },
         metal::DatabaseColumn{
             .name = "legacy",
@@ -319,6 +339,18 @@ int main() {
     assert(plan_has_statement(
         safe_plan,
         "ALTER TABLE \"planner_users\" ADD \"active\" BOOLEAN NOT NULL DEFAULT false;"));
+    assert(plan_has_statement(
+        safe_plan,
+        "RENAME CONSTRAINT \"planner_users_email_key\" TO \"uq_planner_users_email\";"));
+    assert(plan_has_statement(
+        safe_plan,
+        "DROP CONSTRAINT \"planner_users_email_check\";"));
+    assert(plan_has_statement(
+        safe_plan,
+        "ADD CONSTRAINT \"planner_users_email_check\" CHECK (length(email) > 0);"));
+    assert(plan_has_statement(
+        safe_plan,
+        "ADD CONSTRAINT \"planner_users_owner_id_fkey\" FOREIGN KEY (\"owner_id\") REFERENCES \"identity\".\"accounts\" (\"id\") ON DELETE CASCADE;"));
     assert(plan_has_statement(safe_plan, "DROP INDEX IF EXISTS \"planner_users_email_idx\";"));
     assert(plan_has_statement(
         safe_plan,
