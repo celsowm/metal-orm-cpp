@@ -52,6 +52,7 @@ struct DatabaseTable {
     std::vector<DatabaseIndex> indexes;
     std::vector<DatabaseCheck> checks;
     std::optional<std::string> comment;
+    std::optional<std::string> primary_key_name;
 };
 
 struct DatabaseView {
@@ -82,6 +83,7 @@ enum class SchemaChangeKind {
     AddColumn,
     DropColumn,
     AlterColumn,
+    AlterTable,
     AddIndex,
     DropIndex
 };
