@@ -36,6 +36,7 @@
 #include "metal/openapi_relations.hpp"
 #include "metal/openapi_components.hpp"
 #include "metal/polymorphic.hpp"
+#include "metal/postgres_schema_introspection.hpp"
 #include "metal/reference.hpp"
 #include "metal/reflection.hpp"
 #include "metal/reference_traits.hpp"
