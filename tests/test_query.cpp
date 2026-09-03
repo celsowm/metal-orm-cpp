@@ -132,6 +132,56 @@ int main() {
     assert(metal::from_value<std::string>(postgres_nested.params[1]) == "Celso");
     assert(metal::from_value<std::string>(postgres_nested.params[2]) == "%C++%");
 
+    auto cte_source = metal::select<QueryUser>()
+        .where(metal::field<^^QueryUser::name> == "Celso");
+    auto postgres_cte = metal::select<QueryUser>()
+        .with("filtered_users", cte_source)
+        .from("filtered_users")
+        .where(metal::field<^^QueryUser::name> != "Levi")
+        .compile(postgres);
+    assert(postgres_cte.sql.find("\"name\" = $1") != std::string::npos);
+    assert(postgres_cte.sql.find("\"name\" <> $2") != std::string::npos);
+    assert(postgres_cte.params.size() == 2);
+    assert(metal::from_value<std::string>(postgres_cte.params[0]) == "Celso");
+    assert(metal::from_value<std::string>(postgres_cte.params[1]) == "Levi");
+
+    auto derived_source = metal::select<QueryUser>()
+        .where(metal::field<^^QueryUser::name> == "Celso");
+    auto postgres_derived = metal::select<QueryUser>()
+        .from_subquery(derived_source, "filtered")
+        .where(metal::field<^^QueryUser::name> != "Levi")
+        .compile(postgres);
+    assert(postgres_derived.sql.find("\"name\" = $1") != std::string::npos);
+    assert(postgres_derived.sql.find("\"filtered\".\"name\" <> $2") != std::string::npos);
+    assert(postgres_derived.params.size() == 2);
+
+    auto union_left = metal::select<QueryUser>()
+        .clear_projection()
+        .project(metal::field<^^QueryUser::id>)
+        .where(metal::field<^^QueryUser::name> == "Celso");
+    auto union_right = metal::select<QueryUser>()
+        .clear_projection()
+        .project(metal::field<^^QueryUser::id>)
+        .where(metal::field<^^QueryUser::name> == "Levi");
+    union_left.union_all(union_right);
+    auto postgres_union = union_left.compile(postgres);
+    assert(postgres_union.sql.find("\"name\" = $1") != std::string::npos);
+    assert(postgres_union.sql.find("UNION ALL SELECT \"id\" FROM \"q_users\" WHERE \"name\" = $2") != std::string::npos);
+    assert(postgres_union.params.size() == 2);
+
+    auto postgres_relation = metal::where_has<^^QueryUser::posts>(
+        metal::select<QueryUser>()
+            .where(metal::field<^^QueryUser::name> != "Levi"),
+        [](auto& posts) {
+            posts.where(metal::like(metal::field<^^QueryPost::title>, "%C++%"));
+        })
+        .compile(postgres);
+    assert(postgres_relation.sql.find("\"t0\".\"name\" <> $1") != std::string::npos);
+    assert(postgres_relation.sql.find("\"t0_rel\".\"title\" LIKE $2") != std::string::npos);
+    assert(postgres_relation.params.size() == 2);
+    assert(metal::from_value<std::string>(postgres_relation.params[0]) == "Levi");
+    assert(metal::from_value<std::string>(postgres_relation.params[1]) == "%C++%");
+
     auto empty_in = metal::select<QueryUser>()
         .where(metal::in(metal::field<^^QueryUser::id>, std::vector<std::int64_t>{}))
         .compile(dialect);
