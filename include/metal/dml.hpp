@@ -51,6 +51,7 @@ struct DmlReturning {
 
 struct DmlConflictClause {
     std::vector<std::string> columns;
+    std::optional<std::string> constraint;
     bool do_nothing{false};
     std::vector<DmlAssignment> assignments;
     std::vector<DmlPredicate> predicates;
@@ -198,8 +199,11 @@ class InsertQueryBuilder;
 
 class ConflictBuilder {
 public:
-    ConflictBuilder(InsertQueryBuilder& owner, std::vector<std::string> columns)
-        : owner_(owner), columns_(std::move(columns)) {}
+    ConflictBuilder(
+        InsertQueryBuilder& owner,
+        std::vector<std::string> columns,
+        std::optional<std::string> constraint = std::nullopt)
+        : owner_(owner), columns_(std::move(columns)), constraint_(std::move(constraint)) {}
 
     InsertQueryBuilder& do_nothing();
     InsertQueryBuilder& do_update(
@@ -209,6 +213,7 @@ public:
 private:
     InsertQueryBuilder& owner_;
     std::vector<std::string> columns_;
+    std::optional<std::string> constraint_;
 };
 
 class InsertQueryBuilder {
@@ -262,6 +267,13 @@ public:
 
     ConflictBuilder on_conflict(std::vector<std::string> columns) {
         return ConflictBuilder{*this, std::move(columns)};
+    }
+
+    ConflictBuilder on_conflict_constraint(std::string constraint) {
+        if (constraint.empty()) {
+            throw std::invalid_argument("MetalORM: ON CONFLICT constraint name cannot be empty");
+        }
+        return ConflictBuilder{*this, {}, std::move(constraint)};
     }
 
     InsertQueryBuilder& returning(std::vector<std::string> columns) {
@@ -330,22 +342,31 @@ public:
 
         if (node_.conflict) {
             const auto& conflict = *node_.conflict;
-            if (conflict.columns.empty()) {
-                throw std::logic_error("MetalORM: SQLite ON CONFLICT requires conflict columns");
+            if (conflict.constraint) {
+                if (dialect.family() != DialectFamily::PostgreSQL) {
+                    throw std::logic_error(
+                        "MetalORM: named ON CONFLICT constraints are supported only by PostgreSQL");
+                }
+                out.sql += " ON CONFLICT ON CONSTRAINT " +
+                           dialect.quote_identifier(*conflict.constraint);
+            } else {
+                if (conflict.columns.empty()) {
+                    throw std::logic_error("MetalORM: ON CONFLICT requires conflict columns");
+                }
+                out.sql += " ON CONFLICT (";
+                for (std::size_t i = 0; i < conflict.columns.size(); ++i) {
+                    if (i) out.sql += ", ";
+                    out.sql += dialect.quote_identifier(conflict.columns[i]);
+                }
+                out.sql += ")";
             }
 
-            out.sql += " ON CONFLICT (";
-            for (std::size_t i = 0; i < conflict.columns.size(); ++i) {
-                if (i) out.sql += ", ";
-                out.sql += dialect.quote_identifier(conflict.columns[i]);
-            }
-            out.sql += ")";
             if (conflict.do_nothing) {
                 out.sql += " DO NOTHING";
             } else {
                 if (conflict.assignments.empty()) {
                     throw std::logic_error(
-                        "MetalORM: SQLite ON CONFLICT DO UPDATE requires at least one assignment");
+                        "MetalORM: ON CONFLICT DO UPDATE requires at least one assignment");
                 }
                 out.sql += " DO UPDATE SET ";
                 for (std::size_t i = 0; i < conflict.assignments.size(); ++i) {
@@ -376,7 +397,8 @@ private:
 };
 
 inline InsertQueryBuilder& ConflictBuilder::do_nothing() {
-    return owner_.set_conflict(DmlConflictClause{std::move(columns_), true, {}, {}});
+    return owner_.set_conflict(DmlConflictClause{
+        std::move(columns_), std::move(constraint_), true, {}, {}});
 }
 
 inline InsertQueryBuilder& ConflictBuilder::do_update(
@@ -386,7 +408,11 @@ inline InsertQueryBuilder& ConflictBuilder::do_update(
         throw std::logic_error("MetalORM: ON CONFLICT DO UPDATE requires at least one assignment");
     }
     return owner_.set_conflict(DmlConflictClause{
-        std::move(columns_), false, std::move(assignments), std::move(predicates)});
+        std::move(columns_),
+        std::move(constraint_),
+        false,
+        std::move(assignments),
+        std::move(predicates)});
 }
 
 class UpdateQueryBuilder {
