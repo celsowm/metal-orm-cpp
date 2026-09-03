@@ -220,6 +220,10 @@ if(METAL_ORM_BUILD_TESTS)
     target_link_libraries(metal-orm-schema-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-schema-parity-tests COMMAND metal-orm-schema-parity-tests)
 
+    add_executable(metal-orm-postgres-schema-introspection-tests tests/test_postgres_schema_introspection.cpp)
+    target_link_libraries(metal-orm-postgres-schema-introspection-tests PRIVATE metal::orm)
+    add_test(NAME metal-orm-postgres-schema-introspection-tests COMMAND metal-orm-postgres-schema-introspection-tests)
+
     add_executable(metal-orm-check-constraint-parity-tests tests/test_check_constraints.cpp)
     target_link_libraries(metal-orm-check-constraint-parity-tests PRIVATE metal::orm)
     add_test(NAME metal-orm-check-constraint-parity-tests COMMAND metal-orm-check-constraint-parity-tests)
