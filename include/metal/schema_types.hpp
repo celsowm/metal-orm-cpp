@@ -99,6 +99,7 @@ struct SchemaPlan {
 };
 
 struct IntrospectOptions {
+    std::optional<std::string> schema;
     std::vector<std::string> include_tables;
     std::vector<std::string> exclude_tables;
     bool include_views{false};
