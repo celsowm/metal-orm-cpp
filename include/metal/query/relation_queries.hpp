@@ -180,14 +180,16 @@ inline CompiledQuery compile_relation_filter_list(
     };
 
     for (const auto& filter : filters) {
-        auto child = filter.compile_exists(dialect, root_alias);
+        const auto nested_dialect = offset_placeholders(dialect, out.params.size());
+        auto child = filter.compile_exists(nested_dialect, root_alias);
         append_predicate(
             std::string(filter.negated ? "NOT EXISTS (" : "EXISTS (") + child.sql + ")",
             std::move(child.params));
     }
 
     if (outer_extra) {
-        auto extra = outer_extra(dialect, root_alias);
+        const auto nested_dialect = offset_placeholders(dialect, out.params.size());
+        auto extra = outer_extra(nested_dialect, root_alias);
         append_predicate(std::move(extra.sql), std::move(extra.params));
     }
     return out;
