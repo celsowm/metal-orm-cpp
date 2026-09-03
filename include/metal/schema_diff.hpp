@@ -75,6 +75,7 @@ inline bool same_reference(
            expected->column == actual->column &&
            expected->name == actual->name &&
            expected->deferrable == actual->deferrable &&
+           expected->schema == actual->schema &&
            normalize_reference_action(expected->on_delete) ==
                normalize_reference_action(actual->on_delete) &&
            normalize_reference_action(expected->on_update) ==
@@ -120,6 +121,17 @@ inline const DatabaseIndex* find_index(const DatabaseTable& table, std::string_v
     return found == table.indexes.end() ? nullptr : &*found;
 }
 
+inline std::string render_reference_table(
+    const ForeignKeyReference& reference,
+    const Dialect& dialect) {
+    std::string sql;
+    if (reference.schema) {
+        sql += dialect.quote_identifier(*reference.schema) + ".";
+    }
+    sql += dialect.quote_identifier(reference.table);
+    return sql;
+}
+
 inline std::string render_reference_definition(
     const ForeignKeyReference& reference,
     const Dialect& dialect) {
@@ -127,7 +139,7 @@ inline std::string render_reference_definition(
     if (reference.name) {
         sql += " CONSTRAINT " + dialect.quote_identifier(*reference.name);
     }
-    sql += " REFERENCES " + dialect.quote_identifier(reference.table) +
+    sql += " REFERENCES " + render_reference_table(reference, dialect) +
            " (" + dialect.quote_identifier(reference.column) + ")";
     if (reference.on_delete) sql += " ON DELETE " + *reference.on_delete;
     if (reference.on_update) sql += " ON UPDATE " + *reference.on_update;
