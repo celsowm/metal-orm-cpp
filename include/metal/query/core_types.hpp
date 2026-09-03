@@ -20,6 +20,12 @@
 
 namespace metal {
 
+enum class DialectFamily {
+    Generic,
+    SQLite,
+    PostgreSQL
+};
+
 enum class GeneratedKeyRetrieval {
     DriverLastInsertId,
     Returning
@@ -30,6 +36,7 @@ public:
     virtual ~Dialect() = default;
     virtual std::string quote_identifier(std::string_view id) const = 0;
     virtual std::string placeholder(std::size_t index) const = 0;
+    [[nodiscard]] virtual DialectFamily family() const noexcept { return DialectFamily::Generic; }
     [[nodiscard]] virtual GeneratedKeyRetrieval generated_key_retrieval() const noexcept {
         return GeneratedKeyRetrieval::DriverLastInsertId;
     }
@@ -58,6 +65,10 @@ public:
         return dialect_.placeholder(offset_ + index);
     }
 
+    [[nodiscard]] DialectFamily family() const noexcept override {
+        return dialect_.family();
+    }
+
     [[nodiscard]] GeneratedKeyRetrieval generated_key_retrieval() const noexcept override {
         return dialect_.generated_key_retrieval();
     }
@@ -80,6 +91,7 @@ public:
     }
 
     std::string placeholder(std::size_t) const override { return "?"; }
+    [[nodiscard]] DialectFamily family() const noexcept override { return DialectFamily::SQLite; }
 };
 
 class PostgresDialect final : public Dialect {
@@ -94,6 +106,8 @@ public:
         }
         return "$" + std::to_string(index);
     }
+
+    [[nodiscard]] DialectFamily family() const noexcept override { return DialectFamily::PostgreSQL; }
 
     [[nodiscard]] GeneratedKeyRetrieval generated_key_retrieval() const noexcept override {
         return GeneratedKeyRetrieval::Returning;
