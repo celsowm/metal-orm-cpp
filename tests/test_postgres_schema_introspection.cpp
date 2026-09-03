@@ -127,6 +127,7 @@ int main() {
             metal::QueryResult{.rows = {
                 metal::Row{
                     {"table_name", std::string{"users"}},
+                    {"constraint_name", std::string{"users_identity_pk"}},
                     {"column_name", std::string{"id"}},
                     {"ordinal_position", std::int64_t{1}}
                 }
@@ -159,7 +160,18 @@ int main() {
                 }
             }}
         },
-        {"con.contype = 'c'", metal::QueryResult{}},
+        {
+            "con.contype = 'c'",
+            metal::QueryResult{.rows = {
+                metal::Row{
+                    {"table_name", std::string{"users"}},
+                    {"constraint_name", std::string{"users_business_rule"}},
+                    {"expression", std::string{"owner_id > 0 OR email IS NOT NULL"}},
+                    {"column_count", std::int64_t{2}},
+                    {"column_name", nullptr}
+                }
+            }}
+        },
         {
             "pg_catalog.pg_index",
             metal::QueryResult{.rows = {
@@ -200,7 +212,11 @@ int main() {
     const auto& users = schema.tables.front();
     assert(users.name == "users");
     assert(users.primary_key == std::vector<std::string>{"id"});
+    assert(users.primary_key_name == std::optional<std::string>{"users_identity_pk"});
     assert(users.comment == std::optional<std::string>{"Users table"});
+    assert(users.checks.size() == 1);
+    assert(users.checks.front().name == std::optional<std::string>{"users_business_rule"});
+    assert(users.checks.front().expression == "owner_id > 0 OR email IS NOT NULL");
 
     const auto& id = column_named(users, "id");
     assert(id.type == "bigint");
@@ -271,6 +287,17 @@ int main() {
             }
         }
     };
+    desired_users.table.primary_key = {"id", "email"};
+    desired_users.table.checks = {
+        metal::DatabaseCheck{
+            .name = std::string{"planner_users_active_guard"},
+            .expression = "active IN (true, false)"
+        },
+        metal::DatabaseCheck{
+            .name = std::nullopt,
+            .expression = "length(email) <= 320"
+        }
+    };
     desired_users.table.indexes = {
         metal::DatabaseIndex{
             .name = "planner_users_email_idx",
@@ -309,6 +336,22 @@ int main() {
         metal::DatabaseColumn{
             .name = "legacy",
             .type = "TEXT"
+        }
+    };
+    current_users.primary_key = {"id"};
+    current_users.primary_key_name = std::string{"planner_users_legacy_pk"};
+    current_users.checks = {
+        metal::DatabaseCheck{
+            .name = std::string{"planner_users_active_guard"},
+            .expression = "active = true"
+        },
+        metal::DatabaseCheck{
+            .name = std::string{"planner_users_email_length"},
+            .expression = "length(email) <= 320"
+        },
+        metal::DatabaseCheck{
+            .name = std::string{"planner_users_obsolete_check"},
+            .expression = "legacy IS NOT NULL"
         }
     };
     current_users.indexes = {
@@ -351,6 +394,15 @@ int main() {
     assert(plan_has_statement(
         safe_plan,
         "ADD CONSTRAINT \"planner_users_owner_id_fkey\" FOREIGN KEY (\"owner_id\") REFERENCES \"identity\".\"accounts\" (\"id\") ON DELETE CASCADE;"));
+    assert(plan_has_statement(
+        safe_plan,
+        "DROP CONSTRAINT \"planner_users_active_guard\";"));
+    assert(plan_has_statement(
+        safe_plan,
+        "ADD CONSTRAINT \"planner_users_active_guard\" CHECK (active IN (true, false));"));
+    assert(!plan_has_statement(safe_plan, "planner_users_email_length"));
+    assert(!plan_has_statement(safe_plan, "planner_users_legacy_pk"));
+    assert(!plan_has_statement(safe_plan, "planner_users_obsolete_check"));
     assert(plan_has_statement(safe_plan, "DROP INDEX IF EXISTS \"planner_users_email_idx\";"));
     assert(plan_has_statement(
         safe_plan,
@@ -367,6 +419,15 @@ int main() {
         current,
         dialect,
         metal::SchemaDiffOptions{.allow_destructive = true});
+    assert(plan_has_statement(
+        destructive_plan,
+        "ALTER TABLE \"planner_users\" DROP CONSTRAINT \"planner_users_legacy_pk\";"));
+    assert(plan_has_statement(
+        destructive_plan,
+        "ALTER TABLE \"planner_users\" ADD CONSTRAINT \"planner_users_pkey\" PRIMARY KEY (\"id\", \"email\");"));
+    assert(plan_has_statement(
+        destructive_plan,
+        "ALTER TABLE \"planner_users\" DROP CONSTRAINT \"planner_users_obsolete_check\";"));
     assert(plan_has_statement(
         destructive_plan,
         "ALTER TABLE \"planner_users\" DROP COLUMN \"legacy\";"));
