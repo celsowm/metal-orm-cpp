@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -181,6 +182,44 @@ int main() {
     assert(postgres_relation.params.size() == 2);
     assert(metal::from_value<std::string>(postgres_relation.params[0]) == "Levi");
     assert(metal::from_value<std::string>(postgres_relation.params[1]) == "%C++%");
+
+    auto postgres_functions = metal::select<QueryUser>()
+        .clear_projection()
+        .project(metal::now().as("now_value"))
+        .project(metal::year(std::string{"2026-09-03"}).as("year_value"))
+        .project(metal::date_add(
+            std::string{"2026-09-03"}, std::int64_t{1}, metal::date_part::day).as("tomorrow"))
+        .project(metal::truncate(12.345, std::int64_t{2}).as("truncated"))
+        .project(metal::group_concat(metal::field<^^QueryUser::name>, std::string{"|"}).as("names"))
+        .project(metal::date_trunc(
+            metal::date_part::hour, std::string{"2026-09-03 10:45:00"}).as("hour_bucket"))
+        .compile(postgres);
+    assert(postgres_functions.sql ==
+        "SELECT NOW() AS \"now_value\", EXTRACT(YEAR FROM $1) AS \"year_value\", "
+        "($2 + ($3 || ' day')::INTERVAL) AS \"tomorrow\", "
+        "TRUNC($4, $5) AS \"truncated\", STRING_AGG(\"name\", $6) AS \"names\", "
+        "DATE_TRUNC('hour', $7) AS \"hour_bucket\" FROM \"q_users\";");
+    assert(postgres_functions.params.size() == 7);
+    assert(metal::from_value<std::string>(postgres_functions.params[0]) == "2026-09-03");
+    assert(metal::from_value<std::string>(postgres_functions.params[1]) == "2026-09-03");
+    assert(metal::from_value<std::int64_t>(postgres_functions.params[2]) == 1);
+    assert(metal::from_value<double>(postgres_functions.params[3]) == 12.345);
+    assert(metal::from_value<std::int64_t>(postgres_functions.params[4]) == 2);
+    assert(metal::from_value<std::string>(postgres_functions.params[5]) == "|");
+    assert(metal::from_value<std::string>(postgres_functions.params[6]) == "2026-09-03 10:45:00");
+
+    bool sqlite_rejected_hour_trunc = false;
+    try {
+        (void)metal::select<QueryUser>()
+            .clear_projection()
+            .project(metal::date_trunc(
+                metal::date_part::hour, std::string{"2026-09-03 10:45:00"}))
+            .compile(dialect);
+    } catch (const std::logic_error& error) {
+        sqlite_rejected_hour_trunc =
+            std::string(error.what()).find("SQLite DATE_TRUNC supports year, month and day") != std::string::npos;
+    }
+    assert(sqlite_rejected_hour_trunc);
 
     auto empty_in = metal::select<QueryUser>()
         .where(metal::in(metal::field<^^QueryUser::id>, std::vector<std::int64_t>{}))
