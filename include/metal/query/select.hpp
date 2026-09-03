@@ -455,7 +455,8 @@ private:
     std::string compile_from_source(const Dialect& dialect, CompiledQuery& out, std::string_view root_alias) const {
         if (state_->derived_source) {
             const auto& derived = *state_->derived_source;
-            auto source = derived.compile_query(dialect);
+            const auto nested_dialect = offset_placeholders(dialect, out.params.size());
+            auto source = derived.compile_query(nested_dialect);
             out.params.insert(out.params.end(), source.params.begin(), source.params.end());
             const std::string alias = root_alias.empty() ? derived.alias : std::string(root_alias);
             return "(" + source.sql + ") AS " + dialect.quote_identifier(alias);
@@ -490,7 +491,8 @@ private:
                     }
                     out.sql += ")";
                 }
-                auto compiled_cte = cte.compile_query(dialect);
+                const auto nested_dialect = offset_placeholders(dialect, out.params.size());
+                auto compiled_cte = cte.compile_query(nested_dialect);
                 out.params.insert(out.params.end(), compiled_cte.params.begin(), compiled_cte.params.end());
                 out.sql += " AS (" + compiled_cte.sql + ")";
             }
@@ -568,27 +570,27 @@ private:
         base += compile_from_source(dialect, out, root_alias);
         for (const auto& clause : join_sql) base += clause;
 
+        std::optional<std::string> where_sql;
+        if (state_->where) {
+            where_sql = compile_expression(*state_->where, ctx);
+        }
+
         std::optional<std::string> extra_where_sql;
-        std::vector<Value> extra_where_params;
         if (extra_where) {
-            auto compiled_extra = extra_where(dialect, root_alias);
+            const auto nested_dialect = offset_placeholders(dialect, out.params.size());
+            auto compiled_extra = extra_where(nested_dialect, root_alias);
             if (!compiled_extra.sql.empty()) {
                 extra_where_sql = std::move(compiled_extra.sql);
-                extra_where_params = std::move(compiled_extra.params);
+                out.params.insert(
+                    out.params.end(), compiled_extra.params.begin(), compiled_extra.params.end());
             }
         }
 
-        if (state_->where || extra_where_sql) {
+        if (where_sql || extra_where_sql) {
             base += " WHERE ";
-            if (state_->where) {
-                base += "(" + compile_expression(*state_->where, ctx) + ")";
-            }
-            if (state_->where && extra_where_sql) base += " AND ";
-            if (extra_where_sql) {
-                base += "(" + *extra_where_sql + ")";
-                out.params.insert(
-                    out.params.end(), extra_where_params.begin(), extra_where_params.end());
-            }
+            if (where_sql) base += "(" + *where_sql + ")";
+            if (where_sql && extra_where_sql) base += " AND ";
+            if (extra_where_sql) base += "(" + *extra_where_sql + ")";
         }
         if (!state_->group_by.empty()) {
             base += " GROUP BY ";
@@ -601,7 +603,8 @@ private:
 
         out.sql += base;
         for (const auto& set_op : state_->set_operations) {
-            auto rhs = set_op.compile_query(dialect);
+            const auto nested_dialect = offset_placeholders(dialect, out.params.size());
+            auto rhs = set_op.compile_query(nested_dialect);
             out.params.insert(out.params.end(), rhs.params.begin(), rhs.params.end());
             out.sql += " " + set_operation_token(set_op.kind) + " " + rhs.sql;
         }
