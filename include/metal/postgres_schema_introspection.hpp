@@ -60,12 +60,11 @@ inline DatabaseColumn* find_column(DatabaseTable& table, std::string_view name) 
     return found == table.columns.end() ? nullptr : &*found;
 }
 
-inline std::string scoped_reference_table(
+inline std::optional<std::string> scoped_reference_schema(
     std::string_view current_schema,
-    std::string_view target_schema,
-    std::string_view target_table) {
-    if (current_schema == target_schema) return std::string(target_table);
-    return std::string(target_schema) + "." + std::string(target_table);
+    std::string_view target_schema) {
+    if (current_schema == target_schema) return std::nullopt;
+    return std::string(target_schema);
 }
 
 struct IndexAccumulator {
@@ -274,7 +273,7 @@ ORDER BY src.relname, con.conname, src_keys.ord;
         auto* column = find_column(schema.tables[position->second], *column_name);
         if (!column || column->references) continue;
         column->references = ForeignKeyReference{
-            .table = scoped_reference_table(schema_name, *target_schema, *target_table),
+            .table = *target_table,
             .column = *target_column,
             .name = implicit_constraint_name(
                 *table_name,
@@ -283,7 +282,8 @@ ORDER BY src.relname, con.conname, src_keys.ord;
                 "fkey"),
             .on_delete = normalize_action(row_string(row, "on_delete")),
             .on_update = normalize_action(row_string(row, "on_update")),
-            .deferrable = row_bool(row, "deferrable")
+            .deferrable = row_bool(row, "deferrable"),
+            .schema = scoped_reference_schema(schema_name, *target_schema)
         };
     }
 
