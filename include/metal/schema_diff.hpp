@@ -83,6 +83,19 @@ inline bool same_reference(
                normalize_reference_action(actual->on_update);
 }
 
+inline bool same_reference_definition(
+    const ForeignKeyReference& expected,
+    const ForeignKeyReference& actual) {
+    return expected.table == actual.table &&
+           expected.column == actual.column &&
+           expected.deferrable == actual.deferrable &&
+           expected.schema == actual.schema &&
+           normalize_reference_action(expected.on_delete) ==
+               normalize_reference_action(actual.on_delete) &&
+           normalize_reference_action(expected.on_update) ==
+               normalize_reference_action(actual.on_update);
+}
+
 inline bool same_check(const DatabaseCheck& expected, const DatabaseCheck& actual) {
     return expected.name == actual.name &&
            normalize_check_expression(expected.expression) ==
@@ -352,6 +365,245 @@ inline std::vector<std::string> render_postgres_scalar_alterations(
     return statements;
 }
 
+inline std::string postgres_column_constraint_name(
+    const DatabaseTable& table,
+    const DatabaseColumn& column,
+    std::string_view suffix,
+    const std::optional<std::string>& explicit_name) {
+    if (explicit_name) return *explicit_name;
+    return table.name + "_" + column.name + "_" + std::string(suffix);
+}
+
+inline std::string postgres_drop_constraint(
+    const DatabaseTable& table,
+    std::string_view constraint,
+    const Dialect& dialect) {
+    return "ALTER TABLE " + dialect.quote_identifier(table.name) +
+           " DROP CONSTRAINT " + dialect.quote_identifier(constraint) + ";";
+}
+
+inline std::string postgres_add_unique_constraint(
+    const DatabaseTable& table,
+    const DatabaseColumn& column,
+    const Dialect& dialect) {
+    const auto name = postgres_column_constraint_name(
+        table, column, "key", column.unique_name);
+    return "ALTER TABLE " + dialect.quote_identifier(table.name) +
+           " ADD CONSTRAINT " + dialect.quote_identifier(name) +
+           " UNIQUE (" + dialect.quote_identifier(column.name) + ");";
+}
+
+inline std::string postgres_add_check_constraint(
+    const DatabaseTable& table,
+    const DatabaseColumn& column,
+    const Dialect& dialect) {
+    const auto name = postgres_column_constraint_name(
+        table, column, "check", std::nullopt);
+    return "ALTER TABLE " + dialect.quote_identifier(table.name) +
+           " ADD CONSTRAINT " + dialect.quote_identifier(name) +
+           " CHECK (" + *column.check + ");";
+}
+
+inline std::string postgres_add_reference_constraint(
+    const DatabaseTable& table,
+    const DatabaseColumn& column,
+    const ForeignKeyReference& reference,
+    const Dialect& dialect) {
+    const auto name = postgres_column_constraint_name(
+        table, column, "fkey", reference.name);
+    std::string sql = "ALTER TABLE " + dialect.quote_identifier(table.name) +
+        " ADD CONSTRAINT " + dialect.quote_identifier(name) +
+        " FOREIGN KEY (" + dialect.quote_identifier(column.name) + ")" +
+        " REFERENCES " + render_reference_table(reference, dialect) +
+        " (" + dialect.quote_identifier(reference.column) + ")";
+    if (reference.on_delete) sql += " ON DELETE " + *reference.on_delete;
+    if (reference.on_update) sql += " ON UPDATE " + *reference.on_update;
+    if (reference.deferrable) sql += " DEFERRABLE INITIALLY DEFERRED";
+    sql += ";";
+    return sql;
+}
+
+inline void diff_postgres_unique_constraint(
+    const DatabaseTable& table,
+    const DatabaseColumn& expected,
+    const DatabaseColumn& actual,
+    const ColumnDiff& diff,
+    const Dialect& dialect,
+    const SchemaDiffOptions& options,
+    SchemaPlan& plan) {
+    if (!diff.unique_changed && !diff.unique_name_changed) return;
+
+    if (expected.unique && !actual.unique) {
+        plan.changes.push_back(SchemaChange{
+            .kind = SchemaChangeKind::AlterColumn,
+            .table = table.name,
+            .description = "Add UNIQUE constraint on " + table.name + "." + expected.name,
+            .statements = {postgres_add_unique_constraint(table, expected, dialect)},
+            .safe = true
+        });
+        return;
+    }
+
+    const auto actual_name = postgres_column_constraint_name(
+        table, actual, "key", actual.unique_name);
+    if (!expected.unique && actual.unique) {
+        plan.changes.push_back(SchemaChange{
+            .kind = SchemaChangeKind::AlterColumn,
+            .table = table.name,
+            .description = "Drop UNIQUE constraint on " + table.name + "." + expected.name,
+            .statements = options.allow_destructive
+                ? std::vector<std::string>{postgres_drop_constraint(table, actual_name, dialect)}
+                : std::vector<std::string>{},
+            .safe = false
+        });
+        return;
+    }
+
+    if (expected.unique && actual.unique) {
+        const auto expected_name = postgres_column_constraint_name(
+            table, expected, "key", expected.unique_name);
+        if (actual_name != expected_name) {
+            plan.changes.push_back(SchemaChange{
+                .kind = SchemaChangeKind::AlterColumn,
+                .table = table.name,
+                .description = "Rename UNIQUE constraint on " + table.name + "." + expected.name,
+                .statements = {
+                    "ALTER TABLE " + dialect.quote_identifier(table.name) +
+                    " RENAME CONSTRAINT " + dialect.quote_identifier(actual_name) +
+                    " TO " + dialect.quote_identifier(expected_name) + ";"
+                },
+                .safe = true
+            });
+        }
+    }
+}
+
+inline void diff_postgres_check_constraint(
+    const DatabaseTable& table,
+    const DatabaseColumn& expected,
+    const DatabaseColumn& actual,
+    const ColumnDiff& diff,
+    const Dialect& dialect,
+    const SchemaDiffOptions& options,
+    SchemaPlan& plan) {
+    if (!diff.check_changed) return;
+    const auto name = postgres_column_constraint_name(
+        table, expected, "check", std::nullopt);
+
+    if (expected.check && !actual.check) {
+        plan.changes.push_back(SchemaChange{
+            .kind = SchemaChangeKind::AlterColumn,
+            .table = table.name,
+            .description = "Add CHECK constraint on " + table.name + "." + expected.name,
+            .statements = {postgres_add_check_constraint(table, expected, dialect)},
+            .safe = true
+        });
+        return;
+    }
+
+    if (!expected.check && actual.check) {
+        plan.changes.push_back(SchemaChange{
+            .kind = SchemaChangeKind::AlterColumn,
+            .table = table.name,
+            .description = "Drop CHECK constraint on " + table.name + "." + expected.name,
+            .statements = options.allow_destructive
+                ? std::vector<std::string>{postgres_drop_constraint(table, name, dialect)}
+                : std::vector<std::string>{},
+            .safe = false
+        });
+        return;
+    }
+
+    if (expected.check && actual.check) {
+        plan.changes.push_back(SchemaChange{
+            .kind = SchemaChangeKind::AlterColumn,
+            .table = table.name,
+            .description = "Replace CHECK constraint on " + table.name + "." + expected.name,
+            .statements = {
+                postgres_drop_constraint(table, name, dialect),
+                postgres_add_check_constraint(table, expected, dialect)
+            },
+            .safe = true
+        });
+    }
+}
+
+inline void diff_postgres_reference_constraint(
+    const DatabaseTable& table,
+    const DatabaseColumn& expected,
+    const DatabaseColumn& actual,
+    const ColumnDiff& diff,
+    const Dialect& dialect,
+    const SchemaDiffOptions& options,
+    SchemaPlan& plan) {
+    if (!diff.reference_changed) return;
+
+    if (expected.references && !actual.references) {
+        plan.changes.push_back(SchemaChange{
+            .kind = SchemaChangeKind::AlterColumn,
+            .table = table.name,
+            .description = "Add foreign key on " + table.name + "." + expected.name,
+            .statements = {
+                postgres_add_reference_constraint(
+                    table, expected, *expected.references, dialect)
+            },
+            .safe = true
+        });
+        return;
+    }
+
+    if (!expected.references && actual.references) {
+        const auto actual_name = postgres_column_constraint_name(
+            table, actual, "fkey", actual.references->name);
+        plan.changes.push_back(SchemaChange{
+            .kind = SchemaChangeKind::AlterColumn,
+            .table = table.name,
+            .description = "Drop foreign key on " + table.name + "." + expected.name,
+            .statements = options.allow_destructive
+                ? std::vector<std::string>{postgres_drop_constraint(table, actual_name, dialect)}
+                : std::vector<std::string>{},
+            .safe = false
+        });
+        return;
+    }
+
+    if (!expected.references || !actual.references) return;
+
+    const auto actual_name = postgres_column_constraint_name(
+        table, actual, "fkey", actual.references->name);
+    const auto expected_name = postgres_column_constraint_name(
+        table, expected, "fkey", expected.references->name);
+
+    if (same_reference_definition(*expected.references, *actual.references)) {
+        if (actual_name != expected_name) {
+            plan.changes.push_back(SchemaChange{
+                .kind = SchemaChangeKind::AlterColumn,
+                .table = table.name,
+                .description = "Rename foreign key on " + table.name + "." + expected.name,
+                .statements = {
+                    "ALTER TABLE " + dialect.quote_identifier(table.name) +
+                    " RENAME CONSTRAINT " + dialect.quote_identifier(actual_name) +
+                    " TO " + dialect.quote_identifier(expected_name) + ";"
+                },
+                .safe = true
+            });
+        }
+        return;
+    }
+
+    plan.changes.push_back(SchemaChange{
+        .kind = SchemaChangeKind::AlterColumn,
+        .table = table.name,
+        .description = "Replace foreign key on " + table.name + "." + expected.name,
+        .statements = {
+            postgres_drop_constraint(table, actual_name, dialect),
+            postgres_add_reference_constraint(
+                table, expected, *expected.references, dialect)
+        },
+        .safe = true
+    });
+}
+
 inline void diff_postgres_table(
     const DatabaseTable& expected_table,
     const DatabaseTable& actual_table,
@@ -394,27 +646,18 @@ inline void diff_postgres_table(
             }
         }
 
-        if (diff.unique_changed || diff.unique_name_changed) {
-            plan.warnings.push_back(
-                "PostgreSQL UNIQUE constraint on " + expected_table.name + "." + column.name +
-                " differs from the expected schema; constraint migration is not yet automatic.");
-        }
-        if (diff.check_changed) {
-            plan.warnings.push_back(
-                "PostgreSQL CHECK constraint on " + expected_table.name + "." + column.name +
-                " differs from the expected schema; constraint migration is not yet automatic.");
-        }
-        if (diff.reference_changed) {
-            plan.warnings.push_back(
-                "PostgreSQL foreign key on " + expected_table.name + "." + column.name +
-                " differs from the expected schema; constraint migration is not yet automatic.");
-        }
+        diff_postgres_unique_constraint(
+            expected_table, column, *actual_column, diff, dialect, options, plan);
+        diff_postgres_check_constraint(
+            expected_table, column, *actual_column, diff, dialect, options, plan);
+        diff_postgres_reference_constraint(
+            expected_table, column, *actual_column, diff, dialect, options, plan);
     }
 
     if (!same_checks(expected_table.checks, actual_table.checks)) {
         plan.warnings.push_back(
             "PostgreSQL table CHECK constraints on " + expected_table.name +
-            " differ from the expected schema; constraint migration is not yet automatic.");
+            " differ from the expected schema; table-level constraint migration is not yet automatic.");
     }
 
     for (const auto& column : actual_table.columns) {
