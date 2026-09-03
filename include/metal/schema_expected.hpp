@@ -28,7 +28,7 @@ ExpectedTable expected_table(const Dialect& dialect) {
         using M = reflect::member_type_t<Member>;
         DatabaseColumn column;
         column.name = reflect::column_name<Member>();
-        column.type = sqlite_column_type_name<Member>();
+        column.type = column_type_name<Member>(dialect);
         column.not_null = !is_optional_v<M>;
         if constexpr (reflect::has_column_unique<Member>()) {
             using Unique = reflect::column_unique_annotation_t<Member>;
