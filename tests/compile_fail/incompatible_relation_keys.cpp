@@ -14,7 +14,7 @@ struct [[=metal::mapping::table{"users"}]] BadUser {
     std::int64_t id{};
 
     [[=metal::mapping::has_many<^^BadPost::user_id>{}]]
-    metal::collection<BadPost> posts;
+    metal::has_many_collection<BadPost> posts;
 };
 
 static_assert(metal::reflect::validate_mapping<BadUser>());
