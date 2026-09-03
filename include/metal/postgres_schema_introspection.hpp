@@ -161,6 +161,7 @@ ORDER BY cls.relname;
         R"SQL(
 SELECT
     cls.relname AS table_name,
+    con.conname AS constraint_name,
     att.attname AS column_name,
     keys.ord AS ordinal_position
 FROM pg_catalog.pg_constraint AS con
@@ -180,7 +181,12 @@ ORDER BY cls.relname, keys.ord;
         if (!table_name || !column_name) continue;
         const auto position = table_positions.find(*table_name);
         if (position == table_positions.end()) continue;
-        schema.tables[position->second].primary_key.push_back(*column_name);
+        auto& table = schema.tables[position->second];
+        table.primary_key.push_back(*column_name);
+        table.primary_key_name = implicit_table_constraint_name(
+            *table_name,
+            row_string(row, "constraint_name"),
+            "pkey");
     }
 
     const auto unique_rows = executor.execute(
