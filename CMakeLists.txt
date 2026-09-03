@@ -65,9 +65,10 @@ if(METAL_ORM_BUILD_TESTS)
             did_compile
             "${CMAKE_BINARY_DIR}/compile-fail-${name}"
             SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
-            CMAKE_FLAGS
-                "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
-                "-DCMAKE_CXX_FLAGS=-std=c++26 -freflection -I${CMAKE_CURRENT_SOURCE_DIR}/include"
+            COMPILE_DEFINITIONS
+                -std=c++26
+                -freflection
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/include"
             OUTPUT_VARIABLE compiler_output
         )
 
