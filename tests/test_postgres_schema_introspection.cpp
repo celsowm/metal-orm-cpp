@@ -1,5 +1,6 @@
 #include <metal/query/core_types.hpp>
 #include <metal/schema_diff.hpp>
+#include <metal/schema_expected.hpp>
 #include <metal/schema_introspection_dispatch.hpp>
 
 #include <cassert>
@@ -10,6 +11,14 @@
 #include <vector>
 
 namespace {
+
+struct [[=metal::mapping::table{"postgres_type_probe"}]] PostgresTypeProbe {
+    [[=metal::mapping::primary_key]]
+    std::int64_t id{};
+    bool active{};
+    double score{};
+    metal::Blob payload;
+};
 
 struct ScriptStep {
     std::string marker;
@@ -151,6 +160,15 @@ int main() {
     }};
 
     const metal::PostgresDialect dialect;
+
+    const auto expected = metal::expected_schema<PostgresTypeProbe>(dialect);
+    assert(expected.tables.size() == 1);
+    const auto& expected_types = expected.tables.front().table;
+    assert(column_named(expected_types, "id").type == "BIGINT");
+    assert(column_named(expected_types, "active").type == "BOOLEAN");
+    assert(column_named(expected_types, "score").type == "DOUBLE PRECISION");
+    assert(column_named(expected_types, "payload").type == "BYTEA");
+
     const auto schema = metal::introspect_schema(
         executor,
         dialect,
