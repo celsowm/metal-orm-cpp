@@ -1,4 +1,5 @@
 #include <metal/query/core_types.hpp>
+#include <metal/schema_diff.hpp>
 #include <metal/schema_introspection_dispatch.hpp>
 
 #include <cassert>
@@ -124,7 +125,7 @@ int main() {
                     {"table_name", std::string{"users"}},
                     {"constraint_name", std::string{"users_owner_id_fkey"}},
                     {"column_name", std::string{"owner_id"}},
-                    {"target_schema", std::string{"audit"}},
+                    {"target_schema", std::string{"identity"}},
                     {"target_table", std::string{"accounts"}},
                     {"target_column", std::string{"id"}},
                     {"on_delete", std::string{"CASCADE"}},
@@ -185,6 +186,13 @@ int main() {
     assert(owner.references->on_delete == std::optional<std::string>{"CASCADE"});
     assert(owner.references->on_update == std::optional<std::string>{"NO ACTION"});
     assert(owner.references->deferrable);
+    assert(owner.references->schema == std::optional<std::string>{"identity"});
+
+    const auto rendered_reference =
+        metal::schema_detail::render_reference_definition(*owner.references, dialect);
+    assert(rendered_reference.find("REFERENCES \"identity\".\"accounts\" (\"id\")") !=
+           std::string::npos);
+    assert(rendered_reference.find("\"identity.accounts\"") == std::string::npos);
 
     assert(users.indexes.size() == 1);
     assert(users.indexes.front().name == "users_email_partial_idx");
