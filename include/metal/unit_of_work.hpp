@@ -164,9 +164,12 @@ private:
         if (tracked.before_insert) tracked.before_insert();
 
         const auto current = tracked.snapshot();
+        const bool needs_generated_key =
+            tracked.generated_pk && is_empty_generated_value(tracked.get_pk());
+
         std::vector<std::string> names;
         for (const auto& [name, value] : current) {
-            if (name == tracked.primary_key && tracked.generated_pk && is_empty_generated_value(value)) continue;
+            if (name == tracked.primary_key && needs_generated_key) continue;
             names.push_back(name);
         }
         std::sort(names.begin(), names.end());
@@ -175,13 +178,32 @@ private:
         values.reserve(names.size());
         for (const auto& name : names) values.push_back({name, current.at(name)});
 
-        const auto compiled = InsertQueryBuilder{tracked.table}
-            .values(std::move(values))
-            .compile(dialect_);
+        InsertQueryBuilder insert{tracked.table};
+        insert.values(std::move(values));
+        if (needs_generated_key &&
+            dialect_.generated_key_retrieval() == GeneratedKeyRetrieval::Returning) {
+            insert.returning({tracked.primary_key});
+        }
+
+        const auto compiled = insert.compile(dialect_);
         const auto result = executor_.execute(compiled.sql, compiled.params);
 
-        if (tracked.generated_pk && is_empty_generated_value(tracked.get_pk())) {
-            tracked.set_pk(Value{result.last_insert_id});
+        if (needs_generated_key) {
+            if (dialect_.generated_key_retrieval() == GeneratedKeyRetrieval::Returning) {
+                if (result.rows.empty()) {
+                    throw std::runtime_error(
+                        "MetalORM: INSERT RETURNING did not return the generated primary key");
+                }
+                const auto found = result.rows.front().find(tracked.primary_key);
+                if (found == result.rows.front().end()) {
+                    throw std::runtime_error(
+                        "MetalORM: INSERT RETURNING result is missing generated primary key '" +
+                        tracked.primary_key + "'");
+                }
+                tracked.set_pk(found->second);
+            } else {
+                tracked.set_pk(Value{result.last_insert_id});
+            }
         }
         tracked.original = tracked.snapshot();
         tracked.status = EntityStatus::Managed;
