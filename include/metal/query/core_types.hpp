@@ -20,11 +20,19 @@
 
 namespace metal {
 
+enum class GeneratedKeyRetrieval {
+    DriverLastInsertId,
+    Returning
+};
+
 class Dialect {
 public:
     virtual ~Dialect() = default;
     virtual std::string quote_identifier(std::string_view id) const = 0;
     virtual std::string placeholder(std::size_t index) const = 0;
+    [[nodiscard]] virtual GeneratedKeyRetrieval generated_key_retrieval() const noexcept {
+        return GeneratedKeyRetrieval::DriverLastInsertId;
+    }
 };
 
 inline std::string quote_ansi_identifier(std::string_view id) {
@@ -48,6 +56,10 @@ public:
 
     std::string placeholder(std::size_t index) const override {
         return dialect_.placeholder(offset_ + index);
+    }
+
+    [[nodiscard]] GeneratedKeyRetrieval generated_key_retrieval() const noexcept override {
+        return dialect_.generated_key_retrieval();
     }
 
 private:
@@ -81,6 +93,10 @@ public:
             throw std::invalid_argument("MetalORM: PostgreSQL placeholder indexes are one-based");
         }
         return "$" + std::to_string(index);
+    }
+
+    [[nodiscard]] GeneratedKeyRetrieval generated_key_retrieval() const noexcept override {
+        return GeneratedKeyRetrieval::Returning;
     }
 };
 
