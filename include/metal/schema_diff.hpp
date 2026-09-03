@@ -2,7 +2,7 @@
 
 #include "metal/execution.hpp"
 #include "metal/query/core_types.hpp"
-#include "metal/schema_introspection.hpp"
+#include "metal/schema_introspection_dispatch.hpp"
 #include "metal/schema_types.hpp"
 
 #include <algorithm>
@@ -361,7 +361,7 @@ inline SchemaPlan synchronize_schema(
     const Dialect& dialect,
     const SynchronizeOptions& options = {},
     const IntrospectOptions& introspect_options = {}) {
-    const auto actual = introspect_sqlite(executor, introspect_options);
+    const auto actual = introspect_schema(executor, dialect, introspect_options);
     return synchronize_schema(expected, actual, executor, dialect, options);
 }
 
