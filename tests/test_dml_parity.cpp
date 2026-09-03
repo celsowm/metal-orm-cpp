@@ -100,6 +100,40 @@ int main() {
         .compile(dialect);
     assert(do_nothing.sql.find("ON CONFLICT (\"name\") DO NOTHING RETURNING \"id\"") != std::string::npos);
 
+    metal::PostgresDialect postgres;
+    const auto postgres_constraint_upsert = metal::InsertQueryBuilder{"dml_targets"}
+        .values({
+            {"name", std::string{"alpha"}},
+            {"score", std::int64_t{250}}
+        })
+        .on_conflict_constraint("dml_targets_name_key")
+        .do_update(
+            {{"score", metal::excluded("score")}},
+            {{"score", metal::CompareOp::Lt, std::int64_t{200}}})
+        .returning({"id"})
+        .compile(postgres);
+    assert(postgres_constraint_upsert.sql ==
+        "INSERT INTO \"dml_targets\" (\"name\", \"score\") VALUES ($1, $2) "
+        "ON CONFLICT ON CONSTRAINT \"dml_targets_name_key\" DO UPDATE SET "
+        "\"score\" = excluded.\"score\" WHERE \"score\" < $3 RETURNING \"id\";");
+    assert(postgres_constraint_upsert.params.size() == 3);
+    assert(metal::from_value<std::string>(postgres_constraint_upsert.params[0]) == "alpha");
+    assert(metal::from_value<std::int64_t>(postgres_constraint_upsert.params[1]) == 250);
+    assert(metal::from_value<std::int64_t>(postgres_constraint_upsert.params[2]) == 200);
+
+    bool sqlite_named_constraint_rejected = false;
+    try {
+        (void)metal::InsertQueryBuilder{"dml_targets"}
+            .values({{"name", std::string{"alpha"}}, {"score", std::int64_t{1}}})
+            .on_conflict_constraint("dml_targets_name_key")
+            .do_nothing()
+            .compile(dialect);
+    } catch (const std::logic_error& error) {
+        sqlite_named_constraint_rejected =
+            std::string(error.what()).find("supported only by PostgreSQL") != std::string::npos;
+    }
+    assert(sqlite_named_constraint_rejected);
+
     const auto update = metal::UpdateQueryBuilder{"dml_targets"}
         .set({{"score", std::int64_t{123}}})
         .where_eq("name", std::string{"beta"})
