@@ -1,3 +1,3 @@
 #pragma once
 
-#include "metal/query/sqlite_compiler.hpp"
+#include "metal/query/parameter_aware_compiler.hpp"
