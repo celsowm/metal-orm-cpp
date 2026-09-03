@@ -25,6 +25,7 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           def replace(path: str, old: str, new: str) -> None:
               file = Path(path)
@@ -32,6 +33,14 @@ jobs:
               if old not in text:
                   raise SystemExit(f"candidate patch context not found: {path}")
               file.write_text(text.replace(old, new, 1))
+
+          def regex_replace(path: str, pattern: str, replacement: str) -> None:
+              file = Path(path)
+              text = file.read_text()
+              updated, count = re.subn(pattern, replacement, text, count=1)
+              if count != 1:
+                  raise SystemExit(f"candidate regex patch context not found: {path}")
+              file.write_text(updated)
 
           replace(
               "include/metal/reflection.hpp",
@@ -195,30 +204,24 @@ jobs:
                       return "s:" + std::to_string(item.size()) + ":" + item;
                   }''')
 
-          replace(
+          regex_replace(
               "include/metal/orm.hpp",
-              '''                    constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
-                      using ForeignKey = reflect::member_type_t<foreign_key>;''',
-              '''                    constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
-                      constexpr bool target_key_is_pk = target_key == reflect::primary_key_member<Target>();
-                      constexpr bool target_key_is_generated =
-                          target_key_is_pk && reflect::primary_key_is_generated<Target>();
-                      using ForeignKey = reflect::member_type_t<foreign_key>;''')
+              r'(?P<indent>[ \t]+)constexpr auto target_key = reflect::key_or_primary<Target>\(Traits::target_key\(\)\);\n(?P=indent)using ForeignKey = reflect::member_type_t<foreign_key>;',
+              r'''\g<indent>constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
+          \g<indent>constexpr bool target_key_is_pk = target_key == reflect::primary_key_member<Target>();
+          \g<indent>constexpr bool target_key_is_generated =
+          \g<indent>    target_key_is_pk && reflect::primary_key_is_generated<Target>();
+          \g<indent>using ForeignKey = reflect::member_type_t<foreign_key>;''')
 
-          replace(
+          regex_replace(
               "include/metal/orm.hpp",
-              '''                            if (!std::holds_alternative<std::nullptr_t>(key) &&
-                                  !(target_key == reflect::primary_key_member<Target>() &&
-                                    reflect::primary_key_is_generated<Target>() &&
-                                    is_empty_generated_value(key))) {
-                                  (*locked).[:foreign_key:] = from_value<ForeignKey>(key);
-                              }''',
-              '''                            if (!std::holds_alternative<std::nullptr_t>(key)) {
-                                  if constexpr (target_key_is_generated) {
-                                      if (is_empty_generated_value(key)) return;
-                                  }
-                                  (*locked).[:foreign_key:] = from_value<ForeignKey>(key);
-                              }''')
+              r'(?P<indent>[ \t]+)if \(!std::holds_alternative<std::nullptr_t>\(key\) &&\n[ \t]+!\(target_key == reflect::primary_key_member<Target>\(\) &&\n[ \t]+reflect::primary_key_is_generated<Target>\(\) &&\n[ \t]+is_empty_generated_value\(key\)\)\) \{\n[ \t]+\(\*locked\)\.\[:foreign_key:\] = from_value<ForeignKey>\(key\);\n[ \t]+\}',
+              r'''\g<indent>if (!std::holds_alternative<std::nullptr_t>(key)) {
+          \g<indent>    if constexpr (target_key_is_generated) {
+          \g<indent>        if (is_empty_generated_value(key)) return;
+          \g<indent>    }
+          \g<indent>    (*locked).[:foreign_key:] = from_value<ForeignKey>(key);
+          \g<indent>}''')
           PY
 
       - name: Configure
@@ -236,7 +239,7 @@ jobs:
         with:
           name: gcc16-build-log
           path: build.log
-          if-no-files-found: error
+          if-no-files-found: ignore
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
