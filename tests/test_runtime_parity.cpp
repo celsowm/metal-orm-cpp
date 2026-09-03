@@ -51,6 +51,25 @@ struct [[=metal::mapping::table{"parity_manual_keys"}]] ParityManualKey {
     std::string name;
 };
 
+class ReturningGeneratedKeyExecutor final : public metal::DbExecutor {
+public:
+    metal::QueryResult execute(
+        const std::string& sql,
+        const std::vector<metal::Value>& params = {}) override {
+        last_sql = sql;
+        last_params = params;
+        metal::QueryResult result;
+        if (sql.starts_with("INSERT INTO")) {
+            result.rows.push_back(metal::Row{{"id", std::int64_t{42}}});
+            result.affected_rows = 1;
+        }
+        return result;
+    }
+
+    std::string last_sql;
+    std::vector<metal::Value> last_params;
+};
+
 static_assert(metal::reflect::validate_mapping<ParityUser>());
 static_assert(metal::reflect::validate_mapping<ParityLinkUser>());
 static_assert(metal::reflect::validate_mapping<ParityManualKey>());
@@ -76,6 +95,22 @@ int main() {
         .where_eq("id", std::int64_t{1})
         .compile(dialect);
     assert(erase.sql == "DELETE FROM \"parity_roles\" WHERE \"id\" = ?;");
+
+    {
+        auto returning_executor = std::make_shared<ReturningGeneratedKeyExecutor>();
+        auto postgres_dialect = std::make_shared<metal::PostgresDialect>();
+        metal::Session postgres_session{returning_executor, postgres_dialect};
+        auto generated = std::make_shared<ParityRole>();
+        generated->name = "postgres";
+        postgres_session.persist(generated);
+        postgres_session.commit();
+
+        assert(generated->id == 42);
+        assert(returning_executor->last_sql ==
+            "INSERT INTO \"parity_roles\" (\"name\") VALUES ($1) RETURNING \"id\";");
+        assert(returning_executor->last_params.size() == 1);
+        assert(metal::from_value<std::string>(returning_executor->last_params[0]) == "postgres");
+    }
 
     auto db = std::make_shared<metal::SQLiteExecutor>(":memory:");
     auto dialect_ptr = std::make_shared<metal::SQLiteDialect>();
