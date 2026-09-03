@@ -277,7 +277,7 @@ auto least(First&& first, Rest&&... rest) {
     return sql_function<Result>("LEAST", std::forward<First>(first), std::forward<Rest>(rest)...);
 }
 
-// Date/time helpers. Values are represented by the current SQLite/string value model.
+// Date/time helpers
 
 enum class date_part { year, month, day, hour, minute, second, week, dow };
 
@@ -351,9 +351,6 @@ auto week_of_year(Date&& date) { return sql_function<std::int64_t>("WEEK_OF_YEAR
 
 template <StringScalarInput Date>
 auto date_trunc(date_part part, Date&& date) {
-    if (part != date_part::year && part != date_part::month && part != date_part::day) {
-        throw std::invalid_argument("MetalORM: SQLite DATE_TRUNC currently supports year, month and day");
-    }
     return sql_function<std::string>("DATE_TRUNC_" + date_part_token(part), std::forward<Date>(date));
 }
 
@@ -383,7 +380,7 @@ auto second(Date&& date) { return sql_function<std::int64_t>("SECOND", std::forw
 template <StringScalarInput Date>
 auto quarter(Date&& date) { return sql_function<std::int64_t>("QUARTER", std::forward<Date>(date)); }
 
-// JSON helpers available in modern SQLite JSON1.
+// JSON helpers
 
 template <typename Result = std::string, ScalarInput Json, StringScalarInput Path>
 auto json_path(Json&& json, Path&& path) {
