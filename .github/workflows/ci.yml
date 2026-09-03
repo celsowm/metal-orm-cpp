@@ -46,15 +46,15 @@ jobs:
               }
           }''',
               '''template <info Member>
+          inline constexpr auto column_mapping = annotation<mapping::column>(Member);
+
+          template <info Member>
           consteval std::string_view column_name_view() {
               static_assert(std::meta::is_nonstatic_data_member(Member));
               if constexpr (has<mapping::column>(Member)) {
-                  constexpr auto mapped = annotation<mapping::column>(Member);
-                  constexpr auto name = mapped.name.view();
-                  return {std::define_static_string(name), name.size()};
+                  return column_mapping<Member>.name.view();
               } else {
-                  constexpr auto name = std::meta::identifier_of(Member);
-                  return {std::define_static_string(name), name.size()};
+                  return std::meta::identifier_of(Member);
               }
           }''')
 
@@ -76,8 +76,13 @@ jobs:
               "include/metal/query/select.hpp",
               '''        state_->cte_joins.push_back(CteJoinSpec{
                       kind, std::move(cte_name), column_ref(field<OwnerMember>), std::move(cte_column)});''',
-              '''        state_->cte_joins.push_back(CteJoinSpec{
-                      kind, std::move(cte_name), column_ref<OwnerMember>(), std::move(cte_column)});''')
+              '''        using Owner = typename Field<OwnerMember>::owner_type;
+                  constexpr auto owner_column = reflect::column_name_view<OwnerMember>();
+                  state_->cte_joins.push_back(CteJoinSpec{
+                      kind,
+                      std::move(cte_name),
+                      ColumnRef{std::type_index(typeid(Owner)), std::string(owner_column)},
+                      std::move(cte_column)});''')
 
           replace(
               "include/metal/query/pagination.hpp",
@@ -189,6 +194,31 @@ jobs:
                   } else {
                       return "s:" + std::to_string(item.size()) + ":" + item;
                   }''')
+
+          replace(
+              "include/metal/orm.hpp",
+              '''                    constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
+                      using ForeignKey = reflect::member_type_t<foreign_key>;''',
+              '''                    constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
+                      constexpr bool target_key_is_pk = target_key == reflect::primary_key_member<Target>();
+                      constexpr bool target_key_is_generated =
+                          target_key_is_pk && reflect::primary_key_is_generated<Target>();
+                      using ForeignKey = reflect::member_type_t<foreign_key>;''')
+
+          replace(
+              "include/metal/orm.hpp",
+              '''                            if (!std::holds_alternative<std::nullptr_t>(key) &&
+                                  !(target_key == reflect::primary_key_member<Target>() &&
+                                    reflect::primary_key_is_generated<Target>() &&
+                                    is_empty_generated_value(key))) {
+                                  (*locked).[:foreign_key:] = from_value<ForeignKey>(key);
+                              }''',
+              '''                            if (!std::holds_alternative<std::nullptr_t>(key)) {
+                                  if constexpr (target_key_is_generated) {
+                                      if (is_empty_generated_value(key)) return;
+                                  }
+                                  (*locked).[:foreign_key:] = from_value<ForeignKey>(key);
+                              }''')
           PY
 
       - name: Configure
@@ -222,7 +252,8 @@ jobs:
                   include/metal/query/select.hpp \
                   include/metal/query/pagination.hpp \
                   include/metal/view.hpp \
-                  include/metal/openapi_components.hpp
+                  include/metal/openapi_components.hpp \
+                  include/metal/orm.hpp
           if ! git diff --cached --quiet; then
             git commit -m "fix: restore GCC 16 reflection build"
             git push origin HEAD:main
