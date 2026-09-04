@@ -37,56 +37,45 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
-          def replace(path, old, new):
+          def sub(path, pattern, replacement):
               p = Path(path)
               text = p.read_text()
-              if old not in text:
-                  raise SystemExit(f'context not found: {path}: {old[:80]!r}')
-              p.write_text(text.replace(old, new, 1))
+              updated, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+              if count != 1:
+                  raise SystemExit(f'candidate regex did not match exactly once: {path}: {pattern[:80]!r}, count={count}')
+              p.write_text(updated)
 
           compiler = 'include/metal/query/sqlite_compiler.hpp'
-          replace(compiler,
-          '''    for (const auto& branch : value.branches) {
-              out += " WHEN " + compile_expression(branch.when, ctx) +
-                     " THEN " + compile_scalar(branch.then_value, ctx);
-          }''',
-          '''    for (const auto& branch : value.branches) {
-              const auto when_sql = compile_expression(branch.when, ctx);
-              const auto then_sql = compile_scalar(branch.then_value, ctx);
-              out += " WHEN " + when_sql + " THEN " + then_sql;
-          }''')
 
-          replace(compiler,
-          '''inline std::string compile_arithmetic(const ArithmeticRef& value, CompileContext& ctx) {
-              return "(" + compile_scalar(value.left, ctx) + " " + arithmetic_token(value.op) + " " +
-                     compile_scalar(value.right, ctx) + ")";
-          }''',
-          '''inline std::string compile_arithmetic(const ArithmeticRef& value, CompileContext& ctx) {
-              const auto left = compile_scalar(value.left, ctx);
-              const auto right = compile_scalar(value.right, ctx);
-              return "(" + left + " " + arithmetic_token(value.op) + " " + right + ")";
-          }''')
+          sub(compiler,
+              r'    for \(const auto& branch : value\.branches\) \{\n\s*out \+= " WHEN " \+ compile_expression\(branch\.when, ctx\) \+\n\s*" THEN " \+ compile_scalar\(branch\.then_value, ctx\);\n\s*\}',
+              '''    for (const auto& branch : value.branches) {
+                  const auto when_sql = compile_expression(branch.when, ctx);
+                  const auto then_sql = compile_scalar(branch.then_value, ctx);
+                  out += " WHEN " + when_sql + " THEN " + then_sql;
+              }''')
 
-          replace(compiler,
-          '''        if constexpr (std::same_as<N, ComparisonNode>) {
-                      return compile_scalar(node.left, ctx) + " " + compare_token(node.op) + " " +
-                             compile_scalar(node.right, ctx);
-                  } else if constexpr (std::same_as<N, NullCheckNode>) {''',
-          '''        if constexpr (std::same_as<N, ComparisonNode>) {
+          sub(compiler,
+              r'inline std::string compile_arithmetic\(const ArithmeticRef& value, CompileContext& ctx\) \{\n\s*return "\\\(" \+ compile_scalar\(value\.left, ctx\) \+ " " \+ arithmetic_token\(value\.op\) \+ " " \+\n\s*compile_scalar\(value\.right, ctx\) \+ "\\\)";\n\}',
+              '''inline std::string compile_arithmetic(const ArithmeticRef& value, CompileContext& ctx) {
+                  const auto left = compile_scalar(value.left, ctx);
+                  const auto right = compile_scalar(value.right, ctx);
+                  return "(" + left + " " + arithmetic_token(value.op) + " " + right + ")";
+              }''')
+
+          sub(compiler,
+              r'if constexpr \(std::same_as<N, ComparisonNode>\) \{\n\s*return compile_scalar\(node\.left, ctx\) \+ " " \+ compare_token\(node\.op\) \+ " " \+\n\s*compile_scalar\(node\.right, ctx\);\n\s*\} else if constexpr \(std::same_as<N, NullCheckNode>\)',
+              '''if constexpr (std::same_as<N, ComparisonNode>) {
                       const auto left = compile_scalar(node.left, ctx);
                       const auto right = compile_scalar(node.right, ctx);
                       return left + " " + compare_token(node.op) + " " + right;
-                  } else if constexpr (std::same_as<N, NullCheckNode>) {''')
+                  } else if constexpr (std::same_as<N, NullCheckNode>)''')
 
-          replace(compiler,
-          '''        } else if constexpr (std::same_as<N, LikeNode>) {
-                      return compile_scalar(node.operand, ctx) + (node.negated ? " NOT LIKE " : " LIKE ") +
-                             compile_scalar(node.pattern, ctx);
-                  } else if constexpr (std::same_as<N, BetweenNode>) {
-                      return compile_scalar(node.operand, ctx) + (node.negated ? " NOT BETWEEN " : " BETWEEN ") +
-                             compile_scalar(node.lower, ctx) + " AND " + compile_scalar(node.upper, ctx);''',
-          '''        } else if constexpr (std::same_as<N, LikeNode>) {
+          sub(compiler,
+              r'\} else if constexpr \(std::same_as<N, LikeNode>\) \{\n\s*return compile_scalar\(node\.operand, ctx\) \+ \(node\.negated \? " NOT LIKE " : " LIKE "\) \+\n\s*compile_scalar\(node\.pattern, ctx\);\n\s*\} else if constexpr \(std::same_as<N, BetweenNode>\) \{\n\s*return compile_scalar\(node\.operand, ctx\) \+ \(node\.negated \? " NOT BETWEEN " : " BETWEEN "\) \+\n\s*compile_scalar\(node\.lower, ctx\) \+ " AND " \+ compile_scalar\(node\.upper, ctx\);',
+              '''} else if constexpr (std::same_as<N, LikeNode>) {
                       const auto operand = compile_scalar(node.operand, ctx);
                       const auto pattern = compile_scalar(node.pattern, ctx);
                       return operand + (node.negated ? " NOT LIKE " : " LIKE ") + pattern;
@@ -94,30 +83,20 @@ jobs:
                       const auto operand = compile_scalar(node.operand, ctx);
                       const auto lower = compile_scalar(node.lower, ctx);
                       const auto upper = compile_scalar(node.upper, ctx);
-                      return operand + (node.negated ? " NOT BETWEEN " : " BETWEEN ") +
-                             lower + " AND " + upper;''')
+                      return operand + (node.negated ? " NOT BETWEEN " : " BETWEEN ") + lower + " AND " + upper;''')
 
-          replace(compiler,
-          '''        } else if constexpr (std::same_as<N, LogicalNode>) {
-                      return "(" + compile_expression(node.left, ctx) +
-                             (node.op == LogicOp::And ? " AND " : " OR ") +
-                             compile_expression(node.right, ctx) + ")";
-                  } else {''',
-          '''        } else if constexpr (std::same_as<N, LogicalNode>) {
+          sub(compiler,
+              r'\} else if constexpr \(std::same_as<N, LogicalNode>\) \{\n\s*return "\\\(" \+ compile_expression\(node\.left, ctx\) \+\n\s*\(node\.op == LogicOp::And \? " AND " : " OR "\) \+\n\s*compile_expression\(node\.right, ctx\) \+ "\\\)";\n\s*\} else \{',
+              '''} else if constexpr (std::same_as<N, LogicalNode>) {
                       const auto left = compile_expression(node.left, ctx);
                       const auto right = compile_expression(node.right, ctx);
                       return "(" + left + (node.op == LogicOp::And ? " AND " : " OR ") + right + ")";
                   } else {''')
 
           select = 'include/metal/query/select.hpp'
-          replace(select,
-          '''        if (where_sql || extra_where_sql) {
-                      base += " WHERE ";
-                      if (where_sql) base += "(" + *where_sql + ")";
-                      if (where_sql && extra_where_sql) base += " AND ";
-                      if (extra_where_sql) base += "(" + *extra_where_sql + ")";
-                  }''',
-          '''        if (where_sql || extra_where_sql) {
+          sub(select,
+              r'        if \(where_sql \|\| extra_where_sql\) \{\n\s*base \+= " WHERE ";\n\s*if \(where_sql\) base \+= "\\\(" \+ \*where_sql \+ "\\\)";\n\s*if \(where_sql && extra_where_sql\) base \+= " AND ";\n\s*if \(extra_where_sql\) base \+= "\\\(" \+ \*extra_where_sql \+ "\\\)";\n\s*\}',
+              '''        if (where_sql || extra_where_sql) {
                       base += " WHERE ";
                       if (where_sql && extra_where_sql) {
                           base += "(" + *where_sql + ") AND (" + *extra_where_sql + ")";
