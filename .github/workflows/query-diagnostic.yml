@@ -1,0 +1,92 @@
+name: query-diagnostic
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    container: gcc:16
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply current GCC 16 candidate fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('.github/workflows/ci.yml').read_text()
+          marker = "          from pathlib import Path\n"
+          start = text.index(marker)
+          end = text.index("          PY\n", start)
+          lines = text[start:end].splitlines()
+          script = "\n".join(line[10:] if line.startswith("          ") else line for line in lines)
+          exec(compile(script, '<candidate-fixes>', 'exec'))
+          PY
+
+      - name: Render diagnostic queries
+        shell: bash
+        run: |
+          cat > /tmp/query_diag.cpp <<'CPP'
+          #include <metal/metal.hpp>
+          #include <cstdint>
+          #include <iostream>
+          #include <optional>
+          #include <string>
+          #include <vector>
+
+          struct [[=metal::mapping::table{"users"}]] User {
+              [[=metal::mapping::primary_key, =metal::mapping::generated]] std::int64_t id{};
+              [[=metal::mapping::column{"display_name"}]] std::string name;
+              int age{};
+              bool active{true};
+          };
+
+          struct [[=metal::mapping::table{"q_posts"}]] QueryPost {
+              [[=metal::mapping::primary_key, =metal::mapping::generated]] std::int64_t id{};
+              std::int64_t user_id{};
+              std::string title;
+          };
+
+          struct [[=metal::mapping::table{"q_users"}]] QueryUser {
+              [[=metal::mapping::primary_key, =metal::mapping::generated]] std::int64_t id{};
+              std::string name;
+              std::optional<std::string> nickname;
+              [[=metal::mapping::has_many<^^QueryPost::user_id>{}]]
+              metal::has_many_collection<QueryPost> posts;
+          };
+
+          int main() {
+              metal::SQLiteDialect dialect;
+              const auto simple = metal::select<User>()
+                  .where((metal::field<^^User::age> >= 18) && (metal::field<^^User::active> == true))
+                  .order_by(metal::field<^^User::name>)
+                  .limit(10)
+                  .compile(dialect);
+              std::cout << "SIMPLE_SQL=" << simple.sql << '\n';
+              std::cout << "SIMPLE_PARAMS=";
+              for (const auto& p : simple.params) std::cout << metal::value_key(p) << '|';
+              std::cout << '\n';
+
+              const std::vector<std::int64_t> ids{1, 2, 3};
+              const auto grouped = metal::select<QueryUser>()
+                  .join<^^QueryUser::posts>()
+                  .project(metal::field<^^QueryUser::name>)
+                  .project(metal::count(metal::field<^^QueryPost::id>).as("post_count"))
+                  .where(metal::like(metal::field<^^QueryUser::name>, "C%") &&
+                         metal::in(metal::field<^^QueryPost::id>, ids))
+                  .group_by(metal::field<^^QueryUser::name>)
+                  .having(metal::count(metal::field<^^QueryPost::id>) > 1)
+                  .order_by(metal::field<^^QueryUser::name>, false)
+                  .limit(5)
+                  .offset(0)
+                  .compile(dialect);
+              std::cout << "GROUPED_SQL=" << grouped.sql << '\n';
+              std::cout << "GROUPED_PARAMS=";
+              for (const auto& p : grouped.params) std::cout << metal::value_key(p) << '|';
+              std::cout << '\n';
+          }
+          CPP
+          c++ -std=c++26 -freflection -Iinclude /tmp/query_diag.cpp -o /tmp/query_diag
+          /tmp/query_diag
