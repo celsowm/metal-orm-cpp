@@ -1,0 +1,147 @@
+name: runtime-candidate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/runtime-candidate.yml
+
+jobs:
+  query-runtime:
+    runs-on: ubuntu-latest
+    container: gcc:16
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y cmake ninja-build libsqlite3-dev
+
+      - name: Apply current GCC 16 candidate fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('.github/workflows/ci.yml').read_text()
+          marker = "          from pathlib import Path\n"
+          start = text.index(marker)
+          end = text.index("          PY\n", start)
+          lines = text[start:end].splitlines()
+          script = "\n".join(line[10:] if line.startswith("          ") else line for line in lines)
+          exec(compile(script, '<candidate-fixes>', 'exec'))
+          PY
+
+      - name: Apply deterministic query candidate
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f'context not found: {path}: {old[:80]!r}')
+              p.write_text(text.replace(old, new, 1))
+
+          compiler = 'include/metal/query/sqlite_compiler.hpp'
+          replace(compiler,
+          '''    for (const auto& branch : value.branches) {
+              out += " WHEN " + compile_expression(branch.when, ctx) +
+                     " THEN " + compile_scalar(branch.then_value, ctx);
+          }''',
+          '''    for (const auto& branch : value.branches) {
+              const auto when_sql = compile_expression(branch.when, ctx);
+              const auto then_sql = compile_scalar(branch.then_value, ctx);
+              out += " WHEN " + when_sql + " THEN " + then_sql;
+          }''')
+
+          replace(compiler,
+          '''inline std::string compile_arithmetic(const ArithmeticRef& value, CompileContext& ctx) {
+              return "(" + compile_scalar(value.left, ctx) + " " + arithmetic_token(value.op) + " " +
+                     compile_scalar(value.right, ctx) + ")";
+          }''',
+          '''inline std::string compile_arithmetic(const ArithmeticRef& value, CompileContext& ctx) {
+              const auto left = compile_scalar(value.left, ctx);
+              const auto right = compile_scalar(value.right, ctx);
+              return "(" + left + " " + arithmetic_token(value.op) + " " + right + ")";
+          }''')
+
+          replace(compiler,
+          '''        if constexpr (std::same_as<N, ComparisonNode>) {
+                      return compile_scalar(node.left, ctx) + " " + compare_token(node.op) + " " +
+                             compile_scalar(node.right, ctx);
+                  } else if constexpr (std::same_as<N, NullCheckNode>) {''',
+          '''        if constexpr (std::same_as<N, ComparisonNode>) {
+                      const auto left = compile_scalar(node.left, ctx);
+                      const auto right = compile_scalar(node.right, ctx);
+                      return left + " " + compare_token(node.op) + " " + right;
+                  } else if constexpr (std::same_as<N, NullCheckNode>) {''')
+
+          replace(compiler,
+          '''        } else if constexpr (std::same_as<N, LikeNode>) {
+                      return compile_scalar(node.operand, ctx) + (node.negated ? " NOT LIKE " : " LIKE ") +
+                             compile_scalar(node.pattern, ctx);
+                  } else if constexpr (std::same_as<N, BetweenNode>) {
+                      return compile_scalar(node.operand, ctx) + (node.negated ? " NOT BETWEEN " : " BETWEEN ") +
+                             compile_scalar(node.lower, ctx) + " AND " + compile_scalar(node.upper, ctx);''',
+          '''        } else if constexpr (std::same_as<N, LikeNode>) {
+                      const auto operand = compile_scalar(node.operand, ctx);
+                      const auto pattern = compile_scalar(node.pattern, ctx);
+                      return operand + (node.negated ? " NOT LIKE " : " LIKE ") + pattern;
+                  } else if constexpr (std::same_as<N, BetweenNode>) {
+                      const auto operand = compile_scalar(node.operand, ctx);
+                      const auto lower = compile_scalar(node.lower, ctx);
+                      const auto upper = compile_scalar(node.upper, ctx);
+                      return operand + (node.negated ? " NOT BETWEEN " : " BETWEEN ") +
+                             lower + " AND " + upper;''')
+
+          replace(compiler,
+          '''        } else if constexpr (std::same_as<N, LogicalNode>) {
+                      return "(" + compile_expression(node.left, ctx) +
+                             (node.op == LogicOp::And ? " AND " : " OR ") +
+                             compile_expression(node.right, ctx) + ")";
+                  } else {''',
+          '''        } else if constexpr (std::same_as<N, LogicalNode>) {
+                      const auto left = compile_expression(node.left, ctx);
+                      const auto right = compile_expression(node.right, ctx);
+                      return "(" + left + (node.op == LogicOp::And ? " AND " : " OR ") + right + ")";
+                  } else {''')
+
+          select = 'include/metal/query/select.hpp'
+          replace(select,
+          '''        if (where_sql || extra_where_sql) {
+                      base += " WHERE ";
+                      if (where_sql) base += "(" + *where_sql + ")";
+                      if (where_sql && extra_where_sql) base += " AND ";
+                      if (extra_where_sql) base += "(" + *extra_where_sql + ")";
+                  }''',
+          '''        if (where_sql || extra_where_sql) {
+                      base += " WHERE ";
+                      if (where_sql && extra_where_sql) {
+                          base += "(" + *where_sql + ") AND (" + *extra_where_sql + ")";
+                      } else if (where_sql) {
+                          base += *where_sql;
+                      } else {
+                          base += *extra_where_sql;
+                      }
+                  }''')
+          PY
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DMETAL_ORM_BUILD_EXAMPLES=OFF -DMETAL_ORM_BUILD_TESTS=ON
+
+      - name: Build query-related tests
+        run: |
+          cmake --build build --target \
+            metal-orm-tests \
+            metal-orm-query-tests \
+            metal-orm-advanced-query-parity-tests \
+            metal-orm-computed-query-parity-tests \
+            metal-orm-blob-parity-tests \
+            metal-orm-dto-filter-parity-tests
+
+      - name: Run query-related tests
+        run: |
+          ctest --test-dir build --output-on-failure -R '^(metal-orm-tests|metal-orm-query-tests|metal-orm-advanced-query-parity-tests|metal-orm-computed-query-parity-tests|metal-orm-blob-parity-tests|metal-orm-dto-filter-parity-tests)$'
