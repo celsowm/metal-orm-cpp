@@ -33,24 +33,33 @@ public:
 
     void track(void* key, TrackedEntity tracked) {
         for (auto& checkpoint : checkpoints_) {
-            if (!checkpoint.contains(key)) {
-                checkpoint.emplace(key, capture_entry(false, tracked));
+            if (!checkpoint.entries.contains(key)) {
+                checkpoint.entries.emplace(key, capture_entry(false, tracked));
             }
         }
+
+        const bool is_new = !tracked_.contains(key);
         tracked_[key] = std::move(tracked);
+        if (is_new) tracked_order_.push_back(key);
     }
 
-    void erase(void* key) { tracked_.erase(key); }
+    void erase(void* key) {
+        tracked_.erase(key);
+        std::erase(tracked_order_, key);
+    }
 
     [[nodiscard]] std::vector<void*> keys() const {
         std::vector<void*> out;
-        out.reserve(tracked_.size());
-        for (const auto& [key, _] : tracked_) out.push_back(key);
+        out.reserve(tracked_order_.size());
+        for (void* key : tracked_order_) {
+            if (tracked_.contains(key)) out.push_back(key);
+        }
         return out;
     }
 
     void clear() {
         tracked_.clear();
+        tracked_order_.clear();
         checkpoints_.clear();
     }
 
@@ -62,9 +71,13 @@ public:
 
     void begin_checkpoint() {
         Checkpoint checkpoint;
-        checkpoint.reserve(tracked_.size());
-        for (const auto& [key, tracked] : tracked_) {
-            checkpoint.emplace(key, capture_entry(true, tracked));
+        checkpoint.order = tracked_order_;
+        checkpoint.entries.reserve(tracked_.size());
+        for (void* key : tracked_order_) {
+            auto found = tracked_.find(key);
+            if (found != tracked_.end()) {
+                checkpoint.entries.emplace(key, capture_entry(true, found->second));
+            }
         }
         checkpoints_.push_back(std::move(checkpoint));
     }
@@ -84,7 +97,7 @@ public:
         auto checkpoint = std::move(checkpoints_.back());
         checkpoints_.pop_back();
 
-        for (auto& [key, entry] : checkpoint) {
+        for (auto& [key, entry] : checkpoint.entries) {
             if (entry.tracked.restore_snapshot) {
                 entry.tracked.restore_snapshot(entry.current);
             }
@@ -96,6 +109,7 @@ public:
                 tracked_.erase(key);
             }
         }
+        tracked_order_ = std::move(checkpoint.order);
     }
 
     void rollback_all_checkpoints() {
@@ -147,7 +161,10 @@ private:
         std::function<void()> restore_runtime;
     };
 
-    using Checkpoint = std::unordered_map<void*, CheckpointEntry>;
+    struct Checkpoint {
+        std::unordered_map<void*, CheckpointEntry> entries;
+        std::vector<void*> order;
+    };
 
     static CheckpointEntry capture_entry(bool existed, const TrackedEntity& tracked) {
         CheckpointEntry entry;
@@ -251,7 +268,7 @@ private:
         executor_.execute(compiled.sql, compiled.params);
         tracked.erase_identity(pk);
         tracked.status = EntityStatus::Detached;
-        tracked_.erase(key);
+        erase(key);
 
         if (after_delete) after_delete();
         (void)keep_alive;
@@ -260,6 +277,7 @@ private:
     DbExecutor& executor_;
     const Dialect& dialect_;
     std::unordered_map<void*, TrackedEntity> tracked_;
+    std::vector<void*> tracked_order_;
     std::vector<Checkpoint> checkpoints_;
 };
 
