@@ -23,6 +23,7 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           def execute_embedded(path, section_name):
               text = Path(path).read_text()
@@ -33,7 +34,7 @@ jobs:
               end = text.index('          PY\n', start)
               lines = text[start:end].splitlines()
               script = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines)
-              exec(compile(script, f'<{section_name or path}>', 'exec'))
+              exec(compile(script, f'<{section_name or path}>', 'exec'), {'Path': Path, 're': re})
 
           execute_embedded('.github/workflows/ci.yml', None)
           execute_embedded('.github/workflows/runtime-candidate.yml', 'Apply deterministic query candidate')
