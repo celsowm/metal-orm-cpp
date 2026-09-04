@@ -34,15 +34,6 @@ jobs:
                   raise SystemExit(f"candidate patch context not found: {path}")
               file.write_text(text.replace(old, new, 1))
 
-          def replace_all(path: str, old: str, new: str, expected: int) -> None:
-              file = Path(path)
-              text = file.read_text()
-              count = text.count(old)
-              if count != expected:
-                  raise SystemExit(
-                      f"candidate patch context count mismatch: {path}: expected {expected}, got {count}")
-              file.write_text(text.replace(old, new))
-
           def regex_replace(path: str, pattern: str, replacement: str) -> None:
               file = Path(path)
               text = file.read_text()
@@ -242,24 +233,14 @@ jobs:
               "#include <functional>\n",
               "#include <functional>\n#include <initializer_list>\n")
 
-          returning_vector = '''    {builder}& returning(std::vector<std::string> columns) {{
-              node_.returning.clear();
-              node_.returning.reserve(columns.size());
-              for (auto& column : columns) {{
-                  node_.returning.push_back(DmlReturning{{std::move(column), std::nullopt}});
-              }}
-              return *this;
-          }}
-
-          '''
           for builder in ("InsertQueryBuilder", "UpdateQueryBuilder", "DeleteQueryBuilder"):
-              old = returning_vector.format(builder=builder)
-              new = old + '''    {builder}& returning(std::initializer_list<std::string> columns) {{
+              marker = f"    {builder}& returning(std::vector<DmlReturning> columns) {{"
+              overload = f'''    {builder}& returning(std::initializer_list<std::string> columns) {{
               return returning(std::vector<std::string>{{columns}});
           }}
 
-          '''.format(builder=builder)
-              replace("include/metal/dml.hpp", old, new)
+          '''
+              replace("include/metal/dml.hpp", marker, overload + marker)
 
           replace(
               "include/metal/relation_change_processor.hpp",
