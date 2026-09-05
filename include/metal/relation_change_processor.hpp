@@ -492,29 +492,34 @@ private:
         (apply_morph_to_case<Cases, Target, Root, Traits>(root, target, matched), ...);
     }
 
+    template <reflect::Entity Root, typename Traits, typename V>
+    static void flush_morph_to_value(Root& root, const V& target) {
+        constexpr auto type_field = Traits::type_field();
+        constexpr auto id_field = Traits::id_field();
+        using ValueType = std::remove_cvref_t<V>;
+        if constexpr (std::same_as<ValueType, std::monostate>) {
+            clear_nullable_member<type_field>(root, "morph_to");
+            clear_nullable_member<id_field>(root, "morph_to");
+        } else {
+            using Target = typename ValueType::element_type;
+            bool matched = false;
+            apply_morph_to_cases<Target, Root, Traits>(
+                root, target, matched, typename Traits::targets{});
+            if (!matched) {
+                throw std::runtime_error("MetalORM: morph_to target type is not declared by the relation");
+            }
+        }
+    }
+
     template <reflect::Entity Root, std::meta::info Relation>
     void flush_morph_to(Root& root) {
         using A = reflect::relation_annotation_t<Relation>;
         using Traits = mapping::relation_annotation_traits<A>;
-        constexpr auto type_field = Traits::type_field();
-        constexpr auto id_field = Traits::id_field();
         auto& reference = root.[:Relation:];
         if (!reference.dirty()) return;
 
         std::visit([&](const auto& target) {
-            using V = std::remove_cvref_t<decltype(target)>;
-            if constexpr (std::same_as<V, std::monostate>) {
-                clear_nullable_member<type_field>(root, "morph_to");
-                clear_nullable_member<id_field>(root, "morph_to");
-            } else {
-                using Target = typename V::element_type;
-                bool matched = false;
-                apply_morph_to_cases<Target, Root, Traits>(
-                    root, target, matched, typename Traits::targets{});
-                if (!matched) {
-                    throw std::runtime_error("MetalORM: morph_to target type is not declared by the relation");
-                }
-            }
+            flush_morph_to_value<Root, Traits>(root, target);
         }, reference._metal_current());
     }
 

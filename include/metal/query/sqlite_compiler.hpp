@@ -264,23 +264,25 @@ inline std::string compile_window(const WindowRef& window, CompileContext& ctx) 
 }
 
 inline std::string compile_case(const CaseRef& value, CompileContext& ctx) {
-    if (value.branches.empty()) throw std::logic_error("MetalORM: CASE requires at least one WHEN branch");
-    std::string out = "CASE";
-    for (const auto& branch : value.branches) {
-        out += " WHEN " + compile_expression(branch.when, ctx) +
-               " THEN " + compile_scalar(branch.then_value, ctx);
+        if (value.branches.empty()) throw std::logic_error("MetalORM: CASE requires at least one WHEN branch");
+        std::string out = "CASE";
+        for (const auto& branch : value.branches) {
+            const auto when_sql = compile_expression(branch.when, ctx);
+            const auto then_sql = compile_scalar(branch.then_value, ctx);
+            out += " WHEN " + when_sql + " THEN " + then_sql;
+        }
+        if (value.else_value) out += " ELSE " + compile_scalar(*value.else_value, ctx);
+        out += " END";
+        return out;
     }
-    if (value.else_value) out += " ELSE " + compile_scalar(*value.else_value, ctx);
-    out += " END";
-    return out;
-}
 
-inline std::string compile_arithmetic(const ArithmeticRef& value, CompileContext& ctx) {
-    return "(" + compile_scalar(value.left, ctx) + " " + arithmetic_token(value.op) + " " +
-           compile_scalar(value.right, ctx) + ")";
-}
+    inline std::string compile_arithmetic(const ArithmeticRef& value, CompileContext& ctx) {
+        const auto left = compile_scalar(value.left, ctx);
+        const auto right = compile_scalar(value.right, ctx);
+        return "(" + left + " " + arithmetic_token(value.op) + " " + right + ")";
+    }
 
-inline std::string compile_scalar(const ScalarPtr& scalar, CompileContext& ctx) {
+    inline std::string compile_scalar(const ScalarPtr& scalar, CompileContext& ctx) {
     return std::visit([&](const auto& node) -> std::string {
         using N = std::remove_cvref_t<decltype(node)>;
         if constexpr (std::same_as<N, ColumnRef>) {
@@ -303,47 +305,51 @@ inline std::string compile_scalar(const ScalarPtr& scalar, CompileContext& ctx) 
 }
 
 inline std::string compile_expression(const ExprPtr& expression, CompileContext& ctx) {
-    return std::visit([&](const auto& node) -> std::string {
-        using N = std::remove_cvref_t<decltype(node)>;
-        if constexpr (std::same_as<N, ComparisonNode>) {
-            return compile_scalar(node.left, ctx) + " " + compare_token(node.op) + " " +
-                   compile_scalar(node.right, ctx);
-        } else if constexpr (std::same_as<N, NullCheckNode>) {
-            return compile_scalar(node.operand, ctx) + (node.negated ? " IS NOT NULL" : " IS NULL");
-        } else if constexpr (std::same_as<N, LikeNode>) {
-            return compile_scalar(node.operand, ctx) + (node.negated ? " NOT LIKE " : " LIKE ") +
-                   compile_scalar(node.pattern, ctx);
-        } else if constexpr (std::same_as<N, BetweenNode>) {
-            return compile_scalar(node.operand, ctx) + (node.negated ? " NOT BETWEEN " : " BETWEEN ") +
-                   compile_scalar(node.lower, ctx) + " AND " + compile_scalar(node.upper, ctx);
-        } else if constexpr (std::same_as<N, InValuesNode>) {
-            if (node.values.empty()) return node.negated ? "1 = 1" : "0 = 1";
-            std::string out = compile_scalar(node.operand, ctx) + (node.negated ? " NOT IN (" : " IN (");
-            for (std::size_t i = 0; i < node.values.size(); ++i) {
-                if (i) out += ", ";
-                ctx.params.push_back(node.values[i]);
-                out += ctx.dialect.placeholder(ctx.params.size());
+        return std::visit([&](const auto& node) -> std::string {
+            using N = std::remove_cvref_t<decltype(node)>;
+            if constexpr (std::same_as<N, ComparisonNode>) {
+                const auto left = compile_scalar(node.left, ctx);
+                const auto right = compile_scalar(node.right, ctx);
+                return left + " " + compare_token(node.op) + " " + right;
+            } else if constexpr (std::same_as<N, NullCheckNode>) {
+                return compile_scalar(node.operand, ctx) + (node.negated ? " IS NOT NULL" : " IS NULL");
+            } else if constexpr (std::same_as<N, LikeNode>) {
+                const auto operand = compile_scalar(node.operand, ctx);
+                const auto pattern = compile_scalar(node.pattern, ctx);
+                return operand + (node.negated ? " NOT LIKE " : " LIKE ") + pattern;
+            } else if constexpr (std::same_as<N, BetweenNode>) {
+                const auto operand = compile_scalar(node.operand, ctx);
+                const auto lower = compile_scalar(node.lower, ctx);
+                const auto upper = compile_scalar(node.upper, ctx);
+                return operand + (node.negated ? " NOT BETWEEN " : " BETWEEN ") + lower + " AND " + upper;
+            } else if constexpr (std::same_as<N, InValuesNode>) {
+                if (node.values.empty()) return node.negated ? "1 = 1" : "0 = 1";
+                std::string out = compile_scalar(node.operand, ctx) + (node.negated ? " NOT IN (" : " IN (");
+                for (std::size_t i = 0; i < node.values.size(); ++i) {
+                    if (i) out += ", ";
+                    ctx.params.push_back(node.values[i]);
+                    out += ctx.dialect.placeholder(ctx.params.size());
+                }
+                return out + ")";
+            } else if constexpr (std::same_as<N, InSubqueryNode>) {
+                const auto left = compile_scalar(node.operand, ctx);
+                const auto nested_dialect = offset_placeholders(ctx.dialect, ctx.params.size());
+                auto subquery = node.compile_subquery(nested_dialect);
+                ctx.params.insert(ctx.params.end(), subquery.params.begin(), subquery.params.end());
+                return left + (node.negated ? " NOT IN (" : " IN (") + subquery.sql + ")";
+            } else if constexpr (std::same_as<N, ExistsNode>) {
+                const auto nested_dialect = offset_placeholders(ctx.dialect, ctx.params.size());
+                auto subquery = node.compile_subquery(nested_dialect);
+                ctx.params.insert(ctx.params.end(), subquery.params.begin(), subquery.params.end());
+                return std::string(node.negated ? "NOT EXISTS (" : "EXISTS (") + subquery.sql + ")";
+            } else if constexpr (std::same_as<N, LogicalNode>) {
+                const auto left = compile_expression(node.left, ctx);
+                const auto right = compile_expression(node.right, ctx);
+                return "(" + left + (node.op == LogicOp::And ? " AND " : " OR ") + right + ")";
+            } else {
+                return "NOT (" + compile_expression(node.operand, ctx) + ")";
             }
-            return out + ")";
-        } else if constexpr (std::same_as<N, InSubqueryNode>) {
-            const auto left = compile_scalar(node.operand, ctx);
-            const auto nested_dialect = offset_placeholders(ctx.dialect, ctx.params.size());
-            auto sub = node.compile_subquery(nested_dialect);
-            ctx.params.insert(ctx.params.end(), sub.params.begin(), sub.params.end());
-            return left + (node.negated ? " NOT IN (" : " IN (") + sub.sql + ")";
-        } else if constexpr (std::same_as<N, ExistsNode>) {
-            const auto nested_dialect = offset_placeholders(ctx.dialect, ctx.params.size());
-            auto sub = node.compile_subquery(nested_dialect);
-            ctx.params.insert(ctx.params.end(), sub.params.begin(), sub.params.end());
-            return std::string(node.negated ? "NOT EXISTS (" : "EXISTS (") + sub.sql + ")";
-        } else if constexpr (std::same_as<N, LogicalNode>) {
-            return "(" + compile_expression(node.left, ctx) +
-                   (node.op == LogicOp::And ? " AND " : " OR ") +
-                   compile_expression(node.right, ctx) + ")";
-        } else {
-            return "NOT (" + compile_expression(node.operand, ctx) + ")";
-        }
-    }, expression->node);
-}
+        }, expression->node);
+    }
 
-} // namespace metal
+    } // namespace metal

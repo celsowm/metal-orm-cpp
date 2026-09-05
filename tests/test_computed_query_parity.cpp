@@ -148,7 +148,7 @@ int main() {
     assert(arithmetic_sql.sql.find(" * ") != std::string::npos);
     assert(arithmetic_sql.sql.find(" / ") != std::string::npos);
     assert(arithmetic_sql.sql.find(" % ") != std::string::npos);
-    assert(arithmetic_sql.params.size() == 6);
+    assert(arithmetic_sql.params.size() == 7);
 
     const auto arithmetic_rows = db->execute(arithmetic_sql.sql, arithmetic_sql.params);
     assert(arithmetic_rows.rows.size() == 1);

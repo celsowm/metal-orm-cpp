@@ -62,10 +62,11 @@ struct CursorOrderTerm {
 template <std::meta::info Member>
 CursorOrderTerm cursor_order(Field<Member> = {}, bool ascending = true) {
     using Owner = typename Field<Member>::owner_type;
+    constexpr auto column = reflect::column_name_view<Member>();
     return CursorOrderTerm{
         std::type_index(typeid(Owner)),
         reflect::table_name<Owner>(),
-        reflect::column_name<Member>(),
+        std::string(column),
         ascending};
 }
 
@@ -132,9 +133,17 @@ inline std::string cursor_value_text(const Value& value, char& tag) {
         } else if constexpr (std::same_as<V, std::string>) {
             tag = 's';
             return v;
-        } else {
+        } else if constexpr (std::same_as<V, bool>) {
             tag = 'b';
             return v ? "1" : "0";
+        } else {
+            tag = 'x';
+            std::string out;
+            out.reserve(v.size());
+            for (const auto byte : v) {
+                out.push_back(static_cast<char>(static_cast<unsigned char>(byte)));
+            }
+            return out;
         }
     }, value);
 }
@@ -148,6 +157,14 @@ inline Value parse_cursor_value(char tag, std::string_view text) {
             if (text == "1") return Value{true};
             if (text == "0") return Value{false};
             break;
+        case 'x': {
+            Blob blob;
+            blob.reserve(text.size());
+            for (const unsigned char byte : text) {
+                blob.push_back(static_cast<std::byte>(byte));
+            }
+            return Value{std::move(blob)};
+        }
     }
     throw std::invalid_argument("MetalORM: invalid cursor payload");
 }

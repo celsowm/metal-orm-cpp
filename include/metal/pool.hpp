@@ -256,6 +256,7 @@ public:
         state->reaper.request_stop();
         state->cv.notify_all();
         state->reaper_cv.notify_all();
+        if (state->reaper.joinable()) state->reaper.join();
 
         std::exception_ptr first_error;
         for (auto& resource : idle) {

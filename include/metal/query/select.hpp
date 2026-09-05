@@ -286,8 +286,13 @@ public:
         if (cte_name.empty() || cte_column.empty()) {
             throw std::invalid_argument("MetalORM: CTE join requires non-empty CTE and column names");
         }
+        using Owner = typename Field<OwnerMember>::owner_type;
+        constexpr auto owner_column = reflect::column_name_view<OwnerMember>();
         state_->cte_joins.push_back(CteJoinSpec{
-            kind, std::move(cte_name), column_ref(field<OwnerMember>), std::move(cte_column)});
+            kind,
+            std::move(cte_name),
+            ColumnRef{std::type_index(typeid(Owner)), std::string(owner_column)},
+            std::move(cte_column)});
         return *this;
     }
 
@@ -587,12 +592,16 @@ private:
         }
 
         if (where_sql || extra_where_sql) {
-            base += " WHERE ";
-            if (where_sql) base += "(" + *where_sql + ")";
-            if (where_sql && extra_where_sql) base += " AND ";
-            if (extra_where_sql) base += "(" + *extra_where_sql + ")";
+        base += " WHERE ";
+        if (where_sql && extra_where_sql) {
+            base += "(" + *where_sql + ") AND (" + *extra_where_sql + ")";
+        } else if (where_sql) {
+            base += *where_sql;
+        } else {
+            base += *extra_where_sql;
         }
-        if (!state_->group_by.empty()) {
+    }
+    if (!state_->group_by.empty()) {
             base += " GROUP BY ";
             for (std::size_t i = 0; i < state_->group_by.size(); ++i) {
                 if (i) base += ", ";

@@ -122,9 +122,10 @@ public:
     }
 
     template <std::meta::info Member>
-    requires std::same_as<reflect::owner_type_t<Member>, T> && reflect::is_view_column<Member>()
+    requires (std::same_as<reflect::owner_type_t<Member>, T> && reflect::is_view_column<Member>())
     ViewQuery& order_by(bool ascending = true) {
-        order_by_.push_back(ViewOrderSpec{reflect::column_name<Member>(), ascending});
+        constexpr auto column = reflect::column_name_view<Member>();
+        order_by_.push_back(ViewOrderSpec{std::string(column), ascending});
         return *this;
     }
 

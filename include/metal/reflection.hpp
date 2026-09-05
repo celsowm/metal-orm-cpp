@@ -89,11 +89,13 @@ consteval bool is_persistent_member() {
 }
 
 template <info Member>
+inline constexpr auto column_mapping = annotation<mapping::column>(Member);
+
+template <info Member>
 consteval std::string_view column_name_view() {
     static_assert(std::meta::is_nonstatic_data_member(Member));
     if constexpr (has<mapping::column>(Member)) {
-        constexpr auto mapped = annotation<mapping::column>(Member);
-        return mapped.name.view();
+        return column_mapping<Member>.name.view();
     } else {
         return std::meta::identifier_of(Member);
     }

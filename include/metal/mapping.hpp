@@ -201,7 +201,7 @@ struct relation_annotation_traits<belongs_to_key<ForeignKey, Target, TargetColum
             throw "MetalORM: belongs_to_key target column cannot be empty";
         }
 
-        const auto ctx = std::meta::access_context::current();
+        constexpr auto ctx = std::meta::access_context::current();
         std::meta::info result{};
         std::size_t count = 0;
         template for (constexpr auto candidate :

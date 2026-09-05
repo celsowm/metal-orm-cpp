@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <initializer_list>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -285,6 +286,10 @@ public:
         return *this;
     }
 
+    InsertQueryBuilder& returning(std::initializer_list<std::string> columns) {
+    return returning(std::vector<std::string>{columns});
+}
+
     InsertQueryBuilder& returning(std::vector<DmlReturning> columns) {
         node_.returning = std::move(columns);
         return *this;
@@ -471,6 +476,10 @@ public:
         return *this;
     }
 
+    UpdateQueryBuilder& returning(std::initializer_list<std::string> columns) {
+    return returning(std::vector<std::string>{columns});
+}
+
     UpdateQueryBuilder& returning(std::vector<DmlReturning> columns) {
         node_.returning = std::move(columns);
         return *this;
@@ -556,6 +565,10 @@ public:
         }
         return *this;
     }
+
+    DeleteQueryBuilder& returning(std::initializer_list<std::string> columns) {
+    return returning(std::vector<std::string>{columns});
+}
 
     DeleteQueryBuilder& returning(std::vector<DmlReturning> columns) {
         node_.returning = std::move(columns);

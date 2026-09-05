@@ -23,7 +23,8 @@ inline constexpr Field<Member> field{};
 template <std::meta::info Member>
 ColumnRef column_ref(Field<Member> = {}) {
     using Owner = typename Field<Member>::owner_type;
-    return ColumnRef{std::type_index(typeid(Owner)), reflect::column_name<Member>()};
+    constexpr auto column = reflect::column_name_view<Member>();
+    return ColumnRef{std::type_index(typeid(Owner)), std::string(column)};
 }
 
 template <typename T>

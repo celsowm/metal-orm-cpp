@@ -57,6 +57,16 @@ inline std::string openapi_value_fingerprint(const Value& value) {
             std::ostringstream out;
             out << "d:" << std::setprecision(17) << item;
             return out.str();
+        } else if constexpr (std::same_as<V, Blob>) {
+            static constexpr char hex[] = "0123456789abcdef";
+            std::string out = "b:" + std::to_string(item.size()) + ":";
+            out.reserve(out.size() + item.size() * 2);
+            for (const auto byte : item) {
+                const auto value = static_cast<unsigned int>(byte);
+                out.push_back(hex[(value >> 4) & 0x0f]);
+                out.push_back(hex[value & 0x0f]);
+            }
+            return out;
         } else {
             return "s:" + std::to_string(item.size()) + ":" + item;
         }

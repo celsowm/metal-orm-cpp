@@ -527,6 +527,9 @@ private:
                     using Target = reflect::single_target_t<reflect::member_type_t<relation>>;
                     constexpr auto foreign_key = Traits::foreign_key();
                     constexpr auto target_key = reflect::key_or_primary<Target>(Traits::target_key());
+                    constexpr bool target_key_is_pk = target_key == reflect::primary_key_member<Target>();
+                    constexpr bool target_key_is_generated =
+                        target_key_is_pk && reflect::primary_key_is_generated<Target>();
                     using ForeignKey = reflect::member_type_t<foreign_key>;
 
                     auto weak = std::weak_ptr<Root>(root);
@@ -540,10 +543,10 @@ private:
                     reference._metal_bind_attach([weak](Target& target) {
                         if (auto locked = weak.lock()) {
                             const Value key = to_value(target.[:target_key:]);
-                            if (!std::holds_alternative<std::nullptr_t>(key) &&
-                                !(target_key == reflect::primary_key_member<Target>() &&
-                                  reflect::primary_key_is_generated<Target>() &&
-                                  is_empty_generated_value(key))) {
+                            if (!std::holds_alternative<std::nullptr_t>(key)) {
+                                if constexpr (target_key_is_generated) {
+                                    if (is_empty_generated_value(key)) return;
+                                }
                                 (*locked).[:foreign_key:] = from_value<ForeignKey>(key);
                             }
                         }
