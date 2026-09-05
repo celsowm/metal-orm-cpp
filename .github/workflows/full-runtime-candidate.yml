@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/full-runtime-candidate.yml
+      - tests/test_bulk_parity.cpp
 
 permissions:
   contents: write
