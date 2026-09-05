@@ -181,6 +181,11 @@ QueryResult PostgresExecutor::execute(const std::string& sql, const std::vector<
     return output;
 }
 
+std::vector<QueryResult> PostgresExecutor::execute_procedure(
+    const CompiledProcedureCall& call) {
+    return {execute(call.sql, call.params)};
+}
+
 void PostgresExecutor::begin_transaction() { (void)execute("BEGIN;"); }
 void PostgresExecutor::commit_transaction() { (void)execute("COMMIT;"); }
 void PostgresExecutor::rollback_transaction() { (void)execute("ROLLBACK;"); }
