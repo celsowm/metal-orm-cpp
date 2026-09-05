@@ -39,3 +39,51 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  postgres-e2e:
+    runs-on: ubuntu-latest
+    container: gcc:16
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: metalorm
+          POSTGRES_PASSWORD: metalorm
+          POSTGRES_DB: metalorm
+        options: >-
+          --health-cmd "pg_isready -U metalorm -d metalorm"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL E2E dependencies
+        run: |
+          apt-get update
+          apt-get install -y cmake ninja-build libsqlite3-dev libpq-dev
+
+      - name: Configure PostgreSQL runtime
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DMETAL_ORM_BUILD_EXAMPLES=OFF
+          -DMETAL_ORM_BUILD_TOOLS=OFF
+          -DMETAL_ORM_BUILD_TESTS=OFF
+          -DMETAL_ORM_BUILD_POSTGRESQL=ON
+
+      - name: Build PostgreSQL runtime
+        run: cmake --build build --target metal-orm-postgres
+
+      - name: Build live PostgreSQL E2E
+        run: >-
+          c++ -std=c++26 -freflection -Iinclude
+          tests/test_postgres_live_e2e.cpp
+          -Lbuild -lmetal-orm-postgres -lmetal-orm
+          -lpq -lsqlite3 -pthread
+          -o build/metal-orm-postgres-live-e2e
+
+      - name: Run live PostgreSQL E2E
+        env:
+          METAL_ORM_POSTGRES_E2E_URL: host=postgres port=5432 dbname=metalorm user=metalorm password=metalorm
+        run: ./build/metal-orm-postgres-live-e2e
