@@ -114,6 +114,22 @@ int main() {
     assert(compiled.out_params.names == std::vector<std::string>({"total", "state"}));
     assert(call.to_sql(dialect) == compiled.sql);
 
+    metal::PostgresDialect postgres;
+    const auto postgres_compiled = call.compile(postgres);
+    assert(postgres_compiled.sql == "CALL \"admin\".\"refresh_user\"($1, NULL, $2);");
+    assert(postgres_compiled.params.size() == 2);
+    assert(metal::from_value<std::int64_t>(postgres_compiled.params[0]) == 7);
+    assert(metal::from_value<std::string>(postgres_compiled.params[1]) == "pending");
+    assert(postgres_compiled.out_params.source == metal::ProcedureOutSource::LastResultSet);
+    assert(postgres_compiled.out_params.names == std::vector<std::string>({"total", "state"}));
+
+    const auto postgres_no_out = metal::call_procedure("touch", std::string{"admin"})
+        .in("id", std::int64_t{9})
+        .compile(postgres);
+    assert(postgres_no_out.sql == "CALL \"admin\".\"touch\"($1);");
+    assert(postgres_no_out.out_params.source == metal::ProcedureOutSource::None);
+    assert(postgres_no_out.out_params.names.empty());
+
     auto executor = std::make_shared<TestProcedureExecutor>();
     auto dialect_ptr = std::make_shared<TestProcedureDialect>();
     metal::Session session{executor, dialect_ptr};
