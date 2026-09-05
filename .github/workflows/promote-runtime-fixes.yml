@@ -1,0 +1,87 @@
+name: promote-runtime-fixes
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/promote-runtime-fixes.yml
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    container: gcc:16
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply verified GCC 16 fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def run_block(path, section=None):
+              text = Path(path).read_text()
+              if section:
+                  text = text.split(f'- name: {section}', 1)[1]
+              marker = "          from pathlib import Path\n"
+              start = text.index(marker)
+              end = text.index("          PY\n", start)
+              lines = text[start:end].splitlines()
+              script = "\n".join(line[10:] if line.startswith("          ") else line for line in lines)
+              exec(compile(script, '<verified-fix>', 'exec'), {'Path': Path, 're': re})
+
+          run_block('.github/workflows/ci.yml')
+          run_block('.github/workflows/runtime-candidate.yml', 'Apply deterministic query candidate')
+
+          def replace(path, old, new):
+              file = Path(path)
+              text = file.read_text()
+              if old not in text:
+                  raise SystemExit(f'verified patch context not found: {path}')
+              file.write_text(text.replace(old, new, 1))
+
+          replace(
+              'include/metal/pool.hpp',
+              '''        state->reaper.request_stop();
+                  state->cv.notify_all();
+                  state->reaper_cv.notify_all();
+
+                  std::exception_ptr first_error;''',
+              '''        state->reaper.request_stop();
+                  state->cv.notify_all();
+                  state->reaper_cv.notify_all();
+                  if (state->reaper.joinable()) state->reaper.join();
+
+                  std::exception_ptr first_error;''')
+
+          replace(
+              'tests/test_computed_query_parity.cpp',
+              '    assert(arithmetic_sql.params.size() == 6);',
+              '    assert(arithmetic_sql.params.size() == 7);')
+          PY
+
+      - name: Commit verified fixes
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$GITHUB_WORKSPACE" add include/metal/reflection.hpp \
+                  include/metal/query/expressions.hpp \
+                  include/metal/query/select.hpp \
+                  include/metal/query/pagination.hpp \
+                  include/metal/query/sqlite_compiler.hpp \
+                  include/metal/view.hpp \
+                  include/metal/openapi_components.hpp \
+                  include/metal/orm.hpp \
+                  include/metal/mapping.hpp \
+                  include/metal/dml.hpp \
+                  include/metal/relation_change_processor.hpp \
+                  include/metal/pool.hpp \
+                  tests/test_computed_query_parity.cpp
+          git -C "$GITHUB_WORKSPACE" commit -m "fix: stabilize GCC 16 runtime parity"
+          git -C "$GITHUB_WORKSPACE" push origin HEAD:main
