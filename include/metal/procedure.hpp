@@ -133,6 +133,55 @@ inline std::unordered_map<std::string, Value> extract_out_values(
     return out;
 }
 
+inline CompiledProcedureCall compile_postgres_procedure_call(
+    const ProcedureCall& call,
+    const Dialect& dialect) {
+    CompiledProcedureCall out;
+    CompileContext ctx{dialect, {}, out.params};
+
+    const auto qualified = call.ref.schema
+        ? dialect.quote_identifier(*call.ref.schema) + "." + dialect.quote_identifier(call.ref.name)
+        : dialect.quote_identifier(call.ref.name);
+
+    std::vector<std::string> args;
+    args.reserve(call.params.size());
+    for (const auto& param : call.params) {
+        switch (param.direction) {
+            case ProcedureDirection::In:
+            case ProcedureDirection::InOut:
+                if (!param.value) {
+                    throw std::logic_error(
+                        "MetalORM: PostgreSQL procedure input parameter '" + param.name +
+                        "' has no value");
+                }
+                args.push_back(compile_scalar(param.value, ctx));
+                break;
+            case ProcedureDirection::Out:
+                // PostgreSQL CALL requires an argument position for OUT parameters.
+                // NULL is conventional and is not evaluated by the procedure.
+                args.push_back("NULL");
+                break;
+        }
+
+        if (param.direction == ProcedureDirection::Out ||
+            param.direction == ProcedureDirection::InOut) {
+            out.out_params.names.push_back(param.name);
+        }
+    }
+
+    out.out_params.source = out.out_params.names.empty()
+        ? ProcedureOutSource::None
+        : ProcedureOutSource::LastResultSet;
+
+    out.sql = "CALL " + qualified + "(";
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (i) out.sql += ", ";
+        out.sql += args[i];
+    }
+    out.sql += ");";
+    return out;
+}
+
 } // namespace procedure_detail
 
 class ProcedureCallBuilder {
@@ -186,6 +235,9 @@ public:
     [[nodiscard]] ProcedureCall get_ast() const { return ast_; }
 
     [[nodiscard]] CompiledProcedureCall compile(const Dialect& dialect) const {
+        if (dialect.family() == DialectFamily::PostgreSQL) {
+            return procedure_detail::compile_postgres_procedure_call(ast_, dialect);
+        }
         const auto* compiler = dynamic_cast<const ProcedureCompiler*>(&dialect);
         if (!compiler) {
             throw std::logic_error(
