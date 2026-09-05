@@ -184,6 +184,12 @@ int main() {
     assert(deleted_where.processed_rows == 0);
     assert(deleted_where.chunks_executed == 1);
 
+    const auto duplicate_source = db->execute(
+        "SELECT email FROM bulk_users ORDER BY id LIMIT 1;");
+    assert(duplicate_source.rows.size() == 1);
+    const auto duplicate_email = metal::from_value<std::string>(
+        duplicate_source.rows.front().at("email"));
+
     const auto before_rollback = db->execute("SELECT COUNT(*) AS c FROM bulk_users;");
     const auto count_before = metal::from_value<std::int64_t>(before_rollback.rows.front().at("c"));
 
@@ -195,7 +201,7 @@ int main() {
             session,
             {
                 make_user("rollback-ok@example.test", "ok", 1),
-                make_user("a@example.test", "duplicate", 2)
+                make_user(duplicate_email, "duplicate", 2)
             },
             rollback_options);
     } catch (const std::runtime_error&) {
@@ -217,7 +223,7 @@ int main() {
             session,
             {
                 make_user("partial@example.test", "partial", 1),
-                make_user("a@example.test", "duplicate", 2)
+                make_user(duplicate_email, "duplicate", 2)
             },
             non_transactional);
     } catch (const std::runtime_error&) {
