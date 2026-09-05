@@ -1,10 +1,10 @@
 # PostgreSQL backend
 
-PostgreSQL support is being introduced behind the same `DbExecutor` boundary used by SQLite, without making libpq a mandatory dependency of the core library.
+PostgreSQL support lives behind the same `DbExecutor` and `Dialect` boundaries used by SQLite, without making libpq a mandatory dependency of the core library.
 
-## Current slice
+## Build and link
 
-When PostgreSQL development files are available, CMake exposes an optional target:
+When PostgreSQL development files are available, CMake exposes the optional target:
 
 ```cmake
 find_package(metal-orm CONFIG REQUIRED)
@@ -17,27 +17,36 @@ The executor API is declared in:
 #include <metal/postgres_execution.hpp>
 ```
 
-`PostgresExecutor` currently provides:
+The PostgreSQL target is intentionally separate from `metal::orm`; consumers that only use SQLite do not acquire a libpq dependency.
 
-- libpq connection management through `PQconnectdb`
-- parameterized raw SQL through `PQexecParams`
+## Implemented
+
+`PostgresDialect` and `PostgresExecutor` currently cover:
+
+- ANSI identifier quoting and native `$1`, `$2`, ... placeholders
+- globally offset numbered placeholders across nested subqueries, CTEs, derived tables and set operations
+- PostgreSQL-specific scalar function rendering
+- PostgreSQL DDL types, generated identity columns and `RETURNING` generated-key retrieval
+- parameterized SQL through `PQexecParams`
 - `Value` transport for null, integers, doubles, strings, booleans and binary `bytea`
 - typed result decoding for booleans, integer types, floating-point types and `bytea`
 - affected-row reporting
-- transactions
-- savepoints with the same identifier validation used by the SQLite executor
+- transactions and savepoints
+- PostgreSQL schema introspection
+- stored procedure compilation with `CALL`, including IN, OUT and INOUT parameters
+- stored procedure execution through the common `ProcedureExecutor` capability
+- live PostgreSQL E2E coverage in CI
 
-The PostgreSQL target is intentionally separate from `metal::orm`; consumers that only use SQLite do not acquire a libpq dependency.
+For PostgreSQL procedures, OUT parameters occupy their PostgreSQL-required argument position as `NULL`; IN and INOUT values keep normal numbered parameter binding. PostgreSQL's returned OUT/INOUT row is exposed through the existing `ProcedureExecutionResult::out` API.
 
-## Not yet parity
+## Remaining backend-parity work
 
-This executor slice is not a declaration of full PostgreSQL parity. The following work remains before PostgreSQL can be considered a complete backend:
+PostgreSQL is now a real executable backend, but it is not yet declared fully equivalent to the SQLite coverage matrix. Remaining work is primarily breadth rather than the original backend bootstrap:
 
-1. a PostgreSQL query compiler/dialect rather than reusing SQLite-specific function rendering
-2. globally correct numbered-placeholder allocation across nested subqueries, CTEs, derived tables and set operations
-3. PostgreSQL DDL and schema introspection
-4. generated-key integration using `RETURNING` rather than SQLite `last_insert_rowid` semantics
-5. PostgreSQL procedure compilation/execution
-6. end-to-end integration tests against a real PostgreSQL service
+1. exercise more schema-diff/synchronization operations against a live PostgreSQL service
+2. expand PostgreSQL-specific DDL/introspection edge coverage (constraints, views, indexes and destructive migrations)
+3. broaden live query/function coverage beyond the current representative E2E
+4. validate procedure overload/type-resolution edge cases and richer PostgreSQL procedure signatures
+5. audit SQLite-specific assumptions in higher-level bulk/tree/cache paths under PostgreSQL
 
-The numbered-placeholder item is deliberately treated as a compiler ownership problem. Rewriting `$1`/`$2` strings after a subquery has already compiled would make parameter identity depend on SQL text and is therefore not an acceptable implementation strategy.
+Backend-specific behavior should continue to be implemented at compiler/executor/schema boundaries rather than by rewriting generated SQL strings after compilation.
