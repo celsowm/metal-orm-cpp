@@ -93,6 +93,20 @@ void test_live_postgres(const std::string& connection_string) {
         "CREATE UNIQUE INDEX pg_live_records_name_uq ON pg_live_records(name);");
 
     metal::Session session{executor, dialect};
+
+    executor->execute(
+        "CREATE PROCEDURE metalorm_e2e.bump_state("
+        "IN input BIGINT, OUT total BIGINT, INOUT state TEXT) "
+        "LANGUAGE plpgsql AS $$ BEGIN total := input * 2; state := state || '-done'; END $$;");
+    const auto procedure = metal::call_procedure("bump_state", std::string{"metalorm_e2e"})
+        .in("input", std::int64_t{21})
+        .out("total", std::string{"BIGINT"})
+        .in_out("state", std::string{"ready"}, std::string{"TEXT"});
+    const auto procedure_result = procedure.execute(session);
+    assert(procedure_result.result_sets.size() == 1);
+    assert(metal::from_value<std::int64_t>(procedure_result.out.at("total")) == 42);
+    assert(metal::from_value<std::string>(procedure_result.out.at("state")) == "ready-done");
+
     auto record = std::make_shared<PgLiveRecord>();
     record->name = "alpha";
     record->active = true;
