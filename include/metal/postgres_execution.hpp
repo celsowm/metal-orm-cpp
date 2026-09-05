@@ -1,6 +1,7 @@
 #pragma once
 
 #include "metal/execution.hpp"
+#include "metal/procedure.hpp"
 
 #include <memory>
 #include <string>
@@ -8,7 +9,7 @@
 
 namespace metal {
 
-class PostgresExecutor final : public DbExecutor {
+class PostgresExecutor final : public DbExecutor, public ProcedureExecutor {
 public:
     explicit PostgresExecutor(std::string connection_string);
     ~PostgresExecutor() override;
@@ -19,6 +20,8 @@ public:
     PostgresExecutor& operator=(PostgresExecutor&&) noexcept;
 
     QueryResult execute(const std::string& sql, const std::vector<Value>& params = {}) override;
+    [[nodiscard]] std::vector<QueryResult> execute_procedure(
+        const CompiledProcedureCall& call) override;
     [[nodiscard]] ExecutorCapabilities capabilities() const noexcept override { return {true, true}; }
 
     void begin_transaction() override;
