@@ -1,0 +1,85 @@
+name: bulk-runtime-diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/bulk-runtime-diagnostic.yml
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    container: gcc:16
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y cmake ninja-build libsqlite3-dev
+      - name: Apply current candidates
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          def run_block(path, section=None):
+              text = Path(path).read_text()
+              if section:
+                  text = text.split(f'- name: {section}', 1)[1]
+              marker = "          from pathlib import Path\n"
+              start = text.index(marker)
+              end = text.index("          PY\n", start)
+              lines = text[start:end].splitlines()
+              script = "\n".join(line[10:] if line.startswith("          ") else line for line in lines)
+              exec(compile(script, '<embedded>', 'exec'), {'Path': Path, 're': re})
+          run_block('.github/workflows/ci.yml')
+          run_block('.github/workflows/runtime-candidate.yml', 'Apply deterministic query candidate')
+          PY
+      - name: Inject diagnostics
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/test_bulk_parity.cpp')
+          text = p.read_text()
+          text = text.replace('#include <cassert>\n', '#include <cassert>\n#include <iostream>\n', 1)
+          old = '''    metal::BulkInsertOptions rollback_options;
+              rollback_options.chunk_size = 1;
+              bool rolled_back = false;
+              try {'''
+          new = '''    const auto before_rows = db->execute("SELECT id, email, score, active FROM bulk_users ORDER BY id;");
+              std::cerr << "DIAG_BULK_BEFORE=" << before_rows.rows.size() << "\\n";
+              for (const auto& row : before_rows.rows) {
+                  std::cerr << "DIAG_BULK_ROW="
+                            << metal::value_key(row.at("id")) << ","
+                            << metal::value_key(row.at("email")) << ","
+                            << metal::value_key(row.at("score")) << ","
+                            << metal::value_key(row.at("active")) << "\\n";
+              }
+              metal::BulkInsertOptions rollback_options;
+              rollback_options.chunk_size = 1;
+              bool rolled_back = false;
+              try {'''
+          if old not in text:
+              raise SystemExit('bulk diagnostic context missing')
+          text = text.replace(old, new, 1)
+          old_catch = '''    } catch (const std::runtime_error&) {
+                  rolled_back = true;
+              }
+              assert(rolled_back);'''
+          new_catch = '''    } catch (const std::exception& error) {
+                  std::cerr << "DIAG_BULK_EXCEPTION=" << error.what() << "\\n";
+                  rolled_back = true;
+              }
+              if (!rolled_back) std::cerr << "DIAG_BULK_NO_EXCEPTION\\n";
+              assert(rolled_back);'''
+          if old_catch not in text:
+              raise SystemExit('bulk catch context missing')
+          p.write_text(text.replace(old_catch, new_catch, 1))
+          PY
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DMETAL_ORM_BUILD_EXAMPLES=OFF -DMETAL_ORM_BUILD_TESTS=ON
+      - name: Build bulk test
+        run: cmake --build build --target metal-orm-bulk-parity-tests
+      - name: Run bulk test
+        run: ctest --test-dir build --output-on-failure -R '^metal-orm-bulk-parity-tests$'
