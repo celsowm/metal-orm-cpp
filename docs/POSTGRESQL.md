@@ -33,6 +33,8 @@ The PostgreSQL target is intentionally separate from `metal::orm`; consumers tha
 - affected-row reporting
 - transactions and savepoints
 - PostgreSQL schema introspection
+- PostgreSQL schema diff/synchronization for scalar column changes, constraints, indexes, primary keys and destructive drops
+- live schema synchronization coverage against PostgreSQL, including safe add-column repair, destructive column/index removal and post-migration re-introspection
 - stored procedure compilation with `CALL`, including IN, OUT and INOUT parameters
 - stored procedure execution through the common `ProcedureExecutor` capability
 - live PostgreSQL E2E coverage in CI
@@ -43,10 +45,9 @@ For PostgreSQL procedures, OUT parameters occupy their PostgreSQL-required argum
 
 PostgreSQL is now a real executable backend, but it is not yet declared fully equivalent to the SQLite coverage matrix. Remaining work is primarily breadth rather than the original backend bootstrap:
 
-1. exercise more schema-diff/synchronization operations against a live PostgreSQL service
-2. expand PostgreSQL-specific DDL/introspection edge coverage (constraints, views, indexes and destructive migrations)
-3. broaden live query/function coverage beyond the current representative E2E
-4. validate procedure overload/type-resolution edge cases and richer PostgreSQL procedure signatures
-5. audit SQLite-specific assumptions in higher-level bulk/tree/cache paths under PostgreSQL
+1. expand PostgreSQL-specific DDL/introspection edge coverage (constraints, views, indexes and destructive migrations)
+2. broaden live query/function coverage beyond the current representative E2E
+3. validate procedure overload/type-resolution edge cases and richer PostgreSQL procedure signatures
+4. audit SQLite-specific assumptions in higher-level bulk/tree/cache paths under PostgreSQL
 
 Backend-specific behavior should continue to be implemented at compiler/executor/schema boundaries rather than by rewriting generated SQL strings after compilation.
