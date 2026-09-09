@@ -44,12 +44,41 @@ const metal::DatabaseColumn& column_named(
     return *found;
 }
 
+bool has_column(const metal::DatabaseTable& table, const std::string& name) {
+    return std::any_of(
+        table.columns.begin(), table.columns.end(),
+        [&](const metal::DatabaseColumn& column) { return column.name == name; });
+}
+
+bool has_index(const metal::DatabaseTable& table, const std::string& name) {
+    return std::any_of(
+        table.indexes.begin(), table.indexes.end(),
+        [&](const metal::DatabaseIndex& index) { return index.name == name; });
+}
+
+bool plan_has_statement(const metal::SchemaPlan& plan, const std::string& text) {
+    for (const auto& change : plan.changes) {
+        for (const auto& statement : change.statements) {
+            if (statement.find(text) != std::string::npos) return true;
+        }
+    }
+    return false;
+}
+
 std::int64_t count_named(metal::PostgresExecutor& executor, const std::string& name) {
     const auto result = executor.execute(
         "SELECT COUNT(*)::BIGINT AS total FROM pg_live_records WHERE name = $1;",
         {name});
     assert(result.rows.size() == 1);
     return metal::from_value<std::int64_t>(result.rows.front().at("total"));
+}
+
+metal::IntrospectOptions live_introspection_options() {
+    return metal::IntrospectOptions{
+        .schema = std::string{"metalorm_e2e"},
+        .include_tables = {"pg_live_records"},
+        .include_views = false
+    };
 }
 
 void test_live_postgres(const std::string& connection_string) {
@@ -172,13 +201,8 @@ void test_live_postgres(const std::string& connection_string) {
     executor->rollback_transaction();
     assert(count_named(*executor, "tx-rollback") == 0);
 
-    const auto schema = metal::introspect_postgres(
-        *executor,
-        metal::IntrospectOptions{
-            .schema = std::string{"metalorm_e2e"},
-            .include_tables = {"pg_live_records"},
-            .include_views = false
-        });
+    const auto introspection_options = live_introspection_options();
+    const auto schema = metal::introspect_postgres(*executor, introspection_options);
     assert(schema.tables.size() == 1);
     const auto& table = table_named(schema, "pg_live_records");
     assert(table.primary_key == std::vector<std::string>{"id"});
@@ -194,6 +218,44 @@ void test_live_postgres(const std::string& connection_string) {
     assert(bytes.type == "bytea");
     assert(note.type == "text");
     assert(!note.not_null);
+
+    const auto expected = metal::expected_schema<PgLiveRecord>(*dialect);
+
+    executor->execute("ALTER TABLE pg_live_records DROP COLUMN note;");
+    const auto safe_plan = metal::synchronize_schema(
+        expected,
+        *executor,
+        *dialect,
+        metal::SynchronizeOptions{},
+        introspection_options);
+    assert(plan_has_statement(
+        safe_plan,
+        "ALTER TABLE \"pg_live_records\" ADD \"note\" TEXT;"));
+
+    const auto after_safe_sync = metal::introspect_postgres(*executor, introspection_options);
+    const auto& safe_table = table_named(after_safe_sync, "pg_live_records");
+    assert(has_column(safe_table, "note"));
+
+    executor->execute("ALTER TABLE pg_live_records ADD COLUMN legacy TEXT;");
+    executor->execute("CREATE INDEX pg_live_records_legacy_idx ON pg_live_records(legacy);");
+
+    const auto destructive_plan = metal::synchronize_schema(
+        expected,
+        *executor,
+        *dialect,
+        metal::SynchronizeOptions{.allow_destructive = true},
+        introspection_options);
+    assert(plan_has_statement(
+        destructive_plan,
+        "ALTER TABLE \"pg_live_records\" DROP COLUMN \"legacy\";"));
+    assert(plan_has_statement(
+        destructive_plan,
+        "DROP INDEX IF EXISTS \"pg_live_records_legacy_idx\";"));
+
+    const auto after_destructive_sync = metal::introspect_postgres(*executor, introspection_options);
+    const auto& synchronized_table = table_named(after_destructive_sync, "pg_live_records");
+    assert(!has_column(synchronized_table, "legacy"));
+    assert(!has_index(synchronized_table, "pg_live_records_legacy_idx"));
 
     executor->execute("DROP SCHEMA metalorm_e2e CASCADE;");
 }
