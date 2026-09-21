@@ -159,7 +159,9 @@ void test_tree(metal::Session& session) {
     assert(tenant1.validate().empty());
     assert(tenant1.get_descendants({1, 8}).size() == 3);
     assert(tenant1.get_leaves().size() == 2);
-    assert(tenant1.get_path({4, 5}).size() == 3);
+    const auto initial_grand = tenant1.get_node(grand_id);
+    assert(initial_grand);
+    assert(tenant1.get_path({initial_grand->lft, initial_grand->rght}).size() == 3);
 
     auto a = tenant1.get_node(a_id);
     auto b = tenant1.get_node(b_id);
