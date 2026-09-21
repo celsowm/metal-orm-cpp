@@ -38,6 +38,8 @@ The PostgreSQL target is intentionally separate from `metal::orm`; consumers tha
 - stored procedure compilation with `CALL`, including IN, OUT and INOUT parameters
 - stored procedure execution through the common `ProcedureExecutor` capability
 - live PostgreSQL E2E coverage in CI
+- PostgreSQL bulk insert/update/update-where/delete/delete-where/upsert regression scenarios, including returned rows and transactional rollback
+- PostgreSQL nested-set tree regression scenarios for scoped insert, move, detach, delete, validation and recovery; mutation SQL uses dialect-provided parameter placeholders
 
 For PostgreSQL procedures, OUT parameters occupy their PostgreSQL-required argument position as `NULL`; IN and INOUT values keep normal numbered parameter binding. PostgreSQL's returned OUT/INOUT row is exposed through the existing `ProcedureExecutionResult::out` API.
 
@@ -48,6 +50,6 @@ PostgreSQL is now a real executable backend, but it is not yet declared fully eq
 1. expand PostgreSQL-specific DDL/introspection edge coverage (constraints, views, indexes and destructive migrations)
 2. broaden live query/function coverage beyond the current representative E2E
 3. validate procedure overload/type-resolution edge cases and richer PostgreSQL procedure signatures
-4. audit SQLite-specific assumptions in higher-level bulk/tree/cache paths under PostgreSQL
+4. extend higher-level PostgreSQL coverage to cache, concurrent bulk workloads and additional tree edge cases
 
 Backend-specific behavior should continue to be implemented at compiler/executor/schema boundaries rather than by rewriting generated SQL strings after compilation.
