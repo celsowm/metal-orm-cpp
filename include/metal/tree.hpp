@@ -664,8 +664,8 @@ public:
                 sql += ", " + session_->dialect().quote_identifier(TreeQuery<T>::depth_name()) + " = " +
                        session_->dialect().quote_identifier(TreeQuery<T>::depth_name()) + " - 1";
             }
-            sql += " WHERE " + session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " > ? AND " +
-                   session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " < ?";
+            sql += " WHERE " + session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " > " + session_->dialect().placeholder(1) + " AND " +
+                   session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " < " + session_->dialect().placeholder(2);
             std::vector<Value> params{Value{node.lft}, Value{node.rght}};
             append_scope(sql, params, true);
             sql += ";";
@@ -695,8 +695,8 @@ public:
     std::size_t delete_subtree(const TreeNodeResult& node) {
         const auto width = NestedSetStrategy::subtree_width(node.lft, node.rght);
         std::string sql = "DELETE FROM " + session_->dialect().quote_identifier(reflect::table_name<T>()) +
-            " WHERE " + session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " >= ? AND " +
-            session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " <= ?";
+            " WHERE " + session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " >= " + session_->dialect().placeholder(1) + " AND " +
+            session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " <= " + session_->dialect().placeholder(2);
         std::vector<Value> params{Value{node.lft}, Value{node.rght}};
         append_scope(sql, params, true);
         sql += ";";
@@ -815,8 +815,8 @@ private:
         auto update_boundary = [&](const std::string& column) {
             std::string sql = "UPDATE " + session_->dialect().quote_identifier(reflect::table_name<T>()) +
                 " SET " + session_->dialect().quote_identifier(column) + " = " +
-                session_->dialect().quote_identifier(column) + " + ? WHERE " +
-                session_->dialect().quote_identifier(column) + " >= ?";
+                session_->dialect().quote_identifier(column) + " + " + session_->dialect().placeholder(1) + " WHERE " +
+                session_->dialect().quote_identifier(column) + " >= " + session_->dialect().placeholder(2);
             std::vector<Value> params{Value{width}, Value{point}};
             append_scope(sql, params, true);
             sql += ";";
@@ -830,8 +830,8 @@ private:
         auto update_boundary = [&](const std::string& column) {
             std::string sql = "UPDATE " + session_->dialect().quote_identifier(reflect::table_name<T>()) +
                 " SET " + session_->dialect().quote_identifier(column) + " = " +
-                session_->dialect().quote_identifier(column) + " - ? WHERE " +
-                session_->dialect().quote_identifier(column) + " > ?";
+                session_->dialect().quote_identifier(column) + " - " + session_->dialect().placeholder(1) + " WHERE " +
+                session_->dialect().quote_identifier(column) + " > " + session_->dialect().placeholder(2);
             std::vector<Value> params{Value{width}, Value{deleted_rght}};
             append_scope(sql, params, true);
             sql += ";";
@@ -856,11 +856,11 @@ private:
     void move_range(std::int64_t lft, std::int64_t rght, std::int64_t delta) {
         std::string sql = "UPDATE " + session_->dialect().quote_identifier(reflect::table_name<T>()) +
             " SET " + session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " = " +
-            session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " + ?, " +
+            session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " + " + session_->dialect().placeholder(1) + ", " +
             session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " = " +
-            session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " + ? WHERE " +
-            session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " >= ? AND " +
-            session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " <= ?";
+            session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " + " + session_->dialect().placeholder(2) + " WHERE " +
+            session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " >= " + session_->dialect().placeholder(3) + " AND " +
+            session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " <= " + session_->dialect().placeholder(4);
         std::vector<Value> params{Value{delta}, Value{delta}, Value{lft}, Value{rght}};
         append_scope(sql, params, true);
         sql += ";";
@@ -890,17 +890,20 @@ private:
         const auto restore_delta = target_lft - node.lft - isolate_delta;
         std::string sql = "UPDATE " + session_->dialect().quote_identifier(reflect::table_name<T>()) +
             " SET " + session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " = " +
-            session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " + ?, " +
+            session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " + " + session_->dialect().placeholder(1) + ", " +
             session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " = " +
-            session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " + ?";
+            session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " + " + session_->dialect().placeholder(2);
         std::vector<Value> params{Value{restore_delta}, Value{restore_delta}};
         if (!TreeQuery<T>::depth_name().empty() && depth_delta != 0) {
             sql += ", " + session_->dialect().quote_identifier(TreeQuery<T>::depth_name()) + " = " +
-                   session_->dialect().quote_identifier(TreeQuery<T>::depth_name()) + " + ?";
+                   session_->dialect().quote_identifier(TreeQuery<T>::depth_name()) + " + " +
+                   session_->dialect().placeholder(params.size() + 1);
             params.push_back(Value{depth_delta});
         }
-        sql += " WHERE " + session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " >= ? AND " +
-               session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " <= ?";
+        sql += " WHERE " + session_->dialect().quote_identifier(TreeQuery<T>::left_name()) + " >= " +
+               session_->dialect().placeholder(params.size() + 1) + " AND " +
+               session_->dialect().quote_identifier(TreeQuery<T>::right_name()) + " <= " +
+               session_->dialect().placeholder(params.size() + 2);
         params.push_back(Value{isolated_lft});
         params.push_back(Value{isolated_rght});
         append_scope(sql, params, true);
