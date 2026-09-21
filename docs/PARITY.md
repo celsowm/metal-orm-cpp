@@ -4,13 +4,13 @@ The TypeScript `celsowm/metal-orm` repository is the behavioral and architectura
 
 MetalORM C++ intentionally targets C++26 static reflection rather than carrying a compatibility layer for older C++ standards. Reflection may replace TypeScript metadata plumbing and stringly typed APIs, but it must not silently redefine ORM behavior.
 
-SQLite remains intentionally the only concrete database backend while semantic parity is completed.
+SQLite is the primary semantic-parity baseline. PostgreSQL is also an executable backend, with its own dialect, libpq executor, schema synchronization and live CI coverage; see [PostgreSQL backend](POSTGRESQL.md). Backend parity is expanded through targeted integration scenarios rather than inferred from shared interfaces.
 
 Current release: **0.0.37**.
 
 Legend:
 
-- ✅ parity for the supported SQLite execution model
+- ✅ parity for the explicitly tested execution model (SQLite unless another backend is named)
 - 🟡 implemented with an explicit remaining edge/integration gap
 - ❌ not ported
 - N/A language/runtime-specific rather than a distinct portable subsystem
