@@ -310,10 +310,19 @@ std::vector<ChunkOutcome> run_chunks(
     return outcomes;
 }
 
+inline std::string dialect_name(const Dialect& dialect) {
+    switch (dialect.family()) {
+        case DialectFamily::SQLite: return "sqlite";
+        case DialectFamily::PostgreSQL: return "postgresql";
+        default: return "generic";
+    }
+}
+
 inline BulkResult aggregate(
     std::vector<ChunkOutcome> outcomes,
     bool timing,
-    BulkStrategy strategy) {
+    BulkStrategy strategy,
+    const Dialect& dialect) {
     BulkResult result;
     result.chunks_executed = outcomes.size();
     if (timing) result.chunk_timings_ms.emplace();
@@ -329,7 +338,7 @@ inline BulkResult aggregate(
         }
     }
 
-    result.metadata = BulkResultMetadata{strategy, "sqlite", true};
+    result.metadata = BulkResultMetadata{strategy, dialect_name(dialect), true};
     return result;
 }
 
@@ -451,7 +460,7 @@ BulkResult bulk_insert(
                     0.0
                 };
             });
-        return bulk_detail::aggregate(std::move(outcomes), options.timing, BulkStrategy::Batch);
+        return bulk_detail::aggregate(std::move(outcomes), options.timing, BulkStrategy::Batch, session.dialect());
     });
 }
 
@@ -515,7 +524,7 @@ BulkResult bulk_update(
                 }
                 return outcome;
             });
-        return bulk_detail::aggregate(std::move(outcomes), options.timing, BulkStrategy::Individual);
+        return bulk_detail::aggregate(std::move(outcomes), options.timing, BulkStrategy::Individual, session.dialect());
     });
 }
 
@@ -563,7 +572,7 @@ BulkResult bulk_update_where(
                     0.0
                 };
             });
-        return bulk_detail::aggregate(std::move(outcomes), options.timing, BulkStrategy::WhereIn);
+        return bulk_detail::aggregate(std::move(outcomes), options.timing, BulkStrategy::WhereIn, session.dialect());
     });
 }
 
@@ -594,7 +603,7 @@ BulkResult bulk_delete(
                 (void)session.executor().execute(compiled.sql, compiled.params);
                 return bulk_detail::ChunkOutcome{end - begin, {}, 0.0};
             });
-        return bulk_detail::aggregate(std::move(outcomes), options.timing, BulkStrategy::WhereIn);
+        return bulk_detail::aggregate(std::move(outcomes), options.timing, BulkStrategy::WhereIn, session.dialect());
     });
 }
 
@@ -612,7 +621,7 @@ BulkResult bulk_delete_where(
         (void)session.executor().execute(compiled.sql, compiled.params);
         BulkResult result;
         result.chunks_executed = 1;
-        result.metadata = BulkResultMetadata{BulkStrategy::WhereIn, "sqlite", true};
+        result.metadata = BulkResultMetadata{BulkStrategy::WhereIn, bulk_detail::dialect_name(session.dialect()), true};
         return result;
     };
 
@@ -693,7 +702,7 @@ BulkResult bulk_upsert(
                     0.0
                 };
             });
-        return bulk_detail::aggregate(std::move(outcomes), options.timing, BulkStrategy::Batch);
+        return bulk_detail::aggregate(std::move(outcomes), options.timing, BulkStrategy::Batch, session.dialect());
     });
 }
 
